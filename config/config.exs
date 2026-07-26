@@ -8,9 +8,18 @@
 import Config
 
 config :hospitality_coms,
+  # HospitalityComs.EmployerRepo addresses the same database and is
+  # deliberately excluded: migrations run through the primary repo alone.
   ecto_repos: [HospitalityComs.Repo],
   generators: [timestamp_type: :utc_datetime, binary_id: true],
   clock: HospitalityComs.Clock.System
+
+# The employer zone acts as a Postgres role that will hold no privilege on
+# person-zone tables. The role is assumed on connection rather than logged in
+# as, so there is no second credential to manage.
+config :hospitality_coms, HospitalityComs.EmployerRepo,
+  after_connect: {Postgrex, :query!, ["SET ROLE employer_role", []]},
+  priv: "priv/employer_repo"
 
 # Configure the endpoint
 config :hospitality_coms, HospitalityComsWeb.Endpoint,

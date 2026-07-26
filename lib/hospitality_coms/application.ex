@@ -10,6 +10,7 @@ defmodule HospitalityComs.Application do
     children = [
       HospitalityComsWeb.Telemetry,
       HospitalityComs.Repo,
+      HospitalityComs.EmployerRepo,
       {DNSCluster, query: Application.get_env(:hospitality_coms, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: HospitalityComs.PubSub},
       # Start a worker by calling: HospitalityComs.Worker.start_link(arg)

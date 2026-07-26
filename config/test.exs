@@ -13,6 +13,14 @@ config :hospitality_coms, HospitalityComs.Repo,
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
 
+config :hospitality_coms, HospitalityComs.EmployerRepo,
+  username: "postgres",
+  password: "postgres",
+  hostname: "localhost",
+  database: "hospitality_coms_test#{System.get_env("MIX_TEST_PARTITION")}",
+  pool: Ecto.Adapters.SQL.Sandbox,
+  pool_size: System.schedulers_online() * 2
+
 # Tests assert on boundary instants rather than approximating them.
 config :hospitality_coms, clock: HospitalityComs.Clock.Offset
 
