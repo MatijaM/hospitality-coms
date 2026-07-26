@@ -44,7 +44,7 @@ In dev, `/dev/mailbox` is the only way to read a magic link — nothing renders 
 - `DateTime.utc_now/*` is flagged anywhere outside the `HospitalityComs.Clock` namespace.
 - `Clock.now/0` is flagged outside the modules listed in the check's `:boundary_modules` parameter in `.credo.exs`. That list currently holds one entry, `HospitalityComsWeb.PersonAuth`, which is the HTTP boundary. When you build another — a channel event handler, a job — add it there rather than working around the check.
 
-Everywhere else, the instant arrives on the scope struct: `%HospitalityComs.Accounts.Scope{person: _, now: _}`, assigned as `:current_scope` by `PersonAuth.fetch_person_scope/2`.
+Everywhere else, the instant arrives on the scope struct — `%HospitalityComs.Accounts.PersonScope{person: _, now: _}`, assigned as `:current_scope` by `PersonAuth.fetch_person_scope/2`, or `%HospitalityComs.Accounts.EmployerScope{employer_id: _, now: _}`. `EmployerRepo`'s transaction wrapper takes the instant off the scope for the same reason; a repo is not a unit of work, so it is not a boundary module.
 
 `Ecto.Query.ago/2` and `from_now/2` are banned for the same reason `DateTime.utc_now/0` is: they expand to `DateTime.utc_now()` inside the query macro, where the offsettable clock cannot move them. `ClockAuthority` flags the call itself, both imported and fully qualified, because by expansion time it is too late to see. Compare against an instant taken from the scope.
 
@@ -55,9 +55,19 @@ Everywhere else, the instant arrives on the scope struct: `%HospitalityComs.Acco
 Two repos, one database.
 
 - `HospitalityComs.Repo` — the application's own role. The only repo in `:ecto_repos`, so migrations run through it alone.
-- `HospitalityComs.EmployerRepo` — assumes the Postgres role `employer_role` via `after_connect`. The zone grants that give the role its asymmetry, and the transaction wrapper that scopes it, are not built yet.
+- `HospitalityComs.EmployerRepo` — assumes the Postgres role `employer_role` via `after_connect`. Every read goes through `EmployerRepo.scoped_transaction/2`, which writes `app.employer_id` and `app.now` transaction-locally; an operation outside it raises `EmployerRepo.UnscopedError`, and a query reaching a person-zone table raises `EmployerRepo.ZoneViolationError` before Postgres is asked.
 
 `employer_role` and `person_role` are created by `priv/repo/migrations/*_create_postgres_roles.exs`. Roles are cluster-global, not database-local; a test that drops one must run inside the sandbox transaction so it rolls back.
+
+Grants are database-local while roles are not, so one privilege granted to `employer_role` in *any* database on the cluster makes `DROP ROLE employer_role` fail in every other — including the rollback `PostgresRolesTest` asserts on. `*_grant_zones.exs` deliberately creates no such dependency. The first migration that grants the employer zone real table privileges has to reckon with that test rather than discover it.
+
+## Zones
+
+`HospitalityComs.Zones` classifies every Ecto schema as person zone, employer zone, or shared, and `ZonesTest` fails on any schema in none of them. Adding a table is not finished until it is classified. Table names derive from `__schema__(:source)`; do not write a second list.
+
+The boundary's proof suite is `test/hospitality_coms/boundary_test.exs`, with `boundary_lifetime_test.exs` holding the parts that cannot be asserted inside the sandbox — there, `EmployerRepo`'s transaction is a savepoint inside the test's own, so a `SET LOCAL` survives its commit and the production lifetime is not reproduced. Measured: with the wrapper writing session-level settings instead, the sandboxed file still passes everything and the non-sandboxed one fails.
+
+`employer_role`'s lack of privilege on `people` is Postgres default-denying as much as it is the `REVOKE`. Every assertion in that suite that could pass for that reason carries a control that fails when it does; keep that property when extending it.
 
 ## Authentication
 
