@@ -10,6 +10,11 @@ config :hospitality_coms, HospitalityComs.Repo,
   show_sensitive_data_on_connection_error: true,
   pool_size: 10
 
+# The demo needs to walk an engagement through its lifecycle without waiting
+# for wall-clock time. This implementation does not exist in the production
+# build.
+config :hospitality_coms, clock: HospitalityComs.Clock.Offset
+
 # For development, we disable any cache and enable
 # debugging and code reloading.
 #

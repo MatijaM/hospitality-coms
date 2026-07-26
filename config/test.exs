@@ -13,6 +13,9 @@ config :hospitality_coms, HospitalityComs.Repo,
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
 
+# Tests assert on boundary instants rather than approximating them.
+config :hospitality_coms, clock: HospitalityComs.Clock.Offset
+
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
 config :hospitality_coms, HospitalityComsWeb.Endpoint,

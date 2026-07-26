@@ -9,7 +9,8 @@ import Config
 
 config :hospitality_coms,
   ecto_repos: [HospitalityComs.Repo],
-  generators: [timestamp_type: :utc_datetime, binary_id: true]
+  generators: [timestamp_type: :utc_datetime, binary_id: true],
+  clock: HospitalityComs.Clock.System
 
 # Configure the endpoint
 config :hospitality_coms, HospitalityComsWeb.Endpoint,

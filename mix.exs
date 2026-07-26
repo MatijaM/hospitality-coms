@@ -15,7 +15,10 @@ defmodule HospitalityComs.MixProject do
       dialyzer: [
         plt_local_path: "priv/plts",
         plt_core_path: "priv/plts",
-        plt_add_apps: [:mix, :ex_unit]
+        ignore_warnings: ".dialyzer_ignore.exs",
+        # :credo is a build-time dependency, but the project's own checks in
+        # dev_support are analysed alongside the application.
+        plt_add_apps: [:mix, :ex_unit, :credo]
       ]
     ]
   end
@@ -38,10 +41,12 @@ defmodule HospitalityComs.MixProject do
 
   # Specifies which paths to compile per environment.
   #
-  # `credo_checks` holds project-local Credo checks. It is deliberately outside
-  # `lib` so the production build never compiles a module that depends on Credo.
-  defp elixirc_paths(:test), do: ["lib", "test/support", "credo_checks"]
-  defp elixirc_paths(:dev), do: ["lib", "credo_checks"]
+  # `dev_support` holds modules that must not reach production: the offsettable
+  # clock, whose demo control could otherwise trigger irreversible retention
+  # deletion, and the project's own Credo checks, which depend on a dev-only
+  # package. Excluding the path is what makes their absence structural.
+  defp elixirc_paths(:test), do: ["lib", "dev_support", "test/support"]
+  defp elixirc_paths(:dev), do: ["lib", "dev_support"]
   defp elixirc_paths(_), do: ["lib"]
 
   # Specifies your project dependencies.
