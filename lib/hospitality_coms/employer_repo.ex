@@ -117,22 +117,38 @@ defmodule HospitalityComs.EmployerRepo do
     transact(fn -> run_scoped(scope, fun) end)
   end
 
-  @doc """
-  The scope the current process is running under, if it is inside the wrapper.
-  """
-  @spec current_scope() :: EmployerScope.t() | nil
-  def current_scope, do: Process.get(@scope_key)
+  @typedoc "The operations Ecto invokes `c:Ecto.Repo.default_options/1` for."
+  @type operation() ::
+          :all
+          | :delete
+          | :delete_all
+          | :insert
+          | :insert_all
+          | :insert_or_update
+          | :preload
+          | :reload
+          | :stream
+          | :transaction
+          | :update
+          | :update_all
 
   @doc false
   @impl true
+  @spec default_options(operation()) :: keyword()
   def default_options(:transaction), do: []
 
   def default_options(operation) do
-    operation |> permitted?() |> allow_or_refuse(operation)
+    operation |> scoped?() |> allow_or_refuse(operation)
   end
 
   @doc false
   @impl true
+  @spec prepare_query(
+          :all | :update_all | :delete_all | :stream | :insert_all,
+          Ecto.Query.t(),
+          keyword()
+        ) ::
+          {Ecto.Query.t(), keyword()}
   def prepare_query(_operation, query, opts) do
     query |> person_zone_reach() |> allow_or_refuse_query(query, opts)
   end
@@ -181,10 +197,10 @@ defmodule HospitalityComs.EmployerRepo do
 
   ## The unscoped guard
 
-  @spec permitted?(atom()) :: boolean()
-  defp permitted?(_operation), do: match?(%EmployerScope{}, Process.get(@scope_key))
+  @spec scoped?(operation()) :: boolean()
+  defp scoped?(_operation), do: match?(%EmployerScope{}, Process.get(@scope_key))
 
-  @spec allow_or_refuse(boolean(), atom()) :: keyword()
+  @spec allow_or_refuse(boolean(), operation()) :: keyword()
   defp allow_or_refuse(true, _operation), do: []
 
   defp allow_or_refuse(false, operation) do

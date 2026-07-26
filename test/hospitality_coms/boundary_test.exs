@@ -363,6 +363,27 @@ defmodule HospitalityComs.BoundaryTest do
       assert error.message =~ "person zone"
     end
 
+    test "does not see a write, which Postgres refuses instead" do
+      # The documented hole, asserted rather than described. Ecto has no
+      # insert-path hook that sees a table, so this statement is sent — and
+      # refused by the grant tier, with a message about the connection's role
+      # rather than about the zone. This is what it looks like when the only
+      # tier that is a guarantee is the one doing the work.
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+      stamped_at = DateTime.truncate(@now, :second)
+
+      assert_raise Postgrex.Error, ~r/permission denied for table people/, fn ->
+        EmployerRepo.scoped_transaction(scope, fn _scope ->
+          {:ok,
+           EmployerRepo.insert!(%Person{
+             email: "smuggled@example.com",
+             inserted_at: stamped_at,
+             updated_at: stamped_at
+           })}
+        end)
+      end
+    end
+
     test "does not refuse the same query issued through the person zone's own repo" do
       # Which is what says the query is well formed and the refusal above is the
       # boundary rather than a typo.
