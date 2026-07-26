@@ -151,4 +151,84 @@ defmodule HospitalityComs.Credo.Check.ClockAuthorityTest do
       |> refute_issues()
     end
   end
+
+  describe "Ecto.Query.ago/2 and from_now/2" do
+    test "ago/2 is flagged" do
+      """
+      defmodule HospitalityComs.Accounts.PersonToken do
+        import Ecto.Query
+
+        def live(query) do
+          from t in query, where: t.inserted_at > ago(14, "day")
+        end
+      end
+      """
+      |> to_source_file()
+      |> run_check(ClockAuthority)
+      |> assert_issue(fn issue ->
+        assert issue.trigger == "ago"
+        assert issue.message =~ "unit of work"
+      end)
+    end
+
+    test "from_now/2 is flagged" do
+      """
+      defmodule HospitalityComs.Engagements do
+        import Ecto.Query
+
+        def upcoming(query) do
+          from e in query, where: e.starts_at < from_now(7, "day")
+        end
+      end
+      """
+      |> to_source_file()
+      |> run_check(ClockAuthority)
+      |> assert_issue(fn issue -> assert issue.trigger == "from_now" end)
+    end
+
+    test "is flagged when called by its fully qualified name" do
+      """
+      defmodule HospitalityComs.Engagements do
+        def live(query) do
+          Ecto.Query.where(query, [e], e.inserted_at > Ecto.Query.ago(14, "day"))
+        end
+      end
+      """
+      |> to_source_file()
+      |> run_check(ClockAuthority)
+      |> assert_issue(fn issue -> assert issue.trigger == "ago" end)
+    end
+
+    test "is not flagged when the boundary is an instant the caller passed in" do
+      """
+      defmodule HospitalityComs.Accounts.PersonToken do
+        import Ecto.Query
+
+        def live(query, horizon) do
+          from t in query, where: t.inserted_at > ^horizon
+        end
+      end
+      """
+      |> to_source_file()
+      |> run_check(ClockAuthority)
+      |> refute_issues()
+    end
+
+    test "does not flag unrelated two-argument calls" do
+      """
+      defmodule HospitalityComs.Engagements do
+        def summarise(entries, scope) do
+          entries
+          |> Enum.take(2)
+          |> overlap(scope.now)
+        end
+
+        defp overlap(entries, now), do: Enum.filter(entries, &covers?(&1, now))
+      end
+      """
+      |> to_source_file()
+      |> run_check(ClockAuthority)
+      |> refute_issues()
+    end
+  end
 end

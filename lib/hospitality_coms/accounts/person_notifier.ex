@@ -113,7 +113,7 @@ defmodule HospitalityComs.Accounts.PersonNotifier do
   defp delivered({:ok, _metadata}, email), do: {:ok, email}
 
   defp delivered({:error, reason}, email) do
-    Logger.error("mail delivery failed", subject: email.subject, reason: inspect(reason))
+    Logger.error("mail delivery failed for #{email.subject}: #{inspect(reason)}")
     {:error, :delivery_failed}
   end
 end

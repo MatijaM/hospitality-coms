@@ -25,6 +25,8 @@ defmodule HospitalityComsWeb.ErrorEnvelope do
   `HospitalityComsWeb.ErrorJSON` — builds its body here and nowhere else.
   """
 
+  alias Plug.Conn.Status
+
   @type fields() :: %{optional(atom()) => [String.t()]}
   @type t() :: %{error: %{code: String.t(), message: String.t()}}
   @type with_fields() :: %{
@@ -56,6 +58,6 @@ defmodule HospitalityComsWeb.ErrorEnvelope do
   """
   @spec for_status(100..599) :: t()
   def for_status(status) when is_integer(status) do
-    new(Plug.Conn.Status.reason_atom(status), Plug.Conn.Status.reason_phrase(status))
+    new(Status.reason_atom(status), Status.reason_phrase(status))
   end
 end

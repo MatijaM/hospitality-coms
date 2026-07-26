@@ -153,37 +153,39 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
   # of its own.
   defp hold_row(token_id) do
     test = self()
-
-    holder =
-      Task.async(fn ->
-        with_connection(fn ->
-          Repo.transaction(fn ->
-            Repo.one!(from(t in PersonToken, where: t.id == ^token_id, lock: "FOR UPDATE"))
-            send(test, {:holding, self()})
-            receive do: (:release -> :ok)
-          end)
-        end)
-      end)
+    holder = Task.async(fn -> with_connection(fn -> lock_until_released(token_id, test) end) end)
 
     assert_receive {:holding, _pid}, @barrier_timeout
     holder
+  end
+
+  defp lock_until_released(token_id, test) do
+    Repo.transaction(fn ->
+      Repo.one!(from(t in PersonToken, where: t.id == ^token_id, lock: "FOR UPDATE"))
+      hold(test)
+    end)
   end
 
   # Opens a transaction that inserts `email` and does not commit, so the next
   # process to insert the same address blocks on the unique index.
   defp start_uncommitted_registration(email) do
     test = self()
+    winner = Task.async(fn -> with_connection(fn -> insert_until_released(email, test) end) end)
 
-    Task.async(fn ->
-      with_connection(fn ->
-        Repo.transaction(fn ->
-          Repo.insert!(Ecto.Changeset.change(%Person{}, person_attrs(email)))
-          send(test, {:holding, self()})
-          receive do: (:release -> :ok)
-        end)
-      end)
+    assert_receive {:holding, _pid}, @barrier_timeout
+    winner
+  end
+
+  defp insert_until_released(email, test) do
+    Repo.transaction(fn ->
+      Repo.insert!(Ecto.Changeset.change(%Person{}, person_attrs(email)))
+      hold(test)
     end)
-    |> tap(fn _task -> assert_receive {:holding, _pid}, @barrier_timeout end)
+  end
+
+  defp hold(test) do
+    send(test, {:holding, self()})
+    receive do: (:release -> :ok)
   end
 
   defp release(%Task{pid: pid} = holder) do
