@@ -112,6 +112,17 @@ defmodule HospitalityComs.Zones do
   end
 
   @doc """
+  Schemas in none of the three zones.
+
+  An empty list is the classification being total. Takes the list to check so
+  that the test asserting it is empty and the test asserting it catches
+  something can run the same code — a totality check nobody has ever seen
+  return a non-empty list is a check nobody has tested.
+  """
+  @spec unclassified([module()]) :: [module()]
+  def unclassified(schemas \\ all_schemas()), do: schemas -- classified()
+
+  @doc """
   The zone a schema belongs to.
 
   Returns `{:error, :unclassified}` for anything nobody has placed, which is

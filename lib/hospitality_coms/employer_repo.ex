@@ -249,12 +249,18 @@ defmodule HospitalityComs.EmployerRepo do
       Enum.flat_map(nested_queries(query), &sources/1)
   end
 
-  @spec resolve_bindings([Ecto.Query.FromExpr.t() | Ecto.Query.JoinExpr.t()]) :: [term()]
+  # One entry of a query's binding list: `Ecto.Query.FromExpr` or
+  # `Ecto.Query.JoinExpr`. Neither exports a `t/0`, and naming the structs in a
+  # spec is what `Credo.Check.Warning.SpecWithStruct` exists to stop, so the
+  # shape is named here rather than at each call.
+  @typep binding_expr() :: struct()
+
+  @spec resolve_bindings([binding_expr()]) :: [term()]
   defp resolve_bindings(exprs) do
     Enum.reduce(exprs, [], fn expr, resolved -> resolved ++ [binding(expr, resolved)] end)
   end
 
-  @spec binding(map(), [term()]) :: term()
+  @spec binding(binding_expr(), [term()]) :: term()
   defp binding(%{source: nil, assoc: {index, field}}, resolved) do
     resolved |> Enum.at(index) |> association_source(field)
   end

@@ -57,6 +57,9 @@ defmodule HospitalityComs.BoundaryTest do
 
   @scoping_functions ["app_current_employer_id()", "app_current_instant()"]
 
+  # The predicate U9's view will carry, written the way a view carries it.
+  @employer_filter "app_current_employer_id()::text"
+
   # Migration files are not compiled into the application, so the module has to
   # be loaded before the migrator can be handed it directly — unless the
   # migrator has already loaded it on the way in, which is what happens the
@@ -241,6 +244,49 @@ defmodule HospitalityComs.BoundaryTest do
       assert_raise Postgrex.Error, ~r/app\.now is not set/, fn ->
         EmployerRepo.query!("SELECT app_current_instant()", [])
       end
+    end
+  end
+
+  describe "the shape the employer-visible view is built on" do
+    # U9 owns the view itself. What it will filter on exists now, because the
+    # guarantee is this unit's: an escaped read must raise rather than resolve
+    # to NULL and return no rows, which is indistinguishable from a worker who
+    # has disclosed nothing.
+    test "a read outside the wrapper raises where there is anything to return" do
+      unscoped = "SELECT c.relname FROM pg_class c WHERE c.oid::text = #{@employer_filter}"
+
+      assert_raise Postgrex.Error, ~r/app\.employer_id is not set/, fn ->
+        EmployerRepo.query!(unscoped, [])
+      end
+    end
+
+    test "a read outside the wrapper that scans nothing returns nothing" do
+      # The honest edge of the guarantee, pinned so U9 inherits it as a known
+      # fact rather than as a surprise. Postgres evaluates the scoping function
+      # per row, so a scan that yields none never calls it and the statement
+      # succeeds — with an empty result, which is what a correctly scoped read
+      # of the same nothing would also return. The failure mode the one-argument
+      # `current_setting` exists to prevent is a *populated* relation filtered
+      # down to nothing by a NULL, and that is the test above.
+      empty = """
+      SELECT t.x FROM (SELECT 1 AS x WHERE false) t WHERE t.x::text = #{@employer_filter}
+      """
+
+      assert %{rows: []} = EmployerRepo.query!(empty, [])
+    end
+
+    test "a read inside the wrapper resolves the scope's employer" do
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert {:ok, [[resolved]]} =
+               EmployerRepo.scoped_transaction(scope, fn _scope ->
+                 %{rows: rows} =
+                   EmployerRepo.query!("SELECT app_current_employer_id()::text", [])
+
+                 {:ok, rows}
+               end)
+
+      assert resolved == scope.employer_id
     end
   end
 

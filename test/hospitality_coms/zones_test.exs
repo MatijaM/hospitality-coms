@@ -23,7 +23,7 @@ defmodule HospitalityComs.ZonesTest do
 
   describe "totality" do
     test "every Ecto schema compiled into the application is classified" do
-      unclassified = Zones.all_schemas() -- Zones.classified()
+      unclassified = Zones.unclassified()
 
       assert unclassified == [],
              """
@@ -33,6 +33,17 @@ defmodule HospitalityComs.ZonesTest do
              side of the boundary it sits on. Classify them in \
              HospitalityComs.Zones.
              """
+    end
+
+    test "an unclassified schema is what the check above would report" do
+      # The control, running the same function the assertion above runs. A
+      # totality check nobody has watched return a non-empty list is a check
+      # nobody has tested. `Ghost` cannot drive `all_schemas/0` — a schema
+      # defined in a test file is loaded but not listed in the application — so
+      # the list is handed in instead.
+      assert Zones.unclassified([Ghost]) == [Ghost]
+      assert Zones.unclassified([Person, PersonToken]) == []
+      assert Zones.unclassified([Person, Ghost]) == [Ghost]
     end
 
     test "the schema discovery it rests on actually finds schemas" do
@@ -47,6 +58,16 @@ defmodule HospitalityComs.ZonesTest do
 
     test "nothing is classified that is not a schema" do
       assert Zones.classified() -- Zones.all_schemas() == []
+    end
+  end
+
+  defmodule Ghost do
+    @moduledoc "A schema nobody classified, which is the state every new one starts in."
+
+    use Ecto.Schema
+
+    @primary_key {:id, :binary_id, autogenerate: true}
+    schema "ghosts" do
     end
   end
 

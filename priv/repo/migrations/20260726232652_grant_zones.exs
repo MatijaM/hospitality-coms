@@ -51,6 +51,14 @@ defmodule HospitalityComs.Repo.Migrations.GrantZones do
   after the first employer request — so the two are collapsed into one
   exception with one message.
 
+  One limit on that, measured rather than assumed, and U9 inherits it. Postgres
+  evaluates a `STABLE` function in a qualifier per row, so a scan that yields no
+  rows never calls it and the statement succeeds with an empty result. An
+  escaped read of a *populated* relation raises; an escaped read of an empty one
+  returns nothing, which is what a correctly scoped read of the same nothing
+  would also return. The failure this prevents — a NULL silently filtering a
+  populated table down to zero rows — is prevented.
+
   They are left with the `EXECUTE` that Postgres grants every new function to
   `PUBLIC`, and that is deliberate. Revoking it and granting `EXECUTE` to
   `employer_role` reads better and buys nothing: both functions do no more than
