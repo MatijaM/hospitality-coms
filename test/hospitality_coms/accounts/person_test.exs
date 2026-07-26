@@ -21,6 +21,7 @@ defmodule HospitalityComs.Accounts.PersonTest do
   alias HospitalityComs.Accounts.Person
 
   @erased_at ~U[2026-03-01 12:00:00Z]
+  @now ~U[2026-03-01 12:00:00.000000Z]
 
   defp insert_person(attrs) do
     %Person{}
@@ -75,7 +76,7 @@ defmodule HospitalityComs.Accounts.PersonTest do
     test "rejects a change that does not change anything" do
       person = insert_person!(%{email: "same@example.com"})
 
-      changeset = Person.email_changeset(person, %{email: "same@example.com"})
+      changeset = Person.email_changeset(person, %{email: "same@example.com"}, @now)
 
       assert %{email: ["did not change"]} = errors_on(changeset)
     end
@@ -84,7 +85,9 @@ defmodule HospitalityComs.Accounts.PersonTest do
       insert_person!(%{email: "taken@example.com"})
 
       changeset =
-        Person.email_changeset(%Person{}, %{email: "taken@example.com"}, validate_unique: false)
+        Person.email_changeset(%Person{}, %{email: "taken@example.com"}, @now,
+          validate_unique: false
+        )
 
       assert changeset.valid?
     end

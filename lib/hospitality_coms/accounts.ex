@@ -74,17 +74,18 @@ defmodule HospitalityComs.Accounts do
 
   ## Examples
 
-      iex> register_person(%{email: "foo@example.com"})
+      iex> register_person(%{email: "foo@example.com"}, now)
       {:ok, %Person{}}
 
-      iex> register_person(%{email: "not an address"})
+      iex> register_person(%{email: "not an address"}, now)
       {:error, %Ecto.Changeset{}}
 
   """
-  @spec register_person(map()) :: {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
-  def register_person(attrs) do
+  @spec register_person(map(), DateTime.t()) ::
+          {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
+  def register_person(attrs, %DateTime{} = now) do
     %Person{}
-    |> Person.email_changeset(attrs)
+    |> Person.email_changeset(attrs, now)
     |> Repo.insert(mode: :savepoint)
   end
 
@@ -126,7 +127,7 @@ defmodule HospitalityComs.Accounts do
   @spec login_request_multi(String.t(), DateTime.t()) :: Multi.t()
   defp login_request_multi(email, now) do
     Multi.new()
-    |> Multi.run(:person, fn _repo, _changes -> fetch_or_register_person(email) end)
+    |> Multi.run(:person, fn _repo, _changes -> fetch_or_register_person(email, now) end)
     |> Multi.run(:login_token, fn repo, %{person: person} ->
       insert_login_token(repo, person, now)
     end)
@@ -166,21 +167,21 @@ defmodule HospitalityComs.Accounts do
     with {:ok, _row} <- repo.insert(person_token), do: {:ok, encoded_token}
   end
 
-  @spec fetch_or_register_person(String.t()) ::
+  @spec fetch_or_register_person(String.t(), DateTime.t()) ::
           {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
-  defp fetch_or_register_person(email) do
+  defp fetch_or_register_person(email, now) do
     email
     |> get_person_by_email()
-    |> registered_or_register(email)
+    |> registered_or_register(email, now)
   end
 
-  @spec registered_or_register(Person.t() | nil, String.t()) ::
+  @spec registered_or_register(Person.t() | nil, String.t(), DateTime.t()) ::
           {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
-  defp registered_or_register(%Person{} = person, _email), do: {:ok, person}
+  defp registered_or_register(%Person{} = person, _email, _now), do: {:ok, person}
 
-  defp registered_or_register(nil, email) do
+  defp registered_or_register(nil, email, now) do
     %{email: email}
-    |> register_person()
+    |> register_person(now)
     |> or_whoever_won_the_race(email)
   end
 
@@ -248,7 +249,9 @@ defmodule HospitalityComs.Accounts do
       with {:ok, query} <- PersonToken.verify_change_email_token_query(token, context, now),
            %PersonToken{sent_to: email} <- Repo.one(query),
            {:ok, result} <-
-             update_person_and_delete_all_tokens(Person.email_changeset(person, %{email: email})) do
+             update_person_and_delete_all_tokens(
+               Person.email_changeset(person, %{email: email}, now)
+             ) do
         {:ok, result}
       else
         _error -> {:error, :transaction_aborted}

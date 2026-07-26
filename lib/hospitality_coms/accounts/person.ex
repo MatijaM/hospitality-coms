@@ -17,6 +17,15 @@ defmodule HospitalityComs.Accounts.Person do
   changeset were removed rather than left unreachable: no route can set a
   password once the HTML layer is gone, and an unreachable credential path in
   an auth module is a liability, not an option.
+
+  Every changeset here takes the unit of work's instant and stamps
+  `inserted_at` and `updated_at` from it (KTD5). Ecto's `timestamps()`
+  autogenerate would otherwise call `DateTime.utc_now/0` from inside Ecto,
+  which is beyond the reach of both the clock and the check that guards it —
+  so `people` would ignore the injected instant while `people_tokens`, which
+  stamps explicitly, honoured it. Two tables disagreeing about when the same
+  request happened is not a rounding error; it is the thing the single-instant
+  rule exists to prevent.
   """
 
   use Ecto.Schema
@@ -48,7 +57,7 @@ defmodule HospitalityComs.Accounts.Person do
         }
 
   @doc """
-  A person changeset for registering or changing the email.
+  A person changeset for registering or changing the email, stamped from `now`.
 
   It requires the email to change otherwise an error is added.
 
@@ -57,11 +66,12 @@ defmodule HospitalityComs.Accounts.Person do
     * `:validate_unique` - Set to false if you don't want to validate the
       uniqueness of the email. Defaults to `true`.
   """
-  @spec email_changeset(t(), map(), keyword()) :: Ecto.Changeset.t(t())
-  def email_changeset(person, attrs, opts \\ []) do
+  @spec email_changeset(t(), map(), DateTime.t(), keyword()) :: Ecto.Changeset.t(t())
+  def email_changeset(person, attrs, %DateTime{} = now, opts \\ []) do
     person
     |> cast(attrs, [:email])
     |> validate_email(opts)
+    |> stamp(now)
   end
 
   @spec validate_email(Ecto.Changeset.t(t()), keyword()) :: Ecto.Changeset.t(t())
@@ -103,6 +113,23 @@ defmodule HospitalityComs.Accounts.Person do
   """
   @spec confirm_changeset(t(), DateTime.t()) :: Ecto.Changeset.t(t())
   def confirm_changeset(person, %DateTime{} = now) do
-    change(person, confirmed_at: DateTime.truncate(now, :second))
+    person
+    |> change(confirmed_at: DateTime.truncate(now, :second))
+    |> stamp(now)
+  end
+
+  # A row that has never been inserted gets both stamps; one that has keeps the
+  # `inserted_at` it was born with.
+  @spec stamp(Ecto.Changeset.t(t()), DateTime.t()) :: Ecto.Changeset.t(t())
+  defp stamp(%Ecto.Changeset{data: %__MODULE__{inserted_at: nil}} = changeset, now) do
+    stamped_at = DateTime.truncate(now, :second)
+
+    changeset
+    |> put_change(:inserted_at, stamped_at)
+    |> put_change(:updated_at, stamped_at)
+  end
+
+  defp stamp(changeset, now) do
+    put_change(changeset, :updated_at, DateTime.truncate(now, :second))
   end
 end

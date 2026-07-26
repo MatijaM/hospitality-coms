@@ -32,19 +32,19 @@ defmodule HospitalityComs.AccountsFixtures do
     Enum.into(attrs, %{email: unique_person_email()})
   end
 
-  @spec unconfirmed_person_fixture(map()) :: Person.t()
-  def unconfirmed_person_fixture(attrs \\ %{}) do
+  @spec unconfirmed_person_fixture(map(), DateTime.t()) :: Person.t()
+  def unconfirmed_person_fixture(attrs \\ %{}, now \\ fixed_instant()) do
     {:ok, person} =
       attrs
       |> valid_person_attributes()
-      |> Accounts.register_person()
+      |> Accounts.register_person(now)
 
     person
   end
 
   @spec person_fixture(map(), DateTime.t()) :: Person.t()
   def person_fixture(attrs \\ %{}, now \\ fixed_instant()) do
-    person = unconfirmed_person_fixture(attrs)
+    person = unconfirmed_person_fixture(attrs, now)
 
     token =
       extract_person_token(fn url ->

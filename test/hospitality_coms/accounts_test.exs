@@ -46,38 +46,52 @@ defmodule HospitalityComs.AccountsTest do
 
   describe "register_person/1" do
     test "requires an email" do
-      {:error, changeset} = Accounts.register_person(%{})
+      {:error, changeset} = Accounts.register_person(%{}, @now)
 
       assert %{email: ["can't be blank"]} = errors_on(changeset)
     end
 
     test "validates the email's shape and length" do
-      {:error, changeset} = Accounts.register_person(%{email: "not valid"})
+      {:error, changeset} = Accounts.register_person(%{email: "not valid"}, @now)
       assert %{email: ["must have the @ sign and no spaces"]} = errors_on(changeset)
 
       too_long = String.duplicate("a", 160) <> "@example.com"
-      {:error, changeset} = Accounts.register_person(%{email: too_long})
+      {:error, changeset} = Accounts.register_person(%{email: too_long}, @now)
       assert "should be at most 160 character(s)" in errors_on(changeset).email
     end
 
     test "refuses an address a live person already holds" do
       %{email: email} = person_fixture()
 
-      {:error, changeset} = Accounts.register_person(%{email: email})
+      {:error, changeset} = Accounts.register_person(%{email: email}, @now)
       assert "has already been taken" in errors_on(changeset).email
 
-      {:error, changeset} = Accounts.register_person(%{email: String.upcase(email)})
+      {:error, changeset} = Accounts.register_person(%{email: String.upcase(email)}, @now)
       assert "has already been taken" in errors_on(changeset).email
     end
 
     test "registers people without a password and unconfirmed" do
       email = unique_person_email()
-      {:ok, person} = Accounts.register_person(valid_person_attributes(%{email: email}))
+      {:ok, person} = Accounts.register_person(valid_person_attributes(%{email: email}), @now)
 
       assert person.email == email
       assert is_nil(person.confirmed_at)
       assert is_nil(person.erased_at)
       refute Map.has_key?(person, :hashed_password)
+    end
+
+    test "stamps the row from the unit of work's instant, not from the wall" do
+      {:ok, person} = Accounts.register_person(valid_person_attributes(), @now)
+      stamped_at = DateTime.truncate(@now, :second)
+
+      # Ecto's own `timestamps()` autogenerate calls `DateTime.utc_now/0`
+      # inside Ecto, where neither the clock nor its Credo check can reach it —
+      # so `people` would ignore the injected instant while `people_tokens`
+      # honoured it, and the two tables would disagree about when a person
+      # arrived.
+      assert person.inserted_at == stamped_at
+      assert person.updated_at == stamped_at
+      assert %Person{inserted_at: ^stamped_at} = Repo.get!(Person, person.id)
     end
   end
 
@@ -320,6 +334,17 @@ defmodule HospitalityComs.AccountsTest do
 
       assert updated.email == new_email
       refute Accounts.get_person_by_email(person.email)
+    end
+
+    test "stamps the change from the unit of work's instant", context do
+      %{person: person, change_token: change_token} = context
+      later = DateTime.add(@now, 3, :day)
+
+      assert {:ok, {updated, _expired}} =
+               Accounts.update_person_email(person, change_token, later)
+
+      assert updated.updated_at == DateTime.truncate(later, :second)
+      assert updated.inserted_at == person.inserted_at
     end
 
     test "invalidates every API token the person held", context do
