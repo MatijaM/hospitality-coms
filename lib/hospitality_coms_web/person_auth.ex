@@ -28,6 +28,7 @@ defmodule HospitalityComsWeb.PersonAuth do
   alias HospitalityComs.Accounts.Scope
   alias HospitalityComs.Clock
   alias HospitalityComsWeb.Endpoint
+  alias HospitalityComsWeb.ErrorEnvelope
   alias Phoenix.Controller
 
   @doc """
@@ -117,7 +118,9 @@ defmodule HospitalityComsWeb.PersonAuth do
   defp allow_or_refuse(conn, nil) do
     conn
     |> put_status(:unauthorized)
-    |> Controller.json(%{error: "unauthorized"})
+    |> Controller.json(
+      ErrorEnvelope.new(:unauthorized, "the request carries no live session token")
+    )
     |> halt()
   end
 end

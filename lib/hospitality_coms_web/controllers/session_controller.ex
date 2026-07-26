@@ -26,6 +26,7 @@ defmodule HospitalityComsWeb.SessionController do
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Accounts.Scope
+  alias HospitalityComsWeb.ErrorEnvelope
   alias HospitalityComsWeb.PersonAuth
 
   @doc """
@@ -84,10 +85,16 @@ defmodule HospitalityComsWeb.SessionController do
     |> json(%{status: "sent"})
   end
 
-  defp deliver_or_reject(conn, {:error, changeset}) do
+  defp deliver_or_reject(conn, {:error, %Ecto.Changeset{} = changeset}) do
     conn
     |> put_status(:unprocessable_entity)
-    |> json(%{errors: changeset_errors(changeset)})
+    |> json(
+      ErrorEnvelope.new(
+        :unprocessable_entity,
+        "the address was not accepted",
+        changeset_errors(changeset)
+      )
+    )
   end
 
   @spec issue_or_reject(
@@ -109,11 +116,12 @@ defmodule HospitalityComsWeb.SessionController do
     reject(conn, :unauthorized, "the link is invalid or it has expired")
   end
 
+  # The status atom is the envelope's code, so the two cannot drift apart.
   @spec reject(Plug.Conn.t(), atom(), String.t()) :: Plug.Conn.t()
   defp reject(conn, status, message) do
     conn
     |> put_status(status)
-    |> json(%{error: message})
+    |> json(ErrorEnvelope.new(status, message))
   end
 
   @spec render_person(Person.t()) :: %{id: Ecto.UUID.t(), email: String.t() | nil}

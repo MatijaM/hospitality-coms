@@ -165,7 +165,11 @@ defmodule HospitalityComsWeb.PersonAuthTest do
 
       assert conn.halted
       assert conn.status == 401
-      assert Jason.decode!(conn.resp_body) == %{"error" => "unauthorized"}
+
+      assert %{"error" => %{"code" => "unauthorized", "message" => message}} =
+               Jason.decode!(conn.resp_body)
+
+      assert is_binary(message)
       assert ["application/json" <> _rest] = Plug.Conn.get_resp_header(conn, "content-type")
     end
   end

@@ -20,6 +20,7 @@ defmodule HospitalityComsWeb.SessionControllerTest do
   alias HospitalityComs.Repo
 
   @now ~U[2026-03-01 12:00:00.000000Z]
+  @invalid_link "the link is invalid or it has expired"
 
   setup do
     Clock.Offset.set(@now)
@@ -59,14 +60,22 @@ defmodule HospitalityComsWeb.SessionControllerTest do
     test "rejects a malformed address without creating anything", %{conn: conn} do
       conn = post(conn, ~p"/api/log-in", %{"email" => "not an address"})
 
-      assert %{"errors" => %{"email" => [_message | _rest]}} = json_response(conn, 422)
+      assert %{
+               "error" => %{
+                 "code" => "unprocessable_entity",
+                 "fields" => %{"email" => [_message | _rest]}
+               }
+             } =
+               json_response(conn, 422)
+
       assert Repo.aggregate(Person, :count) == 0
     end
 
     test "rejects a request with no address at all", %{conn: conn} do
       conn = post(conn, ~p"/api/log-in", %{})
 
-      assert %{"error" => "email is required"} = json_response(conn, 400)
+      assert %{"error" => %{"code" => "bad_request", "message" => "email is required"}} =
+               json_response(conn, 400)
     end
   end
 
@@ -107,7 +116,8 @@ defmodule HospitalityComsWeb.SessionControllerTest do
 
       replayed = post(build_conn(), ~p"/api/log-in/token", %{"token" => token})
 
-      assert %{"error" => "the link is invalid or it has expired"} = json_response(replayed, 401)
+      assert %{"error" => %{"code" => "unauthorized", "message" => @invalid_link}} =
+               json_response(replayed, 401)
     end
 
     test "refuses a link that has expired", %{conn: conn} do
@@ -118,7 +128,8 @@ defmodule HospitalityComsWeb.SessionControllerTest do
 
       conn = post(build_conn(), ~p"/api/log-in/token", %{"token" => token})
 
-      assert %{"error" => "the link is invalid or it has expired"} = json_response(conn, 401)
+      assert %{"error" => %{"code" => "unauthorized", "message" => @invalid_link}} =
+               json_response(conn, 401)
     end
 
     test "refuses a token nobody issued", %{conn: conn} do
@@ -130,7 +141,8 @@ defmodule HospitalityComsWeb.SessionControllerTest do
     test "rejects a request with no token", %{conn: conn} do
       conn = post(conn, ~p"/api/log-in/token", %{})
 
-      assert %{"error" => "token is required"} = json_response(conn, 400)
+      assert %{"error" => %{"code" => "bad_request", "message" => "token is required"}} =
+               json_response(conn, 400)
     end
   end
 
@@ -138,7 +150,7 @@ defmodule HospitalityComsWeb.SessionControllerTest do
     test "refuses an unauthenticated request", %{conn: conn} do
       conn = get(conn, ~p"/api/me")
 
-      assert json_response(conn, 401) == %{"error" => "unauthorized"}
+      assert %{"error" => %{"code" => "unauthorized"}} = json_response(conn, 401)
     end
 
     test "refuses a token that has expired", %{conn: conn} do
@@ -168,6 +180,43 @@ defmodule HospitalityComsWeb.SessionControllerTest do
       delete(conn, ~p"/api/log-out")
 
       assert Repo.all_by(PersonToken, person_id: person.id, context: "session") == []
+    end
+  end
+
+  describe "the error envelope" do
+    test "a 404 and a 422 are the same shape", %{conn: conn} do
+      not_found = conn |> get("/api/nothing-here") |> json_response(404)
+
+      unprocessable =
+        conn |> post(~p"/api/log-in", %{"email" => "not an address"}) |> json_response(422)
+
+      # One top-level key, and it is the same key. A client discriminating on
+      # key presence cannot be handed two incompatible value shapes under one
+      # name, which is what `errors` was doing.
+      assert Map.keys(not_found) == ["error"]
+      assert Map.keys(unprocessable) == ["error"]
+
+      assert %{"error" => %{"code" => "not_found", "message" => message}} = not_found
+      assert is_binary(message)
+
+      assert %{
+               "error" => %{
+                 "code" => "unprocessable_entity",
+                 "message" => _message,
+                 "fields" => %{"email" => [_first | _rest]}
+               }
+             } = unprocessable
+    end
+
+    test "a 401 from the plug is the same shape as one from the controller", %{conn: conn} do
+      from_plug = conn |> get(~p"/api/me") |> json_response(401)
+
+      from_controller =
+        conn |> post(~p"/api/log-in/token", %{"token" => "made-up"}) |> json_response(401)
+
+      assert %{"error" => %{"code" => "unauthorized", "message" => _plug}} = from_plug
+      assert %{"error" => %{"code" => "unauthorized", "message" => _ctrl}} = from_controller
+      assert Map.keys(from_plug) == Map.keys(from_controller)
     end
   end
 
