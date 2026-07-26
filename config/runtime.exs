@@ -60,6 +60,21 @@ if config_env() == :prod do
       You can generate one by calling: mix phx.gen.secret
       """
 
+  # Where a magic link points. The default in config/config.exs is
+  # `localhost:4000`, which is right for dev and test and catastrophic in
+  # production: it does not fail, it mails working-looking links to a host that
+  # is not this application, and the failure surfaces on the recipient's side
+  # as "the email doesn't work". So it is required here rather than defaulted.
+  magic_link_base_url =
+    System.get_env("MAGIC_LINK_BASE_URL") ||
+      raise """
+      environment variable MAGIC_LINK_BASE_URL is missing.
+      It is the prefix a magic link token is appended to, and it must end in a
+      slash. For example: https://app.example.com/log-in/
+      """
+
+  config :hospitality_coms, :magic_link_base_url, magic_link_base_url
+
   host = System.get_env("PHX_HOST") || "example.com"
 
   config :hospitality_coms, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
