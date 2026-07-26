@@ -23,23 +23,6 @@ end
 config :hospitality_coms, HospitalityComsWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
-if config_env() == :dev do
-  # Reload browser tabs when matching files change.
-  config :hospitality_coms, HospitalityComsWeb.Endpoint,
-    live_reload: [
-      web_console_logger: true,
-      patterns: [
-        # Static assets, except user uploads
-        ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$"E,
-        # Gettext translations
-        ~r"priv/gettext/.*\.po$"E,
-        # Router, Controllers, LiveViews and LiveComponents
-        ~r"lib/hospitality_coms_web/router\.ex$"E,
-        ~r"lib/hospitality_coms_web/(controllers|live|components)/.*\.(ex|heex)$"E
-      ]
-    ]
-end
-
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||
@@ -76,6 +59,21 @@ if config_env() == :prod do
       environment variable SECRET_KEY_BASE is missing.
       You can generate one by calling: mix phx.gen.secret
       """
+
+  # Where a magic link points. The default in config/config.exs is
+  # `localhost:4000`, which is right for dev and test and catastrophic in
+  # production: it does not fail, it mails working-looking links to a host that
+  # is not this application, and the failure surfaces on the recipient's side
+  # as "the email doesn't work". So it is required here rather than defaulted.
+  magic_link_base_url =
+    System.get_env("MAGIC_LINK_BASE_URL") ||
+      raise """
+      environment variable MAGIC_LINK_BASE_URL is missing.
+      It is the prefix a magic link token is appended to, and it must end in a
+      slash. For example: https://app.example.com/log-in/
+      """
+
+  config :hospitality_coms, :magic_link_base_url, magic_link_base_url
 
   host = System.get_env("PHX_HOST") || "example.com"
 

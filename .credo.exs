@@ -167,13 +167,16 @@
           #
           ## Project Checks
           #
-          # The clock authority. `:boundary_modules` stays empty until the
-          # unit-of-work boundaries exist, which means no module may call
-          # `Clock.now/0` yet — the correct default while the boundary is still
-          # being built. Test files are excluded: their whole job is to call
-          # these functions in isolation.
+          # The clock authority. `:boundary_modules` lists the modules that open
+          # a unit of work and may therefore capture the instant; everything
+          # else takes it from the scope. `PersonAuth` is the HTTP boundary: it
+          # reads the clock once per request in `fetch_person_scope/2` and puts
+          # the result on the scope. The channel and job boundaries join this
+          # list in U7 and U5. Test files are excluded: their whole job is to
+          # call these functions in isolation.
           {HospitalityComs.Credo.Check.ClockAuthority,
-           files: %{included: ["lib/", "dev_support/"]}}
+           files: %{included: ["lib/", "dev_support/"]},
+           boundary_modules: [HospitalityComsWeb.PersonAuth]}
         ],
         disabled: [
           #

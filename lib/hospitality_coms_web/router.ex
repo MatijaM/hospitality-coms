@@ -1,43 +1,38 @@
 defmodule HospitalityComsWeb.Router do
   use HospitalityComsWeb, :router
 
-  pipeline :browser do
-    plug :accepts, ["html"]
-    plug :fetch_session
-    plug :fetch_live_flash
-    plug :put_root_layout, html: {HospitalityComsWeb.Layouts, :root}
-    plug :protect_from_forgery
-    plug :put_secure_browser_headers
-  end
+  import HospitalityComsWeb.PersonAuth
 
+  # There is no browser pipeline. This application serves JSON and, from U7, a
+  # socket; the HTML layer existed only because `mix phx.gen.auth` refuses to
+  # run without it.
   pipeline :api do
     plug :accepts, ["json"]
+    plug :fetch_person_scope
   end
 
-  scope "/", HospitalityComsWeb do
-    pipe_through :browser
-
-    get "/", PageController, :home
+  pipeline :authenticated_person do
+    plug :require_authenticated_person
   end
 
-  # Other scopes may use custom stacks.
-  # scope "/api", HospitalityComsWeb do
-  #   pipe_through :api
-  # end
+  scope "/api", HospitalityComsWeb do
+    pipe_through :api
 
-  # Enable LiveDashboard and Swoosh mailbox preview in development
+    post "/log-in", SessionController, :create
+    post "/log-in/token", SessionController, :confirm
+  end
+
+  scope "/api", HospitalityComsWeb do
+    pipe_through [:api, :authenticated_person]
+
+    get "/me", SessionController, :show
+    delete "/log-out", SessionController, :delete
+  end
+
+  # The mailbox preview is how the magic link is read during development, since
+  # there is no browser surface that renders it.
   if Application.compile_env(:hospitality_coms, :dev_routes) do
-    # If you want to use the LiveDashboard in production, you should put
-    # it behind authentication and allow only admins to access it.
-    # If your application does not have an admins-only section yet,
-    # you can use Plug.BasicAuth to set up some basic authentication
-    # as long as you are also using SSL (which you should anyway).
-    import Phoenix.LiveDashboard.Router
-
     scope "/dev" do
-      pipe_through :browser
-
-      live_dashboard "/dashboard", metrics: HospitalityComsWeb.Telemetry
       forward "/mailbox", Plug.Swoosh.MailboxPreview
     end
   end

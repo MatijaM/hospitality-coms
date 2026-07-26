@@ -42,6 +42,19 @@ defmodule HospitalityComs.Credo.Check.ClockAuthority do
       `:boundary_modules`. The list is empty until they exist; an empty list
       means no module may call `Clock.now/0`, which is the correct default
       while the boundary is still being built.
+
+      `Ecto.Query.ago/2` and `from_now/2` are banned outright, and are the
+      reason this rule needs enforcing in a query as well as in Elixir. They
+      expand to `DateTime.utc_now/0` *inside the query macro*, which is the
+      worst of both worlds: the offsettable clock cannot move them, and the
+      expansion happens after this check has read the source, so nothing would
+      see them if the call itself were not flagged.
+
+          # BAD — a horizon nobody in this application chose
+          from t in Token, where: t.inserted_at > ago(14, "day")
+
+          # GOOD — a horizon derived from the unit of work's instant
+          from t in Token, where: t.inserted_at > ^DateTime.add(now, -14, :day)
       """,
       params: [
         clock_module: "The module that owns the current instant.",
@@ -52,6 +65,10 @@ defmodule HospitalityComs.Credo.Check.ClockAuthority do
 
   alias Credo.Check.Params
   alias Credo.IssueMeta
+
+  # `Ecto.Query`'s relative-time macros. Both take an amount and a unit, and
+  # both read the wall clock where nothing can reach them.
+  @query_macros [:ago, :from_now]
 
   @doc false
   @impl true
@@ -97,6 +114,17 @@ defmodule HospitalityComs.Credo.Check.ClockAuthority do
     {ast, {clock_now_issues(parts, current_module(stack), meta, config) ++ issues, stack}}
   end
 
+  # `Ecto.Query.ago(14, "day")`, written out in full.
+  defp enter({{:., meta, [{:__aliases__, _, _parts}, name]}, _call, [_amount, _unit]} = ast, {issues, stack}, config)
+       when name in @query_macros do
+    {ast, {[issue({:query_macro, name}, meta, config) | issues], stack}}
+  end
+
+  # `ago(14, "day")`, imported, which is how it is always actually written.
+  defp enter({name, meta, [_amount, _unit]} = ast, {issues, stack}, config) when name in @query_macros do
+    {ast, {[issue({:query_macro, name}, meta, config) | issues], stack}}
+  end
+
   defp enter(ast, acc, _config), do: {ast, acc}
 
   defp leave({:defmodule, _meta, _args} = ast, {issues, [_module | stack]}), do: {ast, {issues, stack}}
@@ -138,6 +166,15 @@ defmodule HospitalityComs.Credo.Check.ClockAuthority do
       message:
         "#{config.clock_name}.now/0 may only be called where a unit of work begins. Carry the instant on the scope instead.",
       trigger: "Clock.now",
+      line_no: meta[:line]
+    )
+  end
+
+  defp issue({:query_macro, name}, meta, config) do
+    format_issue(config.issue_meta,
+      message:
+        "Ecto.Query.#{name}/2 expands to DateTime.utc_now/0 inside the query, where neither this check nor the clock can reach it. Compare against an instant carried by the unit of work.",
+      trigger: Atom.to_string(name),
       line_no: meta[:line]
     )
   end
