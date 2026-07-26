@@ -17,6 +17,12 @@ defmodule HospitalityComsWeb.ConnCase do
 
   use ExUnit.CaseTemplate
 
+  alias HospitalityComs.Accounts
+  alias HospitalityComs.Accounts.Person
+  alias HospitalityComs.Accounts.Scope
+  alias HospitalityComs.AccountsFixtures
+  alias HospitalityComsWeb.PersonAuth
+
   using do
     quote do
       # The default endpoint for testing
@@ -41,39 +47,37 @@ defmodule HospitalityComsWeb.ConnCase do
 
       setup :register_and_log_in_person
 
-  It stores an updated connection and a registered person in the
-  test context.
+  It stores an updated connection and a registered person in the test context.
   """
+  @spec register_and_log_in_person(map()) :: map()
   def register_and_log_in_person(%{conn: conn} = context) do
-    person = HospitalityComs.AccountsFixtures.person_fixture()
-    scope = HospitalityComs.Accounts.Scope.for_person(person)
+    now = Map.get(context, :now, AccountsFixtures.fixed_instant())
+    person = AccountsFixtures.person_fixture(%{}, now)
 
-    opts =
-      context
-      |> Map.take([:token_authenticated_at])
-      |> Enum.into([])
-
-    %{conn: log_in_person(conn, person, opts), person: person, scope: scope}
+    %{
+      conn: log_in_person(conn, person, now),
+      person: person,
+      scope: Scope.for_person(person, now)
+    }
   end
 
   @doc """
-  Logs the given `person` into the `conn`.
+  Puts an API token for `person` on the `conn` as a bearer credential.
 
-  It returns an updated `conn`.
+  This is the same token any client gets: an actual row in `people_tokens`, so
+  a test that deletes the row is exercising the real revocation path.
   """
-  def log_in_person(conn, person, opts \\ []) do
-    token = HospitalityComs.Accounts.generate_person_session_token(person)
-
-    maybe_set_token_authenticated_at(token, opts[:token_authenticated_at])
-
-    conn
-    |> Phoenix.ConnTest.init_test_session(%{})
-    |> Plug.Conn.put_session(:person_token, token)
+  @spec log_in_person(Plug.Conn.t(), Person.t(), DateTime.t()) :: Plug.Conn.t()
+  def log_in_person(conn, person, now \\ AccountsFixtures.fixed_instant()) do
+    token = Accounts.generate_person_session_token(person, now)
+    put_bearer_token(conn, PersonAuth.encode_token(token))
   end
 
-  defp maybe_set_token_authenticated_at(_token, nil), do: nil
-
-  defp maybe_set_token_authenticated_at(token, authenticated_at) do
-    HospitalityComs.AccountsFixtures.override_token_authenticated_at(token, authenticated_at)
+  @doc """
+  Puts an already-encoded bearer token on the `conn`.
+  """
+  @spec put_bearer_token(Plug.Conn.t(), String.t()) :: Plug.Conn.t()
+  def put_bearer_token(conn, encoded_token) do
+    Plug.Conn.put_req_header(conn, "authorization", "Bearer " <> encoded_token)
   end
 end

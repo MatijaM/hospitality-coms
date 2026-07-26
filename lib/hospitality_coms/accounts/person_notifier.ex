@@ -1,26 +1,23 @@
 defmodule HospitalityComs.Accounts.PersonNotifier do
+  @moduledoc """
+  The emails that carry a magic link.
+
+  Delivery uses `Mailer.deliver!/1` rather than `deliver/1`: a mail adapter's
+  failure reason is adapter-specific and unbounded, and this repository's specs
+  enumerate their error atoms rather than falling back to `term()`. A delivery
+  that fails is an infrastructure fault, so it raises and the request fails
+  loudly instead of returning an error nobody can pattern match on.
+  """
+
   import Swoosh.Email
 
-  alias HospitalityComs.Mailer
   alias HospitalityComs.Accounts.Person
-
-  # Delivers the email using the application mailer.
-  defp deliver(recipient, subject, body) do
-    email =
-      new()
-      |> to(recipient)
-      |> from({"HospitalityComs", "contact@example.com"})
-      |> subject(subject)
-      |> text_body(body)
-
-    with {:ok, _metadata} <- Mailer.deliver(email) do
-      {:ok, email}
-    end
-  end
+  alias HospitalityComs.Mailer
 
   @doc """
-  Deliver instructions to update a person email.
+  Deliver instructions to update a person's email.
   """
+  @spec deliver_update_email_instructions(Person.t(), String.t()) :: Swoosh.Email.t()
   def deliver_update_email_instructions(person, url) do
     deliver(person.email, "Update email instructions", """
 
@@ -41,13 +38,16 @@ defmodule HospitalityComs.Accounts.PersonNotifier do
   @doc """
   Deliver instructions to log in with a magic link.
   """
-  def deliver_login_instructions(person, url) do
-    case person do
-      %Person{confirmed_at: nil} -> deliver_confirmation_instructions(person, url)
-      _ -> deliver_magic_link_instructions(person, url)
-    end
+  @spec deliver_login_instructions(Person.t(), String.t()) :: Swoosh.Email.t()
+  def deliver_login_instructions(%Person{confirmed_at: nil} = person, url) do
+    deliver_confirmation_instructions(person, url)
   end
 
+  def deliver_login_instructions(%Person{} = person, url) do
+    deliver_magic_link_instructions(person, url)
+  end
+
+  @spec deliver_magic_link_instructions(Person.t(), String.t()) :: Swoosh.Email.t()
   defp deliver_magic_link_instructions(person, url) do
     deliver(person.email, "Log in instructions", """
 
@@ -65,6 +65,7 @@ defmodule HospitalityComs.Accounts.PersonNotifier do
     """)
   end
 
+  @spec deliver_confirmation_instructions(Person.t(), String.t()) :: Swoosh.Email.t()
   defp deliver_confirmation_instructions(person, url) do
     deliver(person.email, "Confirmation instructions", """
 
@@ -80,5 +81,19 @@ defmodule HospitalityComs.Accounts.PersonNotifier do
 
     ==============================
     """)
+  end
+
+  # Delivers the email using the application mailer.
+  @spec deliver(String.t(), String.t(), String.t()) :: Swoosh.Email.t()
+  defp deliver(recipient, subject, body) do
+    email =
+      new()
+      |> to(recipient)
+      |> from({"HospitalityComs", "contact@example.com"})
+      |> subject(subject)
+      |> text_body(body)
+
+    _metadata = Mailer.deliver!(email)
+    email
   end
 end

@@ -11,6 +11,8 @@ defmodule HospitalityComs.PostgresRolesTest do
 
   use HospitalityComs.DataCase, async: false
 
+  import ExUnit.CaptureLog
+
   alias HospitalityComs.Repo.Migrations.CreatePostgresRoles
 
   @migration_name "create_postgres_roles"
@@ -37,7 +39,12 @@ defmodule HospitalityComs.PostgresRolesTest do
 
     test "restores both roles when migrated down and up again" do
       migrate(:down)
-      migrate(:up)
+
+      # Re-running a migration that later ones were stacked on top of makes the
+      # migrator warn about out-of-order deployment. It is warning about a
+      # rollback in production, not about this test, which puts the version
+      # straight back where it found it.
+      capture_log(fn -> migrate(:up) end)
 
       assert role_exists?("employer_role")
       assert role_exists?("person_role")

@@ -1,17 +1,42 @@
 defmodule HospitalityComs.Accounts do
   @moduledoc """
-  The Accounts context.
+  Person identity: registration, magic-link authentication, and the API tokens
+  a session runs on.
+
+  A person record is created by the person and by no one else (R1). There is no
+  invitation-claims-a-record path here and no employer-side creation path: the
+  only way a `people` row comes into existence is `request_login_instructions/3`
+  with an address nobody has used yet, and the row is unconfirmed until whoever
+  reads that mailbox redeems the link.
+
+  Every function that depends on the current instant takes it as an argument.
+  The instant is captured once, at the HTTP boundary, and carried on the scope
+  (KTD5); nothing in this module reads a clock. That is also why the context is
+  testable without touching the offsettable clock at all — expiry is asserted
+  by passing an instant, not by moving global state.
+
+  This context is person zone. It reads and writes through
+  `HospitalityComs.Repo` only. `HospitalityComs.EmployerRepo` must never appear
+  here; U3 turns that from a convention into a Postgres privilege.
   """
 
   import Ecto.Query, warn: false
+
+  alias HospitalityComs.Accounts.Person
+  alias HospitalityComs.Accounts.PersonNotifier
+  alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Repo
 
-  alias HospitalityComs.Accounts.{Person, PersonToken, PersonNotifier}
+  @type url_fun() :: (String.t() -> String.t())
 
   ## Database getters
 
   @doc """
   Gets a person by email.
+
+  An erased person is unreachable by address: erasure nulls the column, so this
+  returns nil and a later registration with the same address creates a new,
+  unrelated person.
 
   ## Examples
 
@@ -22,42 +47,17 @@ defmodule HospitalityComs.Accounts do
       nil
 
   """
+  @spec get_person_by_email(String.t()) :: Person.t() | nil
   def get_person_by_email(email) when is_binary(email) do
     Repo.get_by(Person, email: email)
   end
 
   @doc """
-  Gets a person by email and password.
-
-  ## Examples
-
-      iex> get_person_by_email_and_password("foo@example.com", "correct_password")
-      %Person{}
-
-      iex> get_person_by_email_and_password("foo@example.com", "invalid_password")
-      nil
-
-  """
-  def get_person_by_email_and_password(email, password)
-      when is_binary(email) and is_binary(password) do
-    person = Repo.get_by(Person, email: email)
-    if Person.valid_password?(person, password), do: person
-  end
-
-  @doc """
   Gets a single person.
 
-  Raises `Ecto.NoResultsError` if the Person does not exist.
-
-  ## Examples
-
-      iex> get_person!(123)
-      %Person{}
-
-      iex> get_person!(456)
-      ** (Ecto.NoResultsError)
-
+  Raises `Ecto.NoResultsError` if the person does not exist.
   """
+  @spec get_person!(Ecto.UUID.t()) :: Person.t()
   def get_person!(id), do: Repo.get!(Person, id)
 
   ## Person registration
@@ -67,228 +67,245 @@ defmodule HospitalityComs.Accounts do
 
   ## Examples
 
-      iex> register_person(%{field: value})
+      iex> register_person(%{email: "foo@example.com"})
       {:ok, %Person{}}
 
-      iex> register_person(%{field: bad_value})
+      iex> register_person(%{email: "not an address"})
       {:error, %Ecto.Changeset{}}
 
   """
+  @spec register_person(map()) :: {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
   def register_person(attrs) do
     %Person{}
     |> Person.email_changeset(attrs)
     |> Repo.insert()
   end
 
+  @doc """
+  Requests a magic link for `email`, registering the person if the address has
+  not been seen before.
+
+  Registration and log-in are the same request on purpose. Splitting them, as
+  the generated stack does, means the log-in endpoint has to answer differently
+  for a known and an unknown address, which is an enumeration oracle; and it
+  means a worker signing up has to know which of two doors is theirs. Here both
+  produce the same accepted response and the same email.
+
+  Nothing about this path involves an employer. That is the requirement (R1),
+  not an implementation detail.
+  """
+  @spec request_login_instructions(String.t(), url_fun(), DateTime.t()) ::
+          {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
+  def request_login_instructions(email, magic_link_url_fun, %DateTime{} = now)
+      when is_binary(email) and is_function(magic_link_url_fun, 1) do
+    with {:ok, person} <- fetch_or_register_person(email) do
+      _email = deliver_login_instructions(person, magic_link_url_fun, now)
+      {:ok, person}
+    end
+  end
+
+  @spec fetch_or_register_person(String.t()) ::
+          {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
+  defp fetch_or_register_person(email) do
+    email
+    |> get_person_by_email()
+    |> registered_or_register(email)
+  end
+
+  @spec registered_or_register(Person.t() | nil, String.t()) ::
+          {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
+  defp registered_or_register(%Person{} = person, _email), do: {:ok, person}
+  defp registered_or_register(nil, email), do: register_person(%{email: email})
+
   ## Settings
 
   @doc """
-  Checks whether the person is in sudo mode.
+  Checks whether the person is in sudo mode as of `now`.
 
   The person is in sudo mode when the last authentication was done no further
-  than 20 minutes ago. The limit can be given as second argument in minutes.
+  than 20 minutes before `now`. The limit can be given as third argument in
+  minutes.
   """
-  def sudo_mode?(person, minutes \\ -20)
+  @spec sudo_mode?(Person.t() | nil, DateTime.t(), integer()) :: boolean()
+  def sudo_mode?(person, now, minutes \\ -20)
 
-  def sudo_mode?(%Person{authenticated_at: ts}, minutes) when is_struct(ts, DateTime) do
-    DateTime.after?(ts, DateTime.utc_now() |> DateTime.add(minutes, :minute))
+  def sudo_mode?(%Person{authenticated_at: ts}, %DateTime{} = now, minutes)
+      when is_struct(ts, DateTime) do
+    DateTime.after?(ts, DateTime.add(now, minutes, :minute))
   end
 
-  def sudo_mode?(_person, _minutes), do: false
+  def sudo_mode?(_person, _now, _minutes), do: false
 
   @doc """
-  Returns an `%Ecto.Changeset{}` for changing the person email.
+  Updates the person's email using the given token.
 
-  See `HospitalityComs.Accounts.Person.email_changeset/3` for a list of supported options.
+  If the token matches, the email is updated and **every** token the person
+  holds is deleted, session tokens included. The generated implementation
+  deleted only the change-email tokens, which left API tokens issued under the
+  old address alive; an address is an authentication factor here, so changing
+  it ends the sessions that were established against it.
 
-  ## Examples
-
-      iex> change_person_email(person)
-      %Ecto.Changeset{data: %Person{}}
-
+  Returns the updated person and the tokens that were expired, so a caller can
+  disconnect the sockets they belong to.
   """
-  def change_person_email(person, attrs \\ %{}, opts \\ []) do
-    Person.email_changeset(person, attrs, opts)
-  end
-
-  @doc """
-  Updates the person email using the given token.
-
-  If the token matches, the person email is updated and the token is deleted.
-  """
-  def update_person_email(person, token) do
+  @spec update_person_email(Person.t(), String.t(), DateTime.t()) ::
+          {:ok, {Person.t(), [PersonToken.t()]}} | {:error, :transaction_aborted}
+  def update_person_email(%Person{} = person, token, %DateTime{} = now) when is_binary(token) do
     context = "change:#{person.email}"
 
     Repo.transact(fn ->
-      with {:ok, query} <- PersonToken.verify_change_email_token_query(token, context),
+      with {:ok, query} <- PersonToken.verify_change_email_token_query(token, context, now),
            %PersonToken{sent_to: email} <- Repo.one(query),
-           {:ok, person} <- Repo.update(Person.email_changeset(person, %{email: email})),
-           {_count, _result} <-
-             Repo.delete_all(from(PersonToken, where: [person_id: ^person.id, context: ^context])) do
-        {:ok, person}
+           {:ok, result} <-
+             update_person_and_delete_all_tokens(Person.email_changeset(person, %{email: email})) do
+        {:ok, result}
       else
-        _ -> {:error, :transaction_aborted}
+        _error -> {:error, :transaction_aborted}
       end
     end)
-  end
-
-  @doc """
-  Returns an `%Ecto.Changeset{}` for changing the person password.
-
-  See `HospitalityComs.Accounts.Person.password_changeset/3` for a list of supported options.
-
-  ## Examples
-
-      iex> change_person_password(person)
-      %Ecto.Changeset{data: %Person{}}
-
-  """
-  def change_person_password(person, attrs \\ %{}, opts \\ []) do
-    Person.password_changeset(person, attrs, opts)
-  end
-
-  @doc """
-  Updates the person password.
-
-  Returns a tuple with the updated person, as well as a list of expired tokens.
-
-  ## Examples
-
-      iex> update_person_password(person, %{password: ...})
-      {:ok, {%Person{}, [...]}}
-
-      iex> update_person_password(person, %{password: "too short"})
-      {:error, %Ecto.Changeset{}}
-
-  """
-  def update_person_password(person, attrs) do
-    person
-    |> Person.password_changeset(attrs)
-    |> update_person_and_delete_all_tokens()
   end
 
   ## Session
 
   @doc """
-  Generates a session token.
+  Generates the token a session runs on and returns it as raw bytes.
   """
-  def generate_person_session_token(person) do
-    {token, person_token} = PersonToken.build_session_token(person)
+  @spec generate_person_session_token(Person.t(), DateTime.t()) :: binary()
+  def generate_person_session_token(%Person{} = person, %DateTime{} = now) do
+    {token, person_token} = PersonToken.build_session_token(person, now)
     Repo.insert!(person_token)
     token
   end
 
   @doc """
-  Gets the person with the given signed token.
+  Gets the person the given session token belongs to, as of `now`.
 
-  If the token is valid `{person, token_inserted_at}` is returned, otherwise `nil` is returned.
+  Returns `{person, token_inserted_at}` when the token is live, and nil when it
+  has expired or its row is gone. There is no cache in front of this: deleting
+  the row is the revocation.
   """
-  def get_person_by_session_token(token) do
-    {:ok, query} = PersonToken.verify_session_token_query(token)
+  @spec get_person_by_session_token(binary(), DateTime.t()) ::
+          {Person.t(), DateTime.t()} | nil
+  def get_person_by_session_token(token, %DateTime{} = now) when is_binary(token) do
+    {:ok, query} = PersonToken.verify_session_token_query(token, now)
     Repo.one(query)
   end
 
   @doc """
-  Gets the person with the given magic link token.
+  Gets the person the given magic-link token belongs to, without redeeming it.
   """
-  def get_person_by_magic_link_token(token) do
-    with {:ok, query} <- PersonToken.verify_magic_link_token_query(token),
+  @spec get_person_by_magic_link_token(String.t(), DateTime.t()) :: Person.t() | nil
+  def get_person_by_magic_link_token(token, %DateTime{} = now) when is_binary(token) do
+    with {:ok, query} <- PersonToken.verify_magic_link_token_query(token, now),
          {person, _token} <- Repo.one(query) do
       person
     else
-      _ -> nil
+      _error -> nil
     end
   end
 
   @doc """
-  Logs the person in by magic link.
+  Logs the person in by magic link, consuming the link in the same transaction.
 
-  There are three cases to consider:
+  Two cases remain of the generated three, because this application has no
+  passwords:
 
-  1. The person has already confirmed their email. They are logged in
-     and the magic link is expired.
+  1. The person has already confirmed their email. They are logged in and the
+     magic link is deleted.
 
-  2. The person has not confirmed their email and no password is set.
-     In this case, the person gets confirmed, logged in, and all tokens -
-     including session ones - are expired. In theory, no other tokens
-     exist but we delete all of them for best security practices.
+  2. The person has not confirmed their email. They are confirmed, logged in,
+     and every token they hold — session tokens included — is expired.
 
-  3. The person has not confirmed their email but a password is set.
-     This cannot happen in the default implementation but may be the
-     source of security pitfalls. See the "Mixing magic link and password registration" section of
-     `mix help phx.gen.auth`.
+  Redemption is single use either way: the second attempt with the same token
+  finds no row and returns `{:error, :not_found}`.
   """
-  def login_person_by_magic_link(token) do
-    {:ok, query} = PersonToken.verify_magic_link_token_query(token)
-
-    case Repo.one(query) do
-      # Prevent session fixation attacks by disallowing magic links for unconfirmed users with password
-      {%Person{confirmed_at: nil, hashed_password: hash}, _token} when not is_nil(hash) ->
-        raise """
-        magic link log in is not allowed for unconfirmed users with a password set!
-
-        This cannot happen with the default implementation, which indicates that you
-        might have adapted the code to a different use case. Please make sure to read the
-        "Mixing magic link and password registration" section of `mix help phx.gen.auth`.
-        """
-
-      {%Person{confirmed_at: nil} = person, _token} ->
-        person
-        |> Person.confirm_changeset()
-        |> update_person_and_delete_all_tokens()
-
-      {person, token} ->
-        Repo.delete!(token)
-        {:ok, {person, []}}
-
-      nil ->
-        {:error, :not_found}
+  @spec login_person_by_magic_link(String.t(), DateTime.t()) ::
+          {:ok, {Person.t(), [PersonToken.t()]}}
+          | {:error, :not_found | Ecto.Changeset.t(Person.t())}
+  def login_person_by_magic_link(token, %DateTime{} = now) when is_binary(token) do
+    case PersonToken.verify_magic_link_token_query(token, now) do
+      {:ok, query} -> query |> Repo.one() |> redeem_magic_link(now)
+      :error -> {:error, :not_found}
     end
   end
 
+  @spec redeem_magic_link({Person.t(), PersonToken.t()} | nil, DateTime.t()) ::
+          {:ok, {Person.t(), [PersonToken.t()]}}
+          | {:error, :not_found | Ecto.Changeset.t(Person.t())}
+  defp redeem_magic_link({%Person{confirmed_at: nil} = person, _token}, now) do
+    person
+    |> Person.confirm_changeset(now)
+    |> update_person_and_delete_all_tokens()
+  end
+
+  defp redeem_magic_link({%Person{} = person, %PersonToken{} = token}, _now) do
+    Repo.delete!(token)
+    {:ok, {person, []}}
+  end
+
+  defp redeem_magic_link(nil, _now), do: {:error, :not_found}
+
   @doc ~S"""
-  Delivers the update email instructions to the given person.
+  Delivers the update-email instructions to the given person.
 
   ## Examples
 
-      iex> deliver_person_update_email_instructions(person, current_email, &url(~p"/people/settings/confirm-email/#{&1}"))
-      {:ok, %{to: ..., body: ...}}
+      iex> deliver_person_update_email_instructions(person, current_email, &"https://example.com/confirm-email/#{&1}", now)
+      %Swoosh.Email{}
 
   """
-  def deliver_person_update_email_instructions(%Person{} = person, current_email, update_email_url_fun)
+  @spec deliver_person_update_email_instructions(
+          Person.t(),
+          String.t(),
+          url_fun(),
+          DateTime.t()
+        ) :: Swoosh.Email.t()
+  def deliver_person_update_email_instructions(
+        %Person{} = person,
+        current_email,
+        update_email_url_fun,
+        %DateTime{} = now
+      )
       when is_function(update_email_url_fun, 1) do
-    {encoded_token, person_token} = PersonToken.build_email_token(person, "change:#{current_email}")
+    {encoded_token, person_token} =
+      PersonToken.build_email_token(person, "change:#{current_email}", now)
 
     Repo.insert!(person_token)
     PersonNotifier.deliver_update_email_instructions(person, update_email_url_fun.(encoded_token))
   end
 
   @doc """
-  Delivers the magic link login instructions to the given person.
+  Delivers the magic-link log-in instructions to the given person.
   """
-  def deliver_login_instructions(%Person{} = person, magic_link_url_fun)
+  @spec deliver_login_instructions(Person.t(), url_fun(), DateTime.t()) :: Swoosh.Email.t()
+  def deliver_login_instructions(%Person{} = person, magic_link_url_fun, %DateTime{} = now)
       when is_function(magic_link_url_fun, 1) do
-    {encoded_token, person_token} = PersonToken.build_email_token(person, "login")
+    {encoded_token, person_token} = PersonToken.build_email_token(person, "login", now)
     Repo.insert!(person_token)
     PersonNotifier.deliver_login_instructions(person, magic_link_url_fun.(encoded_token))
   end
 
   @doc """
-  Deletes the signed token with the given context.
+  Deletes the session token, ending the session it stands for.
   """
-  def delete_person_session_token(token) do
+  @spec delete_person_session_token(binary()) :: :ok
+  def delete_person_session_token(token) when is_binary(token) do
     Repo.delete_all(from(PersonToken, where: [token: ^token, context: "session"]))
     :ok
   end
 
   ## Token helper
 
+  @spec update_person_and_delete_all_tokens(Ecto.Changeset.t(Person.t())) ::
+          {:ok, {Person.t(), [PersonToken.t()]}} | {:error, Ecto.Changeset.t(Person.t())}
   defp update_person_and_delete_all_tokens(changeset) do
     Repo.transact(fn ->
       with {:ok, person} <- Repo.update(changeset) do
         tokens_to_expire = Repo.all_by(PersonToken, person_id: person.id)
 
-        Repo.delete_all(from(t in PersonToken, where: t.id in ^Enum.map(tokens_to_expire, & &1.id)))
+        Repo.delete_all(
+          from(t in PersonToken, where: t.id in ^Enum.map(tokens_to_expire, & &1.id))
+        )
 
         {:ok, {person, tokens_to_expire}}
       end
