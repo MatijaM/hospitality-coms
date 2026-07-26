@@ -20,7 +20,7 @@ defmodule HospitalityComsWeb.ConnCase do
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.Scope
-  alias HospitalityComs.AccountsFixtures
+  alias HospitalityComs.Clock
   alias HospitalityComsWeb.PersonAuth
 
   using do
@@ -48,11 +48,18 @@ defmodule HospitalityComsWeb.ConnCase do
       setup :register_and_log_in_person
 
   It stores an updated connection and a registered person in the test context.
+
+  The instant defaults to the clock's, not to a constant. A conn test runs
+  against the real request path, and the plug reading that clock is what
+  decides whether the token it was handed has expired — so a helper minting
+  from a hardcoded date and a plug validating against a pinned one disagree by
+  however far the test moved the clock, and silently, until the gap crosses
+  fourteen days. A test that wants a different instant says so with `:now`.
   """
   @spec register_and_log_in_person(map()) :: map()
   def register_and_log_in_person(%{conn: conn} = context) do
-    now = Map.get(context, :now, AccountsFixtures.fixed_instant())
-    person = AccountsFixtures.person_fixture(%{}, now)
+    now = Map.get_lazy(context, :now, &Clock.now/0)
+    person = HospitalityComs.AccountsFixtures.person_fixture(%{}, now)
 
     %{
       conn: log_in_person(conn, person, now),
@@ -65,10 +72,11 @@ defmodule HospitalityComsWeb.ConnCase do
   Puts an API token for `person` on the `conn` as a bearer credential.
 
   This is the same token any client gets: an actual row in `people_tokens`, so
-  a test that deletes the row is exercising the real revocation path.
+  a test that deletes the row is exercising the real revocation path. It is
+  stamped from the clock for the same reason the setup helper is.
   """
   @spec log_in_person(Plug.Conn.t(), Person.t(), DateTime.t()) :: Plug.Conn.t()
-  def log_in_person(conn, person, now \\ AccountsFixtures.fixed_instant()) do
+  def log_in_person(conn, person, now \\ Clock.now()) do
     token = Accounts.generate_person_session_token(person, now)
     put_bearer_token(conn, PersonAuth.encode_token(token))
   end

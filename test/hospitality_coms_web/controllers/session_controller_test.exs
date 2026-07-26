@@ -198,6 +198,31 @@ defmodule HospitalityComsWeb.SessionControllerTest do
     end
   end
 
+  describe "the log-in test helpers" do
+    test "stamp their token from the pinned clock, not the wall", %{conn: conn} do
+      Clock.Offset.advance(day: 3)
+      now = Clock.now()
+      person = person_fixture(%{}, now)
+
+      conn = log_in_person(conn, person)
+
+      # A helper that mints against a hardcoded instant and then validates
+      # against the real clock is a fourteen-day accident waiting for a test
+      # that pins the clock somewhere else.
+      assert %PersonToken{inserted_at: inserted_at} = session_token_row(conn)
+      assert inserted_at == DateTime.truncate(now, :second)
+    end
+
+    test "carry the pinned instant onto the scope they build", %{conn: conn} do
+      Clock.Offset.advance(day: 3)
+
+      %{scope: scope, conn: logged_in} = register_and_log_in_person(%{conn: conn})
+
+      assert scope.now == Clock.now()
+      assert %PersonToken{} = session_token_row(logged_in)
+    end
+  end
+
   describe "the error envelope" do
     test "a 404 and a 422 are the same shape", %{conn: conn} do
       not_found = conn |> get("/api/nothing-here") |> json_response(404)
@@ -261,6 +286,14 @@ defmodule HospitalityComsWeb.SessionControllerTest do
              |> delete(~p"/api/log-out")
              |> response(204)
     end
+  end
+
+  # Finds the stored row behind the bearer credential a conn is carrying.
+  defp session_token_row(conn) do
+    ["Bearer " <> encoded] = Plug.Conn.get_req_header(conn, "authorization")
+    {:ok, raw} = Base.url_decode64(encoded, padding: false)
+
+    Repo.get_by(PersonToken, token: PersonToken.hash_token(raw), context: "session")
   end
 
   # Table names come from the catalogue, not from input, so interpolating them
