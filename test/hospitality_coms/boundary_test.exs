@@ -37,12 +37,16 @@ defmodule HospitalityComs.BoundaryTest do
   # move schema state, so nothing here is async.
   use ExUnit.Case, async: false
 
+  import Ecto.Query
   import ExUnit.CaptureLog
 
   alias Ecto.Adapters.SQL.Sandbox
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.EmployerScope
+  alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonScope
+  alias HospitalityComs.Accounts.PersonToken
+  alias HospitalityComs.EmployerRepo
   alias HospitalityComs.Repo
   alias HospitalityComs.Repo.Migrations.GrantZones
   alias HospitalityComs.Zones
@@ -63,8 +67,13 @@ defmodule HospitalityComs.BoundaryTest do
   end
 
   setup do
-    owner = Sandbox.start_owner!(Repo, shared: true)
-    on_exit(fn -> Sandbox.stop_owner(owner) end)
+    repo_owner = Sandbox.start_owner!(Repo, shared: true)
+    employer_owner = Sandbox.start_owner!(EmployerRepo, shared: true)
+
+    on_exit(fn ->
+      Sandbox.stop_owner(employer_owner)
+      Sandbox.stop_owner(repo_owner)
+    end)
   end
 
   describe "the employer role's privileges on the person zone" do
@@ -162,6 +171,159 @@ defmodule HospitalityComs.BoundaryTest do
     end
   end
 
+  describe "the transaction wrapper" do
+    test "writes the employer and the instant where the view will read them" do
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert {:ok, {employer_id, instant}} =
+               EmployerRepo.scoped_transaction(scope, fn _scope ->
+                 %{rows: [[employer_id, instant]]} =
+                   EmployerRepo.query!(
+                     "SELECT app_current_employer_id()::text, app_current_instant()",
+                     []
+                   )
+
+                 {:ok, {employer_id, instant}}
+               end)
+
+      assert employer_id == scope.employer_id
+      assert DateTime.compare(instant, @now) == :eq
+    end
+
+    test "hands the scope to the work, so the instant travels rather than being read again" do
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert {:ok, ^scope} = EmployerRepo.scoped_transaction(scope, &{:ok, &1})
+    end
+
+    test "lets a query the employer is entitled to run through" do
+      # The control for everything below: a backstop that refused everything
+      # would pass every refusal test in this file and ship a repo nobody can
+      # use.
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert {:ok, [_relname | _rest]} =
+               EmployerRepo.scoped_transaction(scope, fn _scope ->
+                 {:ok, EmployerRepo.all(from(c in "pg_class", select: c.relname, limit: 3))}
+               end)
+    end
+  end
+
+  describe "an employer read outside the wrapper" do
+    test "raises rather than running unscoped" do
+      assert_raise EmployerRepo.UnscopedError, ~r/scoped_transaction/, fn ->
+        EmployerRepo.all(from(c in "pg_class", select: c.relname, limit: 1))
+      end
+    end
+
+    test "raises for a write too, not only for a read" do
+      assert_raise EmployerRepo.UnscopedError, ~r/scoped_transaction/, fn ->
+        EmployerRepo.insert_all("pg_class", [%{relname: "nope"}])
+      end
+    end
+
+    test "raises even inside a bare transaction that set no scope" do
+      assert_raise EmployerRepo.UnscopedError, ~r/scoped_transaction/, fn ->
+        EmployerRepo.transaction(fn ->
+          EmployerRepo.all(from(c in "pg_class", select: c.relname, limit: 1))
+        end)
+      end
+    end
+
+    test "leaves the scoping functions raising rather than resolving to NULL" do
+      # A NULL here is the failure mode the one-argument `current_setting`
+      # exists to prevent: the view would return no rows, and no rows is
+      # indistinguishable from a worker who has disclosed nothing.
+      assert_raise Postgrex.Error, ~r/app\.employer_id is not set/, fn ->
+        EmployerRepo.query!("SELECT app_current_employer_id()", [])
+      end
+
+      assert_raise Postgrex.Error, ~r/app\.now is not set/, fn ->
+        EmployerRepo.query!("SELECT app_current_instant()", [])
+      end
+    end
+  end
+
+  describe "the query backstop" do
+    test "refuses a person-zone table named as the query's source" do
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        employer_query(from(p in Person, select: p.id))
+      end
+    end
+
+    test "refuses one named as a string rather than as a schema" do
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people_tokens/, fn ->
+        employer_query(from(t in "people_tokens", select: t.id))
+      end
+    end
+
+    test "refuses one reached through an explicit join" do
+      query = from(c in "pg_class", join: p in Person, on: true, select: p.id)
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        employer_query(query)
+      end
+    end
+
+    test "refuses one reached through an association join" do
+      # The join's source is nil until the planner resolves it, so a backstop
+      # reading `source` alone would wave this through.
+      query = from(t in PersonToken, join: p in assoc(t, :person), select: p.id)
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        employer_query(query)
+      end
+    end
+
+    test "refuses one reached through a subquery" do
+      query = from(p in subquery(from(p in Person, select: %{id: p.id})), select: p.id)
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        employer_query(query)
+      end
+    end
+
+    test "refuses one reached through a common table expression" do
+      query =
+        "pg_class"
+        |> with_cte("hidden", as: ^from(p in Person, select: %{id: p.id}))
+        |> select([c], c.relname)
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        employer_query(query)
+      end
+    end
+
+    test "refuses one reached through a union" do
+      query =
+        from(p in Person, select: %{id: p.id})
+        |> union(^from(t in PersonToken, select: %{id: t.id}))
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        employer_query(from(c in "pg_class", select: %{id: c.oid}) |> union(^query))
+      end
+    end
+
+    test "raises inside the BEAM rather than letting Postgres produce the error" do
+      # The distinction the plan asks for. A `Postgrex.Error` would mean the
+      # statement was sent and refused; this exception means it was never sent,
+      # and the message names the table rather than the connection's role.
+      error =
+        assert_raise EmployerRepo.ZoneViolationError, fn ->
+          employer_query(from(p in Person, select: p.id))
+        end
+
+      refute is_struct(error, Postgrex.Error)
+      assert error.message =~ "person zone"
+    end
+
+    test "does not refuse the same query issued through the person zone's own repo" do
+      # Which is what says the query is well formed and the refusal above is the
+      # boundary rather than a typo.
+      assert Repo.all(from(p in Person, select: p.id)) == []
+    end
+  end
+
   describe "a person-zone context function" do
     test "refuses an employer scope by function clause" do
       # Not a runtime check inside the body. The refusal is the absence of a
@@ -178,6 +340,13 @@ defmodule HospitalityComs.BoundaryTest do
   end
 
   ## Helpers
+
+  # Runs a query the way the application will: inside the wrapper, so that what
+  # refuses it is the zone rule and not the absence of a scope.
+  defp employer_query(query) do
+    scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+    EmployerRepo.scoped_transaction(scope, fn _scope -> {:ok, EmployerRepo.all(query)} end)
+  end
 
   # Handed out of a map so the value's type is the union of both scopes rather
   # than one of them. Written inline, Elixir 1.20 proves at compile time that
