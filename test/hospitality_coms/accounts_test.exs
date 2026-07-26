@@ -122,6 +122,19 @@ defmodule HospitalityComs.AccountsTest do
       assert delivered.text_body =~ "http://localhost/log-in/"
     end
 
+    test "delivers log-in instructions, not a confirmation, to a confirmed person" do
+      person = person_fixture()
+
+      {:ok, _person} = Accounts.request_login_instructions(person.email, url_builder(), @now)
+
+      # The everyday repeat log-in. Only the first-time branch was asserted, so
+      # the notifier could have sent "Confirmation instructions" to somebody
+      # who confirmed months ago and nothing would have failed.
+      assert_received {:email, %Swoosh.Email{subject: "Log in instructions"} = delivered}
+      assert delivered.text_body =~ "http://localhost/log-in/"
+      assert delivered.text_body =~ "You can log into your account"
+    end
+
     test "issues a further token for a known address without creating a second person" do
       person = person_fixture()
 
@@ -283,8 +296,13 @@ defmodule HospitalityComs.AccountsTest do
       refute Accounts.get_person_by_session_token("nonsense", @now)
     end
 
-    test "is still live one day short of fourteen", %{token: token} do
-      assert Accounts.get_person_by_session_token(token, DateTime.add(@now, 13, :day))
+    test "is still live one second short of fourteen days", %{token: token} do
+      # The boundary the `ago/2` rewrite could have moved by a second without
+      # anything noticing. A day either side of it proves nothing.
+      assert Accounts.get_person_by_session_token(
+               token,
+               DateTime.add(@now, 14 * 86_400 - 1, :second)
+             )
     end
 
     test "is expired at fourteen days", %{token: token} do
