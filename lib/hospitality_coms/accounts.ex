@@ -67,6 +67,11 @@ defmodule HospitalityComs.Accounts do
   @doc """
   Registers a person.
 
+  The insert takes a savepoint, so a unique-index collision comes back as a
+  changeset error rather than poisoning an enclosing transaction. That is what
+  lets `request_login_instructions/3` lose the registration race and carry on
+  inside the same transaction; outside one it costs nothing.
+
   ## Examples
 
       iex> register_person(%{email: "foo@example.com"})
@@ -80,7 +85,7 @@ defmodule HospitalityComs.Accounts do
   def register_person(attrs) do
     %Person{}
     |> Person.email_changeset(attrs)
-    |> Repo.insert()
+    |> Repo.insert(mode: :savepoint)
   end
 
   @doc """
@@ -172,7 +177,36 @@ defmodule HospitalityComs.Accounts do
   @spec registered_or_register(Person.t() | nil, String.t()) ::
           {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
   defp registered_or_register(%Person{} = person, _email), do: {:ok, person}
-  defp registered_or_register(nil, email), do: register_person(%{email: email})
+
+  defp registered_or_register(nil, email) do
+    %{email: email}
+    |> register_person()
+    |> or_whoever_won_the_race(email)
+  end
+
+  # Two first-ever log-ins for the same address at the same time both see no
+  # person and both insert; one of them loses on the unique index. Losing that
+  # race is not the caller's problem and must not be reported as one — a 422
+  # saying the address "has already been taken" would tell somebody who has
+  # never used this application that the address is registered, which is the
+  # enumeration oracle the single log-in door exists to close. So the loser
+  # looks again, and the winner's person is the answer to both requests.
+  @spec or_whoever_won_the_race(
+          {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())},
+          String.t()
+        ) :: {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
+  defp or_whoever_won_the_race({:ok, %Person{} = person}, _email), do: {:ok, person}
+
+  defp or_whoever_won_the_race({:error, changeset}, email) do
+    email |> get_person_by_email() |> registered_or_error(changeset)
+  end
+
+  # No row means the insert failed on its own merits — a malformed address, an
+  # over-long one — and that is a real 422.
+  @spec registered_or_error(Person.t() | nil, Ecto.Changeset.t(Person.t())) ::
+          {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
+  defp registered_or_error(%Person{} = person, _changeset), do: {:ok, person}
+  defp registered_or_error(nil, changeset), do: {:error, changeset}
 
   ## Settings
 
@@ -273,15 +307,24 @@ defmodule HospitalityComs.Accounts do
   2. The person has not confirmed their email. They are confirmed, logged in,
      and every token they hold — session tokens included — is expired.
 
-  Redemption is single use either way: the second attempt with the same token
-  finds no row and returns `{:error, :not_found}`.
+  Redemption is single use either way, and single use under concurrency and
+  not merely on a second request an hour later. The lookup and the write are
+  one transaction, and the write that claims the link is
+  `delete_all ... where id`, whose affected-row count is the claim: exactly one
+  caller gets `{1, _}` and everybody else gets `{0, _}` and `{:error,
+  :not_found}`, which the endpoint answers 401 to.
+
+  That matters because both racing paths were wrong before. Deleting the struct
+  raised `Ecto.StaleEntryError` on the loser — a 500 where a 401 was promised —
+  and the unconfirmed path did not delete by identity at all, so two
+  simultaneous redemptions of one link produced two sessions.
   """
   @spec login_person_by_magic_link(String.t(), DateTime.t()) ::
           {:ok, {Person.t(), [PersonToken.t()]}}
           | {:error, :not_found | Ecto.Changeset.t(Person.t())}
   def login_person_by_magic_link(token, %DateTime{} = now) when is_binary(token) do
     case PersonToken.verify_magic_link_token_query(token, now) do
-      {:ok, query} -> query |> Repo.one() |> redeem_magic_link(now)
+      {:ok, query} -> Repo.transact(fn -> query |> Repo.one() |> redeem_magic_link(now) end)
       :error -> {:error, :not_found}
     end
   end
@@ -289,18 +332,41 @@ defmodule HospitalityComs.Accounts do
   @spec redeem_magic_link({Person.t(), PersonToken.t()} | nil, DateTime.t()) ::
           {:ok, {Person.t(), [PersonToken.t()]}}
           | {:error, :not_found | Ecto.Changeset.t(Person.t())}
-  defp redeem_magic_link({%Person{confirmed_at: nil} = person, _token}, now) do
-    person
-    |> Person.confirm_changeset(now)
-    |> update_person_and_delete_all_tokens()
-  end
-
-  defp redeem_magic_link({%Person{} = person, %PersonToken{} = token}, _now) do
-    Repo.delete!(token)
-    {:ok, {person, []}}
+  defp redeem_magic_link({%Person{} = person, %PersonToken{id: id}}, now) do
+    PersonToken
+    |> where([t], t.id == ^id)
+    |> select([t], t)
+    |> Repo.delete_all()
+    |> log_in_claimant(person, now)
   end
 
   defp redeem_magic_link(nil, _now), do: {:error, :not_found}
+
+  @spec log_in_claimant({non_neg_integer(), [PersonToken.t()]}, Person.t(), DateTime.t()) ::
+          {:ok, {Person.t(), [PersonToken.t()]}}
+          | {:error, :not_found | Ecto.Changeset.t(Person.t())}
+  defp log_in_claimant({0, _deleted}, _person, _now), do: {:error, :not_found}
+
+  defp log_in_claimant({1, [claimed]}, %Person{confirmed_at: nil} = person, now) do
+    person
+    |> Person.confirm_changeset(now)
+    |> update_person_and_delete_all_tokens()
+    |> including_claimed(claimed)
+  end
+
+  defp log_in_claimant({1, _deleted}, %Person{} = person, _now), do: {:ok, {person, []}}
+
+  # The link this call claimed is expired along with the rest of the person's
+  # tokens, so it belongs in the list the caller disconnects sockets for even
+  # though it was deleted a statement earlier.
+  @spec including_claimed(
+          {:ok, {Person.t(), [PersonToken.t()]}} | {:error, Ecto.Changeset.t(Person.t())},
+          PersonToken.t()
+        ) :: {:ok, {Person.t(), [PersonToken.t()]}} | {:error, Ecto.Changeset.t(Person.t())}
+  defp including_claimed({:ok, {person, expired}}, claimed),
+    do: {:ok, {person, [claimed | expired]}}
+
+  defp including_claimed({:error, changeset}, _claimed), do: {:error, changeset}
 
   @doc ~S"""
   Delivers the update-email instructions to the given person.
