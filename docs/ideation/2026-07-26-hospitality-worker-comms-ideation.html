@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ideation: Hospitality Worker Communications Platform</title>
+<style>
+  :root {
+    --bg: #faf7f2;
+    --surface: #ffffff;
+    --surface-2: #f4f0e9;
+    --text: #1c1b19;
+    --muted: #6d6862;
+    --rule: #e2dbd0;
+    --accent: #a3512b;
+    --accent-soft: #f6e9e1;
+    --accent-text: #7d3d20;
+    --sage: #3f6354;
+    --sage-soft: #e6eeea;
+    --sage-text: #2f4b40;
+    --warn-soft: #f9eedb;
+    --warn-text: #7a5518;
+    --svg-box: #ffffff;
+    --svg-box-2: #f4f0e9;
+    --svg-stroke: #b9b0a3;
+    --svg-text: #1c1b19;
+    --svg-muted: #6d6862;
+    --svg-accent: #a3512b;
+    --svg-accent-soft: #f6e9e1;
+    --svg-sage: #3f6354;
+    --svg-sage-soft: #e6eeea;
+    --svg-halo: #faf7f2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17161a;
+      --surface: #201f24;
+      --surface-2: #26252b;
+      --text: #ece7e0;
+      --muted: #a49e96;
+      --rule: #35333a;
+      --accent: #e0a075;
+      --accent-soft: #33261f;
+      --accent-text: #edbd9b;
+      --sage: #8fbfa9;
+      --sage-soft: #1e2a26;
+      --sage-text: #a8d3bf;
+      --warn-soft: #302516;
+      --warn-text: #d8ae6c;
+      --svg-box: #26252b;
+      --svg-box-2: #201f24;
+      --svg-stroke: #55525c;
+      --svg-text: #ece7e0;
+      --svg-muted: #a49e96;
+      --svg-accent: #e0a075;
+      --svg-accent-soft: #3a2a20;
+      --svg-sage: #8fbfa9;
+      --svg-sage-soft: #1f2c27;
+      --svg-halo: #17161a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17161a; --surface: #201f24; --surface-2: #26252b; --text: #ece7e0;
+    --muted: #a49e96; --rule: #35333a; --accent: #e0a075; --accent-soft: #33261f;
+    --accent-text: #edbd9b; --sage: #8fbfa9; --sage-soft: #1e2a26; --sage-text: #a8d3bf;
+    --warn-soft: #302516; --warn-text: #d8ae6c;
+    --svg-box: #26252b; --svg-box-2: #201f24; --svg-stroke: #55525c; --svg-text: #ece7e0;
+    --svg-muted: #a49e96; --svg-accent: #e0a075; --svg-accent-soft: #3a2a20;
+    --svg-sage: #8fbfa9; --svg-sage-soft: #1f2c27; --svg-halo: #17161a;
+  }
+  :root[data-theme="light"] {
+    --bg: #faf7f2; --surface: #ffffff; --surface-2: #f4f0e9; --text: #1c1b19;
+    --muted: #6d6862; --rule: #e2dbd0; --accent: #a3512b; --accent-soft: #f6e9e1;
+    --accent-text: #7d3d20; --sage: #3f6354; --sage-soft: #e6eeea; --sage-text: #2f4b40;
+    --warn-soft: #f9eedb; --warn-text: #7a5518;
+    --svg-box: #ffffff; --svg-box-2: #f4f0e9; --svg-stroke: #b9b0a3; --svg-text: #1c1b19;
+    --svg-muted: #6d6862; --svg-accent: #a3512b; --svg-accent-soft: #f6e9e1;
+    --svg-sage: #3f6354; --svg-sage-soft: #e6eeea; --svg-halo: #faf7f2;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-serif, Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 60rem; margin-inline: auto; padding: 3rem 1.5rem 4rem; }
+  p, li { max-width: 68ch; }
+
+  .eyebrow {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.7rem; font-weight: 650; letter-spacing: 0.13em;
+    text-transform: uppercase; color: var(--accent-text); margin: 0 0 0.6rem;
+  }
+  h1 {
+    font-size: clamp(1.9rem, 4vw, 2.5rem); line-height: 1.15;
+    margin: 0 0 0.9rem; font-weight: 600; letter-spacing: -0.015em;
+  }
+  h2 {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 1.22rem; font-weight: 650; letter-spacing: -0.005em;
+    margin: 3.2rem 0 1.1rem; padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--rule);
+  }
+  h3 {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 1.06rem; font-weight: 650; margin: 0 0 0.2rem; letter-spacing: -0.005em;
+  }
+  h4 {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.76rem; font-weight: 650; letter-spacing: 0.09em; text-transform: uppercase;
+    color: var(--muted); margin: 1.4rem 0 0.35rem;
+  }
+  a { color: var(--accent-text); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  strong { color: inherit; font-weight: 650; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.86em; background: var(--surface-2);
+    padding: 0.1em 0.35em; border-radius: 3px;
+  }
+
+  .meta {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.82rem; color: var(--muted);
+    display: flex; flex-wrap: wrap; gap: 0.45rem 1.4rem;
+    margin: 0 0 1.6rem; padding-bottom: 1.4rem; border-bottom: 1px solid var(--rule);
+  }
+  .meta span { white-space: nowrap; }
+  .meta b { color: var(--text); font-weight: 600; }
+  .lede { font-size: 1.06rem; color: var(--text); }
+
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+    gap: 0.7rem; margin: 1.8rem 0 0;
+  }
+  .stat {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 8px; padding: 0.8rem 0.9rem;
+  }
+  .stat .n {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 1.5rem; font-weight: 650; line-height: 1.1; display: block;
+  }
+  .stat .l {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.72rem; letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--muted); margin-top: 0.2rem; display: block;
+  }
+
+  .callout {
+    background: var(--warn-soft); border: 1px solid var(--rule);
+    border-radius: 8px; padding: 1rem 1.15rem; margin: 1.4rem 0;
+  }
+  .callout .lbl {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.7rem; font-weight: 650; letter-spacing: 0.11em; text-transform: uppercase;
+    color: var(--warn-text); display: block; margin-bottom: 0.35rem;
+  }
+  .callout p { margin: 0.4rem 0 0; }
+  .callout p:first-of-type { margin-top: 0; }
+
+  .axes { list-style: none; padding: 0; margin: 0; }
+  .axes li {
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 8px;
+    padding: 0.85rem 1rem; margin-bottom: 0.6rem; max-width: none;
+  }
+  .axes .an {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-weight: 650; font-size: 0.95rem;
+  }
+  .axes .ad { color: var(--muted); font-size: 0.94rem; display: block; margin-top: 0.15rem; }
+
+  .jump {
+    background: var(--surface-2); border: 1px solid var(--rule); border-radius: 8px;
+    padding: 1rem 1.15rem; margin: 0 0 2rem;
+  }
+  .jump h4 { margin-top: 0; }
+  .jump ol { margin: 0; padding-left: 1.3rem; }
+  .jump li { margin: 0.28rem 0; max-width: none; }
+  .jump a { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.92rem; }
+
+  article.idea {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 10px; padding: 1.5rem 1.6rem; margin-bottom: 1.6rem;
+  }
+  .idea-head { display: flex; gap: 0.8rem; align-items: baseline; flex-wrap: wrap; }
+  .rank {
+    font-family: ui-sans-serif, system-ui, sans-serif; font-weight: 650;
+    font-size: 0.78rem; letter-spacing: 0.04em;
+    background: var(--accent-soft); color: var(--accent-text);
+    border: 1px solid var(--rule); border-radius: 999px; padding: 0.16rem 0.62rem;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.8rem 0 0.2rem; }
+  .chip {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.73rem; font-weight: 600; letter-spacing: 0.02em;
+    border: 1px solid var(--rule); border-radius: 999px; padding: 0.18rem 0.6rem;
+    background: var(--surface-2); color: var(--muted);
+  }
+  .chip.axis { background: var(--sage-soft); color: var(--sage-text); }
+  .chip.conf { background: var(--accent-soft); color: var(--accent-text); }
+  .idea p { margin: 0.3rem 0 0; }
+  .basis-tag {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem; font-weight: 600; color: var(--accent-text);
+  }
+  figure { margin: 1.5rem 0 0.4rem; }
+  figure svg { display: block; width: 100%; height: auto; }
+  figcaption {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.78rem; color: var(--muted); margin-top: 0.5rem;
+  }
+  .scroll-x { overflow-x: auto; }
+
+  .d-box { fill: var(--svg-box); stroke: var(--svg-stroke); stroke-width: 1.2; }
+  .d-box2 { fill: var(--svg-box-2); stroke: var(--svg-stroke); stroke-width: 1.2; }
+  .d-acc { fill: var(--svg-accent-soft); stroke: var(--svg-accent); stroke-width: 1.4; }
+  .d-sage { fill: var(--svg-sage-soft); stroke: var(--svg-sage); stroke-width: 1.4; }
+  .d-line { stroke: var(--svg-stroke); stroke-width: 1.3; fill: none; }
+  .d-line-acc { stroke: var(--svg-accent); stroke-width: 1.5; fill: none; }
+  .d-dash { stroke: var(--svg-stroke); stroke-width: 1.2; fill: none; stroke-dasharray: 4 3; }
+  .t { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 13px; font-weight: 600; fill: var(--svg-text); }
+  .ts { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 11.5px; font-weight: 500; fill: var(--svg-text); }
+  .tm { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 11px; font-weight: 500; fill: var(--svg-muted); }
+  .tl { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 10.5px; font-weight: 600; fill: var(--svg-muted);
+        paint-order: stroke fill; stroke: var(--svg-halo); stroke-width: 3px; stroke-linejoin: round; }
+  .tacc { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 11.5px; font-weight: 650; fill: var(--svg-accent); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 0.92rem; margin-top: 0.5rem; }
+  th, td { text-align: left; padding: 0.6rem 0.7rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th {
+    font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.72rem;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 650;
+  }
+  td:first-child { white-space: nowrap; color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.85rem; }
+  td.idea-name { font-weight: 600; }
+
+  footer.composition-signal {
+    margin-top: 3.5rem; padding-top: 1.2rem; border-top: 1px solid var(--rule);
+    font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.78rem; color: var(--muted);
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<p class="eyebrow">Ideation</p>
+<h1>A communications platform for hospitality workers</h1>
+
+<div class="meta">
+  <span><b>Date</b> <time datetime="2026-07-26">2026-07-26</time></span>
+  <span><b>Topic</b> hospitality-worker-comms</span>
+  <span><b>Mode</b> elsewhere-software</span>
+</div>
+
+<p class="lede"><b>Focus:</b> A POC of a communications platform for hospitality workers — moving them off WhatsApp for day-to-day 1:1 and group communication, and aligning them with the broader hospitality ecosystem.</p>
+
+<div class="stats">
+  <div class="stat"><span class="n">47</span><span class="l">Raw candidates</span></div>
+  <div class="stat"><span class="n">7</span><span class="l">Survivors</span></div>
+  <div class="stat"><span class="n">18</span><span class="l">Cut</span></div>
+  <div class="stat"><span class="n">5</span><span class="l">Frames</span></div>
+  <div class="stat"><span class="n">4</span><span class="l">Axes covered</span></div>
+</div>
+
+<h2>Topic Context</h2>
+
+<p>Greenfield. The repository is an empty shell — a README and a stock <code>mix new</code> <code>.gitignore</code> — so there is no code to ground in. Grounding came from the stated concept plus external research into how hospitality workforce communication actually works.</p>
+
+<p><b>Constraints that shaped selection.</b> The platform must be <b>employer agnostic</b>: worker identity is not owned by or scoped to any single employer. The stack is <b>Elixir</b> with <b>React</b> for web and <b>React Native</b> for mobile, with mobile deferred to a later phase — so phase 1 is web-only, and anything needing native capability is out of scope for a first build. Most consequentially, this is an <b>exercise in agentic POC building</b>, not a commercial product: existing products are design guidelines, not competitors.</p>
+
+<div class="callout">
+  <span class="lbl">How that last constraint changed the ranking</span>
+  <p>Competitive differentiation, market gaps, moats, and monetization were <b>excluded as selection criteria</b>. Several strong candidates were generated under a competitive framing and had to be re-scored — ideas whose entire value was a go-to-market loop (churn as a distribution channel, marketplace take rates, choosing an integration partner to inherit their network) were cut, with their architectural cores extracted where one existed. Conversely, "an existing product already does this" was never a reason to cut anything.</p>
+</div>
+
+<p><b>What the external research established.</b> Purpose-built hospitality comms products exist in numbers — Zenzap, All Gravy, Better Chains, Pebb, Xenia, Oneteam — alongside comms-first platforms (Beekeeper, Blink, Speakap), scheduling-first tools with comms attached (7shifts, Deputy, Harri), and ops-first tools with chat attached (Hotelkit, Quore, Alice). Read as guidelines, three findings mattered:</p>
+
+<ul>
+  <li><b>Two obvious features are commodities, not differentiators.</b> No-email identity (phone number, employee ID, QR code) and multilingual auto-translation ship across the category. Neither is worth POC effort as a headline capability.</li>
+  <li><b>Broadcast-first rollouts reliably fail.</b> Frontline workers do not open an app to read announcements. Habit forms only when the app is load-bearing for actually doing the job. This is the single strongest adoption finding and it disqualifies "chat plus a news feed" as an MVP.</li>
+  <li><b>Persistent cross-employer worker identity is an evidenced absence.</b> The "gig passport" is a discussed concept, not a shipped product. Instawork and Jitjatjo hold marketplace profiles, but their messaging is shift-scoped and ephemeral. Nothing in production combines a durable worker-owned account with a live comms layer — which is precisely where the employer-agnostic constraint points.</li>
+</ul>
+
+<p>One adjudicated legal fact recurs across the ideas below: Spain's data protection authority fined LVMH Iberia €70,000 (reduced to €42,000) for adding an employee's personal phone number to a work WhatsApp group after she had opted out. It is the concrete instance of the harm the whole "whose account is it" question circles.</p>
+
+<h2>Topic Axes</h2>
+
+<ol class="axes">
+  <li><span class="an">Getting off WhatsApp</span><span class="ad">The switch itself: onboarding friction, day-one value, migration of existing groups and history, and what makes staying on WhatsApp actually cost something.</span></li>
+  <li><span class="an">Shift-floor coordination</span><span class="ad">What a message becomes when it carries operational context — handovers, swaps, incidents, tasks. Being better than chat, not merely equal to it.</span></li>
+  <li><span class="an">Whose account is it</span><span class="ad">Ownership and lifecycle: worker- versus employer-controlled identity, offboarding under 70–100% annual churn, privacy on personal devices, records and audit.</span></li>
+  <li><span class="an">Beyond the venue</span><span class="ad">Cross-venue peers, suppliers and industry bodies, and integration with venue operational systems.</span></li>
+</ol>
+
+<h2>Ranked Ideas</h2>
+
+<nav class="jump">
+  <h4>Jump to</h4>
+  <ol>
+    <li><a href="#i1">Worker-owned identity; the employer holds a lease</a></li>
+    <li><a href="#i2">Rooms are live projections of the roster</a></li>
+    <li><a href="#i3">The inbox is open obligations; the handover is what's left</a></li>
+    <li><a href="#i4">Worker-owned availability across employers</a></li>
+    <li><a href="#i5">Cross-venue mutual aid on run cards</a></li>
+    <li><a href="#i6">Threads belong to places, not people</a></li>
+    <li><a href="#i7">The WhatsApp export as day-one import</a></li>
+  </ol>
+</nav>
+
+<article class="idea" id="i1">
+  <div class="idea-head"><span class="rank">1</span><h3>Worker-owned identity; the employer holds a lease</h3></div>
+  <div class="chips">
+    <span class="chip axis">Whose account is it</span>
+    <span class="chip conf">Confidence 90%</span>
+    <span class="chip">Complexity High</span>
+  </div>
+
+  <h4>Description</h4>
+  <p>Invert the standard SaaS account model. The identity record belongs to the person and persists from their first hospitality job onward. An employer never owns an account — it holds a <em>time-boxed, revocable engagement lease</em> against that person, which expires on the contract end date. On expiry the venue loses visibility of the worker and the worker loses access to venue rooms, but keeps their own record of their own participation. Two zones exist by construction: an employer-visible operational zone, and a worker-to-worker zone the operator <em>cannot</em> expose to an employer even if asked. Qualifications are recorded against a standard position catalogue rather than as scores.</p>
+
+  <figure>
+    <div class="scroll-x">
+    <svg viewBox="0 0 760 300" role="img" aria-label="A worker-owned person record at left, with three time-boxed engagement leases from different venues attaching to it; two zones shown at the bottom.">
+      <defs><marker id="a1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--svg-stroke)"/></marker></defs>
+
+      <rect x="16" y="40" width="212" height="150" rx="9" class="d-sage"/>
+      <text x="32" y="66" class="t">Person record</text>
+      <text x="32" y="85" class="tm">owned by the worker · permanent</text>
+      <line x1="32" y1="97" x2="212" y2="97" class="d-dash"/>
+      <text x="32" y="118" class="ts">identity</text>
+      <text x="32" y="139" class="ts">qualifications (catalogue)</text>
+      <text x="32" y="160" class="ts">own message history</text>
+      <text x="32" y="181" class="ts">availability</text>
+
+      <rect x="392" y="24" width="240" height="52" rx="8" class="d-acc"/>
+      <text x="408" y="46" class="ts">Engagement lease · Venue A</text>
+      <text x="408" y="64" class="tm">active — expires at contract end</text>
+
+      <rect x="392" y="90" width="240" height="52" rx="8" class="d-acc"/>
+      <text x="408" y="112" class="ts">Engagement lease · Venue B</text>
+      <text x="408" y="130" class="tm">active — second job</text>
+
+      <rect x="392" y="156" width="240" height="52" rx="8" class="d-box2"/>
+      <text x="408" y="178" class="tm">Engagement lease · Venue C</text>
+      <text x="408" y="196" class="tm">expired — access gone, record kept</text>
+
+      <path d="M228 92 L392 50" class="d-line" marker-end="url(#a1)"/>
+      <path d="M228 112 L392 116" class="d-line" marker-end="url(#a1)"/>
+      <path d="M228 134 L392 182" class="d-dash" marker-end="url(#a1)"/>
+      <text x="300" y="70" class="tl" text-anchor="middle">grants scoped access</text>
+
+      <rect x="16" y="222" width="300" height="58" rx="8" class="d-box"/>
+      <text x="32" y="245" class="ts">Employer-visible zone</text>
+      <text x="32" y="264" class="tm">rosters, tasks, incidents, handovers</text>
+
+      <rect x="332" y="222" width="300" height="58" rx="8" class="d-box"/>
+      <text x="348" y="245" class="ts">Worker-private zone</text>
+      <text x="348" y="264" class="tm">peer conversation — closed by architecture</text>
+
+      <text x="652" y="252" class="tacc">two zones,</text>
+      <text x="652" y="268" class="tacc">not two settings</text>
+    </svg>
+    </div>
+    <figcaption>Directional sketch. The employer attaches to the worker's record, never the reverse — so offboarding is a lease expiring, not an account being deleted.</figcaption>
+  </figure>
+
+  <h4>Basis</h4>
+  <p><span class="basis-tag">external:</span> The wildland firefighting <b>Incident Qualification Card</b> ("red card"), issued via IQCS, is the working model for portable cross-employer credentials: a responder arrives at an incident run by an agency that does not employ them and their qualification is trusted because a neutral body maintains the record. Verified nuance worth keeping: the card's output is <em>Qualified / Trainee / Unqualified</em> against a standard position catalogue, not a score — though the underlying Position Task Book does use an internal Meets/Exceeds scale before certification, so "no rating anywhere in the process" would overstate it. Also <span class="basis-tag">external:</span> the AEPD fine against LVMH Iberia, which turned on exactly this question of who controls a worker's personal data. <span class="basis-tag">reasoned:</span> at 70–100% annual churn, an employer-provisioned account is a permanent administrative tax and a permanent liability surface; a lease has expiry built into the primitive, so the compliant behaviour is the default rather than a process someone must remember to run.</p>
+
+  <h4>Rationale</h4>
+  <p>Five of the six ideation frames arrived at this independently — the strongest convergence signal in the run — and the employer-agnostic constraint then promoted it from one option among several to the required architecture. It is also the decision that cannot be retrofitted. Every other idea here inherits its shape from whether the schema has an <code>employee</code> table or a <code>person</code> plus <code>engagement</code> pair. The red-card model matters specifically because it answers the standard objection that portable worker reputation is unbuildable since ratings are gameable: IQCS does not rate anyone, it records qualification against a published standard.</p>
+
+  <h4>Downsides</h4>
+  <p>The highest-complexity item here and the hardest to demo, because its value is structural rather than visible — a POC has to <em>stage</em> churn to show the payoff. The two-zone privacy guarantee permanently forecloses selling employers visibility into peer conversation, which is a real capability to give up before you know whether you want it. Hospitality also has no equivalent of the NWCG position catalogue, so the qualification layer either invents a taxonomy or degrades into free text. And the neat separation leaks at the edges: an "offboarding webhook" driven by an employer's HR system is genuinely useful, but as normally specified it could reach the underlying person record — which is the exact failure this architecture exists to prevent, and needs an explicit guardrail rather than good intentions.</p>
+</article>
+
+<article class="idea" id="i2">
+  <div class="idea-head"><span class="rank">2</span><h3>Rooms are live projections of the roster</h3></div>
+  <div class="chips">
+    <span class="chip axis">Getting off WhatsApp</span>
+    <span class="chip conf">Confidence 85%</span>
+    <span class="chip">Complexity Medium</span>
+  </div>
+
+  <h4>Description</h4>
+  <p>A WhatsApp group is a hand-curated membership list that rots. Replace it with a computed view: the room for "Friday PM bar" contains exactly whoever is rostered on the bar on Friday PM, derived from the roster crossed with active engagement leases. Nobody ever adds or removes a person. Group creation disappears as a step — it becomes a query rather than an artifact. Membership expires because the shift expires.</p>
+
+  <figure>
+    <div class="scroll-x">
+    <svg viewBox="0 0 760 264" role="img" aria-label="Roster and engagement leases feed a query that produces room membership for two different shifts, with membership differing between them.">
+      <defs><marker id="a2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--svg-stroke)"/></marker></defs>
+
+      <rect x="16" y="30" width="176" height="70" rx="8" class="d-box"/>
+      <text x="32" y="54" class="ts">Roster</text>
+      <text x="32" y="74" class="tm">who is on, when</text>
+      <text x="32" y="91" class="tm">source: scheduling system</text>
+
+      <rect x="16" y="128" width="176" height="70" rx="8" class="d-box"/>
+      <text x="32" y="152" class="ts">Engagement leases</text>
+      <text x="32" y="172" class="tm">who currently works here</text>
+      <text x="32" y="189" class="tm">source: idea 1</text>
+
+      <path d="M192 65 L288 105" class="d-line" marker-end="url(#a2)"/>
+      <path d="M192 163 L288 127" class="d-line" marker-end="url(#a2)"/>
+
+      <rect x="288" y="88" width="132" height="56" rx="8" class="d-acc"/>
+      <text x="354" y="112" class="ts" text-anchor="middle">Room = query</text>
+      <text x="354" y="131" class="tm" text-anchor="middle">no stored list</text>
+
+      <path d="M420 104 L516 62" class="d-line" marker-end="url(#a2)"/>
+      <path d="M420 128 L516 172" class="d-line" marker-end="url(#a2)"/>
+
+      <rect x="516" y="30" width="228" height="72" rx="8" class="d-sage"/>
+      <text x="532" y="54" class="ts">Friday PM · bar</text>
+      <text x="532" y="74" class="tm">Ana · Tomás · Priya</text>
+      <text x="532" y="92" class="tm">room closes when the shift does</text>
+
+      <rect x="516" y="146" width="228" height="72" rx="8" class="d-sage"/>
+      <text x="532" y="170" class="ts">Saturday AM · bar</text>
+      <text x="532" y="190" class="tm">Priya · Deniz</text>
+      <text x="532" y="208" class="tm">different people, no admin action</text>
+
+      <text x="380" y="244" class="tacc" text-anchor="middle">Nobody was added. Nobody was removed. Nobody was forgotten.</text>
+    </svg>
+    </div>
+    <figcaption>Directional sketch. Membership is derived, so the leaver-still-in-the-group problem cannot occur — there is no list to forget to update.</figcaption>
+  </figure>
+
+  <h4>Basis</h4>
+  <p><span class="basis-tag">reasoned:</span> At 70–100% annual churn, a person-indexed membership list imposes reconciliation work that scales linearly with turnover, across every shift group, department group and venue group that exists. No single instance feels expensive, which is exactly why nobody budgets for it and nobody does it reliably — hence ex-employees sitting in operational WhatsApp groups for months. Making membership a function of the roster sends both the maintenance cost and the offboarding risk to zero as a side effect of one design decision. <span class="basis-tag">external:</span> Film and TV call sheets distribute day-scoped structured comms to a crew that differs every day, precisely because a persistent group is the wrong container for transient composition.</p>
+
+  <h4>Rationale</h4>
+  <p>Four independent frames converged here, and it collapses two problems the research treats separately — nightly-changing teams and churn-driven offboarding — into a single mechanism. It also earns the adoption condition the research is emphatic about: deriving rooms from the roster makes schedule integration load-bearing rather than a nice-to-have, so the app is where the work is represented rather than where announcements arrive. This is the idea with the best fit to the chosen stack: Phoenix Channels, PubSub and Presence make live, short-lived, membership-changing rooms close to free, and "a shift is a supervised process" is idiomatic OTP rather than a contrivance.</p>
+
+  <h4>Downsides</h4>
+  <p>It requires a roster source, which a POC must either mock or integrate — and the interesting behaviour is all in the failure modes: what happens when the roster feed is late, wrong, or silent. A room that dissolves mid-conversation because a shift ended is hostile, so the expiry semantics need real design rather than a cron job. There is also a tension with employer-agnosticism worth naming: the roster is the employer's data. That is resolvable — a venue genuinely does own the fact of who is on tonight — but only if room membership never gates the worker's underlying identity record.</p>
+</article>
+
+<article class="idea" id="i3">
+  <div class="idea-head"><span class="rank">3</span><h3>The inbox is open obligations; the handover is what's left</h3></div>
+  <div class="chips">
+    <span class="chip axis">Shift-floor coordination</span>
+    <span class="chip conf">Confidence 80%</span>
+    <span class="chip">Complexity Medium</span>
+  </div>
+
+  <h4>Description</h4>
+  <p>Change the unit from message to commitment. Anything that asks something of someone — an allergen alert, a fridge temperature, a till discrepancy, a VIP arriving at eight, a Saturday shift needing cover — becomes an object with exactly one owner and a deadline. Obligations can be opened by people or by events from the POS and scheduling systems. The shift ends when the open count reaches zero, and whatever is still open <em>is</em>, by definition, the handover to the next shift. Nobody authors a handover; it is the residue.</p>
+
+  <figure>
+    <div class="scroll-x">
+    <svg viewBox="0 0 760 236" role="img" aria-label="Obligations opened during a shift, some closed and some left open; the open ones become the handover object passed to the next shift.">
+      <defs><marker id="a3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--svg-stroke)"/></marker></defs>
+
+      <text x="16" y="28" class="tm">SHIFT IN PROGRESS</text>
+      <line x1="16" y1="40" x2="470" y2="40" class="d-dash"/>
+
+      <rect x="16" y="56" width="200" height="38" rx="7" class="d-box2"/>
+      <text x="30" y="80" class="ts">Fridge 3 temp check</text>
+      <text x="196" y="80" class="tacc" text-anchor="end">✓</text>
+
+      <rect x="16" y="104" width="200" height="38" rx="7" class="d-box2"/>
+      <text x="30" y="128" class="ts">Allergen note · table 12</text>
+      <text x="196" y="128" class="tacc" text-anchor="end">✓</text>
+
+      <rect x="16" y="152" width="200" height="38" rx="7" class="d-acc"/>
+      <text x="30" y="176" class="ts">Ice machine leaking</text>
+
+      <rect x="240" y="152" width="200" height="38" rx="7" class="d-acc"/>
+      <text x="254" y="176" class="ts">Till 3 · £40 over</text>
+
+      <rect x="240" y="56" width="200" height="38" rx="7" class="d-box2"/>
+      <text x="254" y="80" class="ts">Cover Saturday close</text>
+      <text x="420" y="80" class="tacc" text-anchor="end">✓</text>
+
+      <text x="240" y="128" class="tm">each has one owner</text>
+      <text x="240" y="144" class="tm">and a deadline</text>
+
+      <path d="M440 171 L516 171" class="d-line-acc" marker-end="url(#a3)"/>
+      <text x="478" y="160" class="tl" text-anchor="middle">what's left</text>
+
+      <rect x="516" y="112" width="228" height="118" rx="9" class="d-sage"/>
+      <text x="532" y="138" class="t">Handover</text>
+      <text x="532" y="157" class="tm">derived, not written</text>
+      <line x1="532" y1="169" x2="728" y2="169" class="d-dash"/>
+      <text x="532" y="190" class="ts">Ice machine leaking</text>
+      <text x="532" y="211" class="ts">Till 3 · £40 over</text>
+
+      <text x="630" y="60" class="tacc" text-anchor="middle">Nobody fills in</text>
+      <text x="630" y="76" class="tacc" text-anchor="middle">a form at 1am.</text>
+    </svg>
+    </div>
+    <figcaption>Directional sketch. Structured handover without authoring cost — the open items at shift end already are the handover.</figcaption>
+  </figure>
+
+  <h4>Basis</h4>
+  <p><span class="basis-tag">external:</span> Nursing SBAR handoff tooling treats the shift boundary as a structured context transfer rather than chat scrollback, and airline crew systems fuse comms directly to hard operational data rather than bolting chat on. <span class="basis-tag">reasoned:</span> A forty-person group chat has a specific pathology — a request addressed to everyone is owned by no one, and the only recovery is a manager re-reading the scroll. Assigning ownership at write time is the minimum change that makes a message strictly better than chat rather than merely equal to it. And the known weakness of structured handover tools is authoring cost: nobody completes a handover form at the end of a double. Deriving the handover from unresolved obligations makes it free.</p>
+
+  <h4>Rationale</h4>
+  <p>Three frames independently proposed a structured handoff object; this version is the one that solves their shared weak point. It also gives the product a candidate north-star metric that is legible to an operator on day one — open obligations at shift end — which is worth more to a POC than any feature. Combined with idea 2, it produces something a chat app structurally cannot: a year of accumulated structured operational records rather than a year of scrollback, where the second month is genuinely more useful than the first.</p>
+
+  <h4>Downsides</h4>
+  <p>Assigning an owner and a deadline is friction at precisely the moment people are busiest, and if that friction is too high, users will route around it — back to WhatsApp, which asks nothing of them. The failure mode is a task tracker nobody updates, at which point "open obligations at shift end" becomes a meaningless number that only measures neglect. Auto-opening obligations from POS events mitigates the friction but introduces its own risk: a system that generates obligations faster than humans close them trains people to ignore the count.</p>
+</article>
+
+<article class="idea" id="i4">
+  <div class="idea-head"><span class="rank">4</span><h3>Worker-owned availability across employers</h3></div>
+  <div class="chips">
+    <span class="chip axis">Beyond the venue</span>
+    <span class="chip conf">Confidence 80%</span>
+    <span class="chip">Complexity Medium</span>
+  </div>
+
+  <h4>Description</h4>
+  <p>Every scheduling product models a worker as belonging to one venue. Because identity here is worker-owned, one account can span employers — and the primitive that follows is an <em>availability object the worker owns</em>. It answers "can you work Friday?" for each employer independently, without disclosing that the reason is a shift at another venue. The worker maintains one truthful picture of their own week; each employer sees a truthful answer and nothing more.</p>
+
+  <figure>
+    <div class="scroll-x">
+    <svg viewBox="0 0 760 250" role="img" aria-label="A worker-owned availability object in the centre answers availability questions from two employers without revealing the reason for unavailability.">
+      <defs><marker id="a4" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--svg-stroke)"/></marker></defs>
+
+      <rect x="272" y="78" width="216" height="94" rx="9" class="d-sage"/>
+      <text x="380" y="104" class="t" text-anchor="middle">Availability</text>
+      <text x="380" y="123" class="tm" text-anchor="middle">owned by the worker</text>
+      <line x1="292" y1="134" x2="468" y2="134" class="d-dash"/>
+      <text x="380" y="154" class="tm" text-anchor="middle">Fri PM — not available</text>
+
+      <rect x="16" y="40" width="192" height="58" rx="8" class="d-box"/>
+      <text x="32" y="64" class="ts">Venue A</text>
+      <text x="32" y="83" class="tm">"Free Friday PM?"</text>
+
+      <rect x="16" y="152" width="192" height="58" rx="8" class="d-box"/>
+      <text x="32" y="176" class="ts">Venue B</text>
+      <text x="32" y="195" class="tm">"Free Friday PM?"</text>
+
+      <path d="M208 74 L272 104" class="d-line" marker-end="url(#a4)"/>
+      <path d="M208 178 L272 150" class="d-line" marker-end="url(#a4)"/>
+
+      <rect x="552" y="40" width="192" height="58" rx="8" class="d-box2"/>
+      <text x="568" y="64" class="ts">Answer to A</text>
+      <text x="568" y="83" class="tm">"No" — no reason given</text>
+
+      <rect x="552" y="152" width="192" height="58" rx="8" class="d-box2"/>
+      <text x="568" y="176" class="ts">Answer to B</text>
+      <text x="568" y="195" class="tm">"No" — no reason given</text>
+
+      <path d="M488 104 L552 74" class="d-line" marker-end="url(#a4)"/>
+      <path d="M488 150 L552 178" class="d-line" marker-end="url(#a4)"/>
+
+      <rect x="272" y="196" width="216" height="40" rx="7" class="d-acc"/>
+      <text x="380" y="221" class="tm" text-anchor="middle">withheld: "shift at Venue B"</text>
+
+      <path d="M380 172 L380 196" class="d-dash"/>
+    </svg>
+    </div>
+    <figcaption>Directional sketch. Neutrality is not a brand position here — it is the precondition for the worker answering honestly at all.</figcaption>
+  </figure>
+
+  <h4>Basis</h4>
+  <p><span class="basis-tag">external:</span> US Bureau of Labor Statistics data confirms the premise: roughly 5% of employed workers hold multiple jobs, and <b>leisure and hospitality supplies 16% of all secondary jobs</b> — second only to health care at 17%. Multi-jobholding is not an edge case in this industry; it is one of its defining employment patterns. <span class="basis-tag">reasoned:</span> Availability is the single datum every scheduler wants and no employer can obtain truthfully, because disclosing a competing job invites retaliation on hours. A worker will only tell the truth to a party that is neither employer. Neutrality is therefore not a positioning choice but the condition under which the data exists at all — which is why a scheduling-first product cannot hold it, however good its features are.</p>
+
+  <h4>Rationale</h4>
+  <p>This is the idea the employer-agnostic constraint <em>unlocks</em> rather than merely permits, which is why it ranks above several structurally larger candidates. It is also the sharpest available answer to what "aligned with the broader hospitality ecosystem" could concretely mean: not a directory or a feed, but a worker whose single account is coherent across the several employers they actually have. And it gives the multi-job worker a reason to carry the app to their second venue.</p>
+
+  <h4>Downsides</h4>
+  <p>A cold-start problem in its purest form: the feature is worthless until a worker has two employers on the platform, which is a demanding seeding condition for a POC. Employers may also reject a tool that structurally withholds the reason for unavailability — "no" without explanation is exactly what managers currently push back on, and the product is choosing the worker's side of that argument permanently. There is a demo trap too: this is easy to fake with two mock employers and hard to prove without real ones.</p>
+</article>
+
+<article class="idea" id="i5">
+  <div class="idea-head"><span class="rank">5</span><h3>Cross-venue mutual aid on run cards</h3></div>
+  <div class="chips">
+    <span class="chip axis">Beyond the venue</span>
+    <span class="chip conf">Confidence 75%</span>
+    <span class="chip">Complexity Medium–High</span>
+  </div>
+
+  <h4>Description</h4>
+  <p>Reach cross-venue coordination without building a two-sided marketplace. Neighbouring venues sign one standard mutual-aid agreement, and each authors a <em>run card</em> pre-designating who responds at each escalation level: level 1, my own off-shift staff; level 2, the three venues on this street; level 3, the district pool. A no-show fires an alarm that escalates through the levels on a timer, and lands in a thread where the covering worker and the receiving manager actually talk. No negotiation happens at the moment of crisis — the card was written in advance.</p>
+
+  <figure>
+    <div class="scroll-x">
+    <svg viewBox="0 0 760 218" role="img" aria-label="A no-show escalating through three pre-designated levels: own off-shift staff, three neighbouring venues, then the district pool.">
+      <defs><marker id="a5" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--svg-accent)"/></marker></defs>
+
+      <rect x="16" y="72" width="128" height="62" rx="8" class="d-acc"/>
+      <text x="80" y="98" class="ts" text-anchor="middle">18:02</text>
+      <text x="80" y="118" class="tm" text-anchor="middle">no-show</text>
+
+      <path d="M144 103 L204 103" class="d-line-acc" marker-end="url(#a5)"/>
+
+      <rect x="204" y="52" width="150" height="102" rx="8" class="d-box"/>
+      <text x="279" y="78" class="ts" text-anchor="middle">Level 1</text>
+      <text x="279" y="99" class="tm" text-anchor="middle">own off-shift</text>
+      <text x="279" y="116" class="tm" text-anchor="middle">staff</text>
+      <text x="279" y="140" class="tm" text-anchor="middle">8 min</text>
+
+      <path d="M354 103 L400 103" class="d-line-acc" marker-end="url(#a5)"/>
+
+      <rect x="400" y="52" width="150" height="102" rx="8" class="d-box"/>
+      <text x="475" y="78" class="ts" text-anchor="middle">Level 2</text>
+      <text x="475" y="99" class="tm" text-anchor="middle">three venues</text>
+      <text x="475" y="116" class="tm" text-anchor="middle">on this street</text>
+      <text x="475" y="140" class="tm" text-anchor="middle">10 min</text>
+
+      <path d="M550 103 L596 103" class="d-line-acc" marker-end="url(#a5)"/>
+
+      <rect x="596" y="52" width="148" height="102" rx="8" class="d-box"/>
+      <text x="670" y="78" class="ts" text-anchor="middle">Level 3</text>
+      <text x="670" y="99" class="tm" text-anchor="middle">district pool</text>
+
+      <text x="380" y="192" class="tacc" text-anchor="middle">One master agreement across all members — not an agreement per pair.</text>
+      <text x="380" y="210" class="tm" text-anchor="middle">Each venue writes its own card; escalation just reads it.</text>
+    </svg>
+    </div>
+    <figcaption>Directional sketch. The escalation ladder is authored in advance, so the 6pm no-show triggers a procedure rather than a phone-call scramble.</figcaption>
+  </figure>
+
+  <h4>Basis</h4>
+  <p><span class="basis-tag">external:</span> The <b>Mutual Aid Box Alarm System</b>, founded in 1968 in Elk Grove Village outside Chicago, lets independent fire departments commit resources to each other through <em>one standard master agreement signed by all 1,100-plus member agencies</em> rather than N² bilateral deals, with each agency authoring a run card pre-designating which units respond at each alarm level. All three elements verified against MABAS's own documentation. The structural correspondence to hospitality is exact: an ecosystem of small independent businesses that compete for customers while sharing a labour pool.</p>
+
+  <h4>Rationale</h4>
+  <p>MABAS's actual innovation was legal rather than technical — one master agreement instead of bilateral ones — and that is precisely the artifact a small team can copy cheaply. It reaches the cross-venue reading of "ecosystem" while sidestepping the marketplace failure mode, which needs liquidity and trust between strangers on day one; mutual aid starts from neighbours who already know each other and needs only three venues to be real. It is also inherently conversational rather than transactional: the alarm creates a thread between two people at different employers, which is the cross-venue comms layer that does not currently exist in production.</p>
+
+  <h4>Downsides</h4>
+  <p>It depends on a resolved neighbourhood graph — who works where, who is on tonight, across venues — which is real prerequisite infrastructure, not a detail, and makes this the most expensive survivor to reach. Liability is genuinely unresolved: when a worker from venue A covers at venue B, who vouches for them and who carries the risk. The POC also cannot be demonstrated with one venue, so the seeding requirement is three cooperating businesses on one street, which is a materially harder ask than a single design partner.</p>
+</article>
+
+<article class="idea" id="i6">
+  <div class="idea-head"><span class="rank">6</span><h3>Threads belong to places, not people</h3></div>
+  <div class="chips">
+    <span class="chip axis">Shift-floor coordination</span>
+    <span class="chip conf">Confidence 75%</span>
+    <span class="chip">Complexity Low</span>
+  </div>
+
+  <h4>Description</h4>
+  <p>Give every station, room and machine a QR code. Scanning it opens that object's thread. The ice machine accumulates every fault ever reported against it; room 412 keeps its history across every housekeeper who has ever cleaned it; the coffee grinder holds the note about the burr setting that three people have independently rediscovered. Institutional memory accrues as a byproduct of reporting a problem, which people already want to do — nobody has to write documentation.</p>
+
+  <figure>
+    <div class="scroll-x">
+    <svg viewBox="0 0 760 216" role="img" aria-label="Contrast between person-addressed messages, which leave when the person leaves, and place-anchored threads, which persist across staff turnover.">
+      <rect x="16" y="34" width="336" height="160" rx="9" class="d-box2"/>
+      <text x="34" y="60" class="ts">Person-addressed</text>
+      <text x="34" y="82" class="tm">"Ana, the ice machine is leaking again"</text>
+      <line x1="34" y1="98" x2="334" y2="98" class="d-dash"/>
+      <text x="34" y="122" class="tm">Ana leaves in March.</text>
+      <text x="34" y="146" class="tm">The context leaves with her.</text>
+      <text x="34" y="176" class="tacc">Memory lifetime = one tenure</text>
+
+      <rect x="408" y="34" width="336" height="160" rx="9" class="d-sage"/>
+      <text x="426" y="60" class="ts">Place-anchored</text>
+      <text x="426" y="82" class="tm">Thread on: Ice machine · basement</text>
+      <line x1="426" y1="98" x2="726" y2="98" class="d-dash"/>
+      <text x="426" y="122" class="tm">Nov — leaking, gasket replaced</text>
+      <text x="426" y="143" class="tm">Feb — leaking again, same gasket</text>
+      <text x="426" y="164" class="tm">Jun — new hire scans, reads both</text>
+      <text x="426" y="188" class="tacc">Memory lifetime = the machine's</text>
+    </svg>
+    </div>
+    <figcaption>Directional sketch. At 70–100% annual churn the difference between these two lifetimes is the difference between accumulating knowledge and rediscovering it.</figcaption>
+  </figure>
+
+  <h4>Basis</h4>
+  <p><span class="basis-tag">external:</span> In the Toyota Production System the kanban signal travels attached to the physical bin rather than being sent to a person; in Grassé's stigmergy (1959), termite coordination happens entirely through marks left in the environment with no addressing at all. Both solve the case where sender and receiver are never present at the same time. <span class="basis-tag">reasoned:</span> The shift boundary means the person holding context and the person needing it are by definition not simultaneously present, so person-addressed messaging structurally cannot carry handover context — the message has to wait in the place where the context will be needed.</p>
+
+  <h4>Rationale</h4>
+  <p>This is the cheapest survivor to build and the cheapest answer to institutional memory surviving total staff replacement, because it requires no documentation discipline from anyone. It also satisfies the load-bearing adoption test in the most direct way available: you scan the tag because scanning is how the thing gets fixed, and the conversation is simply where you land. As a demo it is unusually concrete — tag one back-of-house area in an afternoon and find out within a fortnight whether place-anchored threads get used or ignored.</p>
+
+  <h4>Downsides</h4>
+  <p>Phase 1 gets the QR half only: Web NFC exists solely in Chrome on Android, so tap-to-open waits for the React Native phase. Physical tags in a kitchen get peeled, soaked and covered in grease, and a dead tag is worse than no tag because it teaches people the system is broken. The value also only accrues with traffic — a thread with two entries after six months reads as abandoned, so the POC needs a genuinely high-traffic object to test against rather than a representative sample of tagged equipment.</p>
+</article>
+
+<article class="idea" id="i7">
+  <div class="idea-head"><span class="rank">7</span><h3>The WhatsApp export as day-one import</h3></div>
+  <div class="chips">
+    <span class="chip axis">Getting off WhatsApp</span>
+    <span class="chip conf">Confidence 65%</span>
+    <span class="chip">Complexity Low</span>
+  </div>
+
+  <h4>Description</h4>
+  <p>Every product in this space asks a venue to rebuild from empty, which means day one is worse than the thing being left. Invert it. WhatsApp ships a native per-chat "Export chat" function producing a plain-text transcript with senders and timestamps. Ingest it and return not a chat log but the venue's implicit operating manual: the questions asked forty times and who actually answered them, the recurring faults, the shift vocabulary — plus a roster reconciliation showing which members of the group left the business months ago and are still receiving operational messages.</p>
+
+  <h4>Basis</h4>
+  <p><span class="basis-tag">external:</span> WhatsApp's export feature is the incumbent handing over its own corpus voluntarily — no API, no bridge, no integration to negotiate. Exported chats cannot be re-imported into WhatsApp, so the data is genuinely stranded in a format anything can read. <span class="basis-tag">reasoned:</span> The switching cost in WhatsApp is not the app, it is the scrollback and the social graph. An import inverts day one so the new product is the only place where a year of accumulated group knowledge is legible rather than merely present. The extraction pass doubles as free discovery, telling the team which structured objects this venue actually needs before any of them are built.</p>
+
+  <h4>Rationale</h4>
+  <p>Three frames independently proposed it, and for a POC exercise its economics are unusually good: buildable in days, demonstrable in ninety seconds on a real venue's real data, and it produces one genuinely arresting artifact — showing a manager that four ex-employees are still in the operational group. As the lowest-cost survivor it is also the natural first thing to build, ahead of the architecturally larger ideas.</p>
+
+  <h4>Downsides</h4>
+  <p>The significant one is legal, and it is not resolved. A group export contains every member's personal data, and ingesting it into a third-party system without their consent plausibly raises the same class of problem as the AEPD case that motivates half this document — the platform would be doing a milder version of the thing it positions against. That needs a consent story before it ships, not after, and I could not verify the specific position under GDPR or WhatsApp's terms. Second, it is a one-shot import rather than a sync, so it is an onboarding trick rather than an ongoing capability, and its value decays to zero the day after migration.</p>
+</article>
+
+<h2>Rejection Summary</h2>
+
+<table>
+  <thead><tr><th>#</th><th>Idea</th><th>Reason rejected</th></tr></thead>
+  <tbody>
+    <tr><td>R1</td><td class="idea-name">Federate with WhatsApp via DMA interop</td><td>Facts verified — Meta enabled third-party chats for EU users in November 2025, with BirdyChat and Haiket as the first partners — but those partnerships took three-plus years of work with Meta and the European Commission, group interop is undated and gated on "once our partners are ready," and it is EU-only and opt-in. Real door, not a POC-reachable one.</td></tr>
+    <tr><td>R2</td><td class="idea-name">Ship with no compose box at all</td><td>Contradicts the stated requirement for 1:1 and group comms, and its own argument overclaims — the philosophy's most prominent exemplar keeps direct messages anyway.</td></tr>
+    <tr><td>R3</td><td class="idea-name">Offline Bluetooth/WiFi mesh for dead zones</td><td>Native-only; no phase-1 web path. Worth revisiting at the React Native phase — the back-of-house connectivity problem is real.</td></tr>
+    <tr><td>R4</td><td class="idea-name">Voice-directed confirmed work loop</td><td>Needs always-on audio; phase 2. The spoken check-digit idea (confirmation proving comprehension, not just delivery) is worth carrying forward.</td></tr>
+    <tr><td>R5</td><td class="idea-name">Tips/tronc receipt as the adoption hook</td><td>Strong idea, wrong dependency: the statutory hook is UK-specific, and the load-bearing specifics went unverified. Re-examine if the target market is ever fixed as the UK.</td></tr>
+    <tr><td>R6</td><td class="idea-name">Verified supplier and counterparty threads</td><td>Scope overrun — extends the product to external commercial parties before the internal loop works.</td></tr>
+    <tr><td>R7</td><td class="idea-name">Symmetric tamper-evident shift log</td><td>Folded into idea 1 as a property rather than kept as a separate direction.</td></tr>
+    <tr><td>R8</td><td class="idea-name">Consent-gated contact shield</td><td>Folded into idea 1 — the two-zone model already implies it.</td></tr>
+    <tr><td>R9</td><td class="idea-name">Ephemeral accounts for one-shift staff</td><td>A special case of idea 1's lease at minimal duration, not an independent bet.</td></tr>
+    <tr><td>R10</td><td class="idea-name">Debian WNPP-style orphan-and-adopt offboarding</td><td>Subsumed by ideas 1 and 2 — succession falls out of the lease model and derived rooms.</td></tr>
+    <tr><td>R11</td><td class="idea-name">Offboarding as an HR-system webhook</td><td>Subsumed by idea 2, and as normally specified it could reach the core identity record — the exact failure idea 1 exists to prevent.</td></tr>
+    <tr><td>R12</td><td class="idea-name">Worker-owned reliability signal</td><td>Contradicts idea 1's own anti-rating principle. Moving behavioural scoring into worker custody relocates the problem rather than resolving whether such scoring belongs in the system.</td></tr>
+    <tr><td>R13</td><td class="idea-name">Shift state auto-composes messages</td><td>Absorbed into idea 3 — events open obligations.</td></tr>
+    <tr><td>R14</td><td class="idea-name">Everything expires at end of shift</td><td>A lifecycle policy on idea 3's objects, not a standalone direction. Note it conflicts with retention duties wherever records are legally required.</td></tr>
+    <tr><td>R15</td><td class="idea-name">Cross-venue resolver as the first build</td><td>Absorbed into idea 5, which needs the neighbourhood graph as its prerequisite.</td></tr>
+    <tr><td>R16</td><td class="idea-name">Shift leader as the first user</td><td>Adoption sequencing rather than a product direction — and go-to-market is not a selection criterion for this exercise.</td></tr>
+    <tr><td>R17</td><td class="idea-name">Churn as a distribution loop; marketplace monetization; integration partner as network inheritance</td><td>Three separate candidates cut together: all were go-to-market or monetization framing, excluded as criteria here. Architectural cores extracted where one existed.</td></tr>
+    <tr><td>R18</td><td class="idea-name">Free to workers, funded by drinks brands and distributors</td><td>A business model, not a POC direction.</td></tr>
+    <tr><td>—</td><td class="idea-name">axis: Whose account is it — single survivor</td><td>Not a coverage gap. Seven candidates on this axis turned out to be facets of one architecture and merged into idea 1 rather than competing with it.</td></tr>
+  </tbody>
+</table>
+
+<h2>Verification Notes</h2>
+
+<p>The adversarial verification pass was partially degraded and it is worth recording where, since several ideas rest on external claims.</p>
+
+<ul>
+  <li><b>Verified:</b> MABAS's founding, single-master-agreement structure and run cards; the NWCG Incident Qualification Card as a qualification record rather than a score (with the noted nuance that the underlying task book uses an internal Meets/Exceeds scale); the BLS multiple-jobholding figures; the WhatsApp DMA interoperability launch, partners and scope.</li>
+  <li><b>Not verified:</b> the UK Employment (Allocation of Tips) Act's specific tribunal cap and record-request cadence; the precise GDPR and terms-of-service position on ingesting a WhatsApp group export. The first belongs to a rejected idea; the second is disclosed as the main downside of idea 7 rather than resolved.</li>
+  <li><b>Process note:</b> the first verifier run returned a meaningless result after fifty tool calls and had to be re-queried. On the second pass it reported honestly that it had confirmed only two of eight claims and declined to invent the rest; the remaining load-bearing claims were then checked directly. One claim from generation was corrected in the process — WhatsApp group interoperability is <em>not</em> scheduled for 2026, it is gated on partner readiness with no announced date.</li>
+</ul>
+
+<footer class="composition-signal">
+  Composed 2026-07-26 by ce-ideate from the session prompt: "a POC of a communications platform for workers in the hospitality industry." 47 raw candidates from 5 ideation frames, filtered to 7.
+</footer>
+
+</div>
+</body>
+</html>
