@@ -17,6 +17,7 @@ defmodule HospitalityComs.AccountsTest do
 
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.Person
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Accounts.PersonToken
 
   @now ~U[2026-03-01 12:00:00.000000Z]
@@ -401,17 +402,17 @@ defmodule HospitalityComs.AccountsTest do
     end
   end
 
-  describe "sudo_mode?/3" do
+  describe "sudo_mode?/2" do
     test "is true inside the window and false outside it" do
       person = %Person{authenticated_at: DateTime.truncate(@now, :second)}
 
-      assert Accounts.sudo_mode?(person, DateTime.add(@now, 19, :minute))
-      refute Accounts.sudo_mode?(person, DateTime.add(@now, 21, :minute))
+      assert Accounts.sudo_mode?(PersonScope.for_person(person, DateTime.add(@now, 19, :minute)))
+      refute Accounts.sudo_mode?(PersonScope.for_person(person, DateTime.add(@now, 21, :minute)))
     end
 
     test "is false for a person who never authenticated" do
-      refute Accounts.sudo_mode?(%Person{authenticated_at: nil}, @now)
-      refute Accounts.sudo_mode?(nil, @now)
+      refute Accounts.sudo_mode?(PersonScope.for_person(%Person{authenticated_at: nil}, @now))
+      refute Accounts.sudo_mode?(PersonScope.for_person(nil, @now))
     end
   end
 end

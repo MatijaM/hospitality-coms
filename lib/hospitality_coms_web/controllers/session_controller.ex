@@ -24,8 +24,8 @@ defmodule HospitalityComsWeb.SessionController do
 
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.Person
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Accounts.PersonToken
-  alias HospitalityComs.Accounts.Scope
   alias HospitalityComsWeb.ErrorEnvelope
   alias HospitalityComsWeb.PersonAuth
 
@@ -34,7 +34,7 @@ defmodule HospitalityComsWeb.SessionController do
   """
   @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def create(conn, %{"email" => email}) when is_binary(email) do
-    %Scope{now: now} = conn.assigns.current_scope
+    %PersonScope{now: now} = conn.assigns.current_scope
 
     conn
     |> deliver_or_reject(Accounts.request_login_instructions(email, &magic_link_url/1, now))
@@ -47,7 +47,7 @@ defmodule HospitalityComsWeb.SessionController do
   """
   @spec confirm(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def confirm(conn, %{"token" => token}) when is_binary(token) do
-    %Scope{now: now} = conn.assigns.current_scope
+    %PersonScope{now: now} = conn.assigns.current_scope
 
     conn
     |> issue_or_reject(Accounts.login_person_by_magic_link(token, now), now)
@@ -60,7 +60,7 @@ defmodule HospitalityComsWeb.SessionController do
   """
   @spec show(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def show(conn, _params) do
-    %Scope{person: person} = conn.assigns.current_scope
+    %PersonScope{person: person} = conn.assigns.current_scope
     json(conn, %{person: render_person(person)})
   end
 

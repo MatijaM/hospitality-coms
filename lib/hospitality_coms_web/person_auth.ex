@@ -25,7 +25,7 @@ defmodule HospitalityComsWeb.PersonAuth do
 
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.Person
-  alias HospitalityComs.Accounts.Scope
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Clock
   alias HospitalityComsWeb.Endpoint
   alias HospitalityComsWeb.ErrorEnvelope
@@ -45,7 +45,7 @@ defmodule HospitalityComsWeb.PersonAuth do
 
     conn
     |> assign(:person_token, token)
-    |> assign(:current_scope, Scope.for_person(authenticate(token, now), now))
+    |> assign(:current_scope, PersonScope.for_person(authenticate(token, now), now))
   end
 
   @doc """
@@ -53,7 +53,7 @@ defmodule HospitalityComsWeb.PersonAuth do
   """
   @spec require_authenticated_person(Plug.Conn.t(), keyword()) :: Plug.Conn.t()
   def require_authenticated_person(conn, _opts) do
-    %Scope{person: person} = conn.assigns.current_scope
+    %PersonScope{person: person} = conn.assigns.current_scope
     allow_or_refuse(conn, person)
   end
 

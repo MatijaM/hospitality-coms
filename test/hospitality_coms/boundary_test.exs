@@ -40,11 +40,16 @@ defmodule HospitalityComs.BoundaryTest do
   import ExUnit.CaptureLog
 
   alias Ecto.Adapters.SQL.Sandbox
+  alias HospitalityComs.Accounts
+  alias HospitalityComs.Accounts.EmployerScope
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Repo
   alias HospitalityComs.Repo.Migrations.GrantZones
   alias HospitalityComs.Zones
 
   @migration_name "grant_zones"
+
+  @now ~U[2026-03-01 12:00:00.000000Z]
 
   @scoping_functions ["app_current_employer_id()", "app_current_instant()"]
 
@@ -157,7 +162,39 @@ defmodule HospitalityComs.BoundaryTest do
     end
   end
 
+  describe "a person-zone context function" do
+    test "refuses an employer scope by function clause" do
+      # Not a runtime check inside the body. The refusal is the absence of a
+      # matching head, so it happens before the function runs and it happens
+      # whether or not whoever wrote the function remembered to guard it.
+      assert_raise FunctionClauseError, fn -> Accounts.sudo_mode?(scope(:employer)) end
+    end
+
+    test "accepts a person scope, including an anonymous one" do
+      # Without this the test above passes on a function that refuses
+      # everything, which is not the same guarantee at all.
+      refute Accounts.sudo_mode?(scope(:person))
+    end
+  end
+
   ## Helpers
+
+  # Handed out of a map so the value's type is the union of both scopes rather
+  # than one of them. Written inline, Elixir 1.20 proves at compile time that
+  # `sudo_mode?/1` has no clause matching an employer scope and warns at the
+  # call site — the guarantee holding a step earlier than this file can assert
+  # it. That is a good warning and a bad test: a scope built at run time from a
+  # session carries no such proof, and it is the run-time refusal that the
+  # boundary rests on.
+  defp scope(kind) do
+    Map.fetch!(
+      %{
+        person: PersonScope.for_person(nil, @now),
+        employer: EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+      },
+      kind
+    )
+  end
 
   # The sandbox lends this test a single connection, so the migrator's own
   # locking transaction would deadlock against the migration it is guarding.

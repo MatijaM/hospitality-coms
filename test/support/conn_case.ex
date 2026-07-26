@@ -19,7 +19,7 @@ defmodule HospitalityComsWeb.ConnCase do
 
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.Person
-  alias HospitalityComs.Accounts.Scope
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Clock
   alias HospitalityComsWeb.PersonAuth
 
@@ -64,7 +64,7 @@ defmodule HospitalityComsWeb.ConnCase do
     %{
       conn: log_in_person(conn, person, now),
       person: person,
-      scope: Scope.for_person(person, now)
+      scope: PersonScope.for_person(person, now)
     }
   end
 

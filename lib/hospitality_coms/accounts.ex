@@ -25,6 +25,7 @@ defmodule HospitalityComs.Accounts do
   alias Ecto.Multi
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonNotifier
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Repo
 
@@ -212,21 +213,28 @@ defmodule HospitalityComs.Accounts do
   ## Settings
 
   @doc """
-  Checks whether the person is in sudo mode as of `now`.
+  Checks whether the scope's person is in sudo mode as of the scope's instant.
 
   The person is in sudo mode when the last authentication was done no further
-  than 20 minutes before `now`. The limit can be given as third argument in
-  minutes.
-  """
-  @spec sudo_mode?(Person.t() | nil, DateTime.t(), integer()) :: boolean()
-  def sudo_mode?(person, now, minutes \\ -20)
+  than 20 minutes before the instant. The limit can be given as second argument
+  in minutes.
 
-  def sudo_mode?(%Person{authenticated_at: ts}, %DateTime{} = now, minutes)
+  This is the shape every context function in the application takes from U3
+  onward: a scope, and a scope of the right kind. The head matches
+  `PersonScope` and nothing else, so an employer caller raises
+  `FunctionClauseError` before the body runs rather than being turned away by a
+  check somebody has to remember to write. An anonymous person scope is a
+  caller, not a mismatch, so it is answered rather than refused.
+  """
+  @spec sudo_mode?(PersonScope.t(), integer()) :: boolean()
+  def sudo_mode?(scope, minutes \\ -20)
+
+  def sudo_mode?(%PersonScope{person: %Person{authenticated_at: ts}, now: now}, minutes)
       when is_struct(ts, DateTime) do
     DateTime.after?(ts, DateTime.add(now, minutes, :minute))
   end
 
-  def sudo_mode?(_person, _now, _minutes), do: false
+  def sudo_mode?(%PersonScope{}, _minutes), do: false
 
   @doc """
   Updates the person's email using the given token.

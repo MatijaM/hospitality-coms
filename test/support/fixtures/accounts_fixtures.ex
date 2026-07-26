@@ -13,8 +13,8 @@ defmodule HospitalityComs.AccountsFixtures do
 
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.Person
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Accounts.PersonToken
-  alias HospitalityComs.Accounts.Scope
   alias HospitalityComs.Repo
 
   @doc """
@@ -56,9 +56,9 @@ defmodule HospitalityComs.AccountsFixtures do
     person
   end
 
-  @spec person_scope_fixture(Person.t(), DateTime.t()) :: Scope.t()
+  @spec person_scope_fixture(Person.t(), DateTime.t()) :: PersonScope.t()
   def person_scope_fixture(person \\ person_fixture(), now \\ fixed_instant()) do
-    Scope.for_person(person, now)
+    PersonScope.for_person(person, now)
   end
 
   @doc """

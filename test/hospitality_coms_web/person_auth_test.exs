@@ -14,7 +14,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
 
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.Person
-  alias HospitalityComs.Accounts.Scope
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Clock
   alias HospitalityComsWeb.PersonAuth
 
@@ -33,7 +33,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
     test "assigns an anonymous scope carrying the instant", %{conn: conn} do
       conn = PersonAuth.fetch_person_scope(conn, [])
 
-      assert %Scope{person: nil, now: @now} = conn.assigns.current_scope
+      assert %PersonScope{person: nil, now: @now} = conn.assigns.current_scope
       assert is_nil(conn.assigns.person_token)
     end
 
@@ -45,7 +45,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
         |> put_bearer_token(PersonAuth.encode_token(token))
         |> PersonAuth.fetch_person_scope([])
 
-      assert %Scope{person: %Person{id: id}, now: @now} = conn.assigns.current_scope
+      assert %PersonScope{person: %Person{id: id}, now: @now} = conn.assigns.current_scope
       assert id == person.id
       assert conn.assigns.person_token == token
     end
@@ -85,7 +85,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
         |> Plug.Conn.put_req_header("authorization", "Basic abc")
         |> PersonAuth.fetch_person_scope([])
 
-      assert %Scope{person: nil} = conn.assigns.current_scope
+      assert %PersonScope{person: nil} = conn.assigns.current_scope
     end
 
     test "is anonymous when the token is not base64url", %{conn: conn} do
@@ -94,7 +94,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
         |> put_bearer_token("not a token")
         |> PersonAuth.fetch_person_scope([])
 
-      assert %Scope{person: nil} = conn.assigns.current_scope
+      assert %PersonScope{person: nil} = conn.assigns.current_scope
       assert is_nil(conn.assigns.person_token)
     end
 
@@ -106,14 +106,14 @@ defmodule HospitalityComsWeb.PersonAuthTest do
         |> put_bearer_token(encoded)
         |> PersonAuth.fetch_person_scope([])
 
-      assert %Scope{person: nil} = conn.assigns.current_scope
+      assert %PersonScope{person: nil} = conn.assigns.current_scope
     end
 
     test "is anonymous the moment the token row is deleted", %{conn: conn, person: person} do
       token = Accounts.generate_person_session_token(person, @now)
       encoded = PersonAuth.encode_token(token)
 
-      assert %Scope{person: %Person{}} =
+      assert %PersonScope{person: %Person{}} =
                conn
                |> put_bearer_token(encoded)
                |> PersonAuth.fetch_person_scope([])
@@ -122,7 +122,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
 
       {:ok, [_deleted]} = Accounts.delete_person_session_token(token)
 
-      assert %Scope{person: nil} =
+      assert %PersonScope{person: nil} =
                conn
                |> put_bearer_token(encoded)
                |> PersonAuth.fetch_person_scope([])
@@ -139,7 +139,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
         |> put_bearer_token(PersonAuth.encode_token(token))
         |> PersonAuth.fetch_person_scope([])
 
-      assert %Scope{person: nil} = conn.assigns.current_scope
+      assert %PersonScope{person: nil} = conn.assigns.current_scope
     end
   end
 
