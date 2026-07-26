@@ -46,7 +46,9 @@ In dev, `/dev/mailbox` is the only way to read a magic link — nothing renders 
 
 Everywhere else, the instant arrives on the scope struct: `%HospitalityComs.Accounts.Scope{person: _, now: _}`, assigned as `:current_scope` by `PersonAuth.fetch_person_scope/2`.
 
-`Ecto.Query.ago/2` and `from_now/2` are banned for the same reason `DateTime.utc_now/0` is. They expand to `DateTime.utc_now()` inside the query macro, so the Credo check never sees them and the offsettable clock cannot move them. Compare against an instant taken from the scope.
+`Ecto.Query.ago/2` and `from_now/2` are banned for the same reason `DateTime.utc_now/0` is: they expand to `DateTime.utc_now()` inside the query macro, where the offsettable clock cannot move them. `ClockAuthority` flags the call itself, both imported and fully qualified, because by expansion time it is too late to see. Compare against an instant taken from the scope.
+
+`HospitalityComs.Accounts.Person` stamps `inserted_at`/`updated_at` explicitly too — Ecto's `timestamps()` autogenerate reads the wall clock from inside Ecto, which is also out of the check's reach.
 
 ## Database
 
@@ -61,6 +63,10 @@ Two repos, one database.
 
 Magic link in, bearer token out. `POST /api/log-in` registers the address if it is new and mails a link; `POST /api/log-in/token` redeems it and returns the API token; `GET /api/me` and `DELETE /api/log-out` require it. There is no password anywhere in the tree and no cookie session — the generator's password column, changeset, and `bcrypt_elixir` were removed, because with no HTML layer nothing could ever set one.
 
-The API token *is* the generated session token: a row in `people_tokens`, base64url on the wire. Deleting the row ends the session on the next request, which is the point — U7's revocation depends on it, and a signed stateless token could not deliver it.
+The API token *is* the generated session token: a row in `people_tokens`, base64url on the wire and SHA-256 in the column. Every context stores a digest, session included — the column is the bearer credential for this API, so a `SELECT` leak must not yield a working one. Deleting the row ends the session on the next request, which is the point: U7's revocation depends on it, and a signed stateless token could not deliver it.
+
+Every error the API returns is one envelope, built only by `HospitalityComsWeb.ErrorEnvelope`: `{"error": {"code": <status atom>, "message": ..., "fields": {...}}}`, with `fields` present only for per-field validation failures. Controllers, `PersonAuth`, and `ErrorJSON` all go through it; do not hand-roll a body.
+
+Production requires `MAGIC_LINK_BASE_URL` — `config/runtime.exs` raises without it, because the `localhost:4000` default in `config/config.exs` fails silently by mailing links to the wrong host.
 
 `people` is already shaped for U10 erasure: `email` is nullable, its unique index is partial on `WHERE erased_at IS NULL`, and two check constraints hold `erased_at` and `email` in opposition. Erasure nulls the address; nothing else may.
