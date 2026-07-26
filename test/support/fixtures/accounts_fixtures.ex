@@ -65,9 +65,9 @@ defmodule HospitalityComs.AccountsFixtures do
   Runs `fun` with a URL builder that brackets the token, then pulls the token
   back out of the delivered email.
   """
-  @spec extract_person_token((Accounts.url_fun() -> Swoosh.Email.t())) :: String.t()
+  @spec extract_person_token((Accounts.url_fun() -> Accounts.delivery())) :: String.t()
   def extract_person_token(fun) do
-    captured_email = fun.(&"[TOKEN]#{&1}[TOKEN]")
+    {:ok, captured_email} = fun.(&"[TOKEN]#{&1}[TOKEN]")
     [_before, token | _rest] = String.split(captured_email.text_body, "[TOKEN]")
     token
   end

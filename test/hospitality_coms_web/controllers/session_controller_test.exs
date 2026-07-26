@@ -11,13 +11,16 @@ defmodule HospitalityComsWeb.SessionControllerTest do
 
   use HospitalityComsWeb.ConnCase, async: false
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
   import HospitalityComs.AccountsFixtures
 
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Clock
+  alias HospitalityComs.Mailer
   alias HospitalityComs.Repo
+  alias HospitalityComs.UnreachableMailerAdapter
 
   @now ~U[2026-03-01 12:00:00.000000Z]
   @invalid_link "the link is invalid or it has expired"
@@ -76,6 +79,18 @@ defmodule HospitalityComsWeb.SessionControllerTest do
 
       assert %{"error" => %{"code" => "bad_request", "message" => "email is required"}} =
                json_response(conn, 400)
+    end
+
+    test "answers a mail provider outage in the envelope, not with a 500", %{conn: conn} do
+      original = Application.get_env(:hospitality_coms, Mailer)
+      Application.put_env(:hospitality_coms, Mailer, adapter: UnreachableMailerAdapter)
+      on_exit(fn -> Application.put_env(:hospitality_coms, Mailer, original) end)
+
+      {conn, _log} =
+        with_log(fn -> post(conn, ~p"/api/log-in", %{"email" => unique_person_email()}) end)
+
+      assert %{"error" => %{"code" => "bad_gateway", "message" => _message}} =
+               json_response(conn, 502)
     end
   end
 

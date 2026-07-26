@@ -22,12 +22,14 @@ defmodule HospitalityComs.Accounts do
 
   import Ecto.Query, warn: false
 
+  alias Ecto.Multi
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonNotifier
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Repo
 
   @type url_fun() :: (String.t() -> String.t())
+  @type delivery() :: {:ok, Swoosh.Email.t()} | {:error, :delivery_failed}
 
   ## Database getters
 
@@ -93,15 +95,70 @@ defmodule HospitalityComs.Accounts do
 
   Nothing about this path involves an employer. That is the requirement (R1),
   not an implementation detail.
+
+  The two writes — the person row and the token row — are one transaction, so
+  there is no state in which a person exists with no link on the way to them.
+  The mail goes out after that transaction commits, and deliberately not
+  inside it: a database transaction held open across a call to a mail provider
+  is a connection hostage to somebody else's latency.
+
+  A provider that is down is therefore `{:error, :delivery_failed}` with the
+  rows already written. That is the same thing an abandoned request leaves —
+  an unconfirmed person holding a token that expires in fifteen minutes — and
+  the person can ask again.
   """
   @spec request_login_instructions(String.t(), url_fun(), DateTime.t()) ::
-          {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
+          {:ok, Person.t()}
+          | {:error, :delivery_failed | :transaction_aborted | Ecto.Changeset.t(Person.t())}
   def request_login_instructions(email, magic_link_url_fun, %DateTime{} = now)
       when is_binary(email) and is_function(magic_link_url_fun, 1) do
-    with {:ok, person} <- fetch_or_register_person(email) do
-      _email = deliver_login_instructions(person, magic_link_url_fun, now)
-      {:ok, person}
-    end
+    email
+    |> login_request_multi(now)
+    |> Repo.transaction()
+    |> deliver_requested_link(magic_link_url_fun)
+  end
+
+  @spec login_request_multi(String.t(), DateTime.t()) :: Multi.t()
+  defp login_request_multi(email, now) do
+    Multi.new()
+    |> Multi.run(:person, fn _repo, _changes -> fetch_or_register_person(email) end)
+    |> Multi.run(:login_token, fn repo, %{person: person} ->
+      insert_login_token(repo, person, now)
+    end)
+  end
+
+  @spec deliver_requested_link(
+          {:ok, %{person: Person.t(), login_token: String.t()}}
+          | {:error, atom(), Ecto.Changeset.t(Person.t()) | term(), map()},
+          url_fun()
+        ) ::
+          {:ok, Person.t()}
+          | {:error, :delivery_failed | :transaction_aborted | Ecto.Changeset.t(Person.t())}
+  defp deliver_requested_link({:ok, %{person: person, login_token: encoded_token}}, url_fun) do
+    person
+    |> PersonNotifier.deliver_login_instructions(url_fun.(encoded_token))
+    |> requested(person)
+  end
+
+  defp deliver_requested_link({:error, :person, %Ecto.Changeset{} = changeset, _changes}, _fun) do
+    {:error, changeset}
+  end
+
+  defp deliver_requested_link({:error, _step, _reason, _changes}, _url_fun) do
+    {:error, :transaction_aborted}
+  end
+
+  @spec requested(PersonNotifier.delivery(), Person.t()) ::
+          {:ok, Person.t()} | {:error, :delivery_failed}
+  defp requested({:ok, _email}, person), do: {:ok, person}
+  defp requested({:error, :delivery_failed}, _person), do: {:error, :delivery_failed}
+
+  @spec insert_login_token(Ecto.Repo.t(), Person.t(), DateTime.t()) ::
+          {:ok, String.t()} | {:error, Ecto.Changeset.t(PersonToken.t())}
+  defp insert_login_token(repo, person, now) do
+    {encoded_token, person_token} = PersonToken.build_email_token(person, "login", now)
+
+    with {:ok, _row} <- repo.insert(person_token), do: {:ok, encoded_token}
   end
 
   @spec fetch_or_register_person(String.t()) ::
@@ -248,10 +305,14 @@ defmodule HospitalityComs.Accounts do
   @doc ~S"""
   Delivers the update-email instructions to the given person.
 
+  The token row is written before the mail goes out, and stays written if the
+  mail does not: a token nobody can reach expires on its own, whereas a
+  transaction held open across a provider call does not.
+
   ## Examples
 
       iex> deliver_person_update_email_instructions(person, current_email, &"https://example.com/confirm-email/#{&1}", now)
-      %Swoosh.Email{}
+      {:ok, %Swoosh.Email{}}
 
   """
   @spec deliver_person_update_email_instructions(
@@ -259,7 +320,7 @@ defmodule HospitalityComs.Accounts do
           String.t(),
           url_fun(),
           DateTime.t()
-        ) :: Swoosh.Email.t()
+        ) :: delivery()
   def deliver_person_update_email_instructions(
         %Person{} = person,
         current_email,
@@ -276,12 +337,15 @@ defmodule HospitalityComs.Accounts do
 
   @doc """
   Delivers the magic-link log-in instructions to the given person.
+
+  This is the single-person form. `request_login_instructions/3` is the one the
+  log-in endpoint uses, because it also has to register an address nobody
+  holds, and that pair of writes belongs in one transaction.
   """
-  @spec deliver_login_instructions(Person.t(), url_fun(), DateTime.t()) :: Swoosh.Email.t()
+  @spec deliver_login_instructions(Person.t(), url_fun(), DateTime.t()) :: delivery()
   def deliver_login_instructions(%Person{} = person, magic_link_url_fun, %DateTime{} = now)
       when is_function(magic_link_url_fun, 1) do
-    {encoded_token, person_token} = PersonToken.build_email_token(person, "login", now)
-    Repo.insert!(person_token)
+    {:ok, encoded_token} = insert_login_token(Repo, person, now)
     PersonNotifier.deliver_login_instructions(person, magic_link_url_fun.(encoded_token))
   end
 

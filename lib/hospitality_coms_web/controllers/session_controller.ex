@@ -77,12 +77,24 @@ defmodule HospitalityComsWeb.SessionController do
 
   @spec deliver_or_reject(
           Plug.Conn.t(),
-          {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
+          {:ok, Person.t()}
+          | {:error, :delivery_failed | :transaction_aborted | Ecto.Changeset.t(Person.t())}
         ) :: Plug.Conn.t()
   defp deliver_or_reject(conn, {:ok, _person}) do
     conn
     |> put_status(:accepted)
     |> json(%{status: "sent"})
+  end
+
+  # A provider outage is the mail provider's status, not the client's, and it
+  # says nothing about whether the address was known — so it is the same answer
+  # either way and the endpoint stays free of an enumeration oracle.
+  defp deliver_or_reject(conn, {:error, :delivery_failed}) do
+    reject(conn, :bad_gateway, "the log-in email could not be delivered")
+  end
+
+  defp deliver_or_reject(conn, {:error, :transaction_aborted}) do
+    reject(conn, :internal_server_error, "the log-in request could not be recorded")
   end
 
   defp deliver_or_reject(conn, {:error, %Ecto.Changeset{} = changeset}) do
