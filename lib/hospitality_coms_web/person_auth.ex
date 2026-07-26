@@ -12,7 +12,8 @@ defmodule HospitalityComsWeb.PersonAuth do
 
   Authentication is a bearer token, and the bearer token is the database-backed
   session token from `HospitalityComs.Accounts.PersonToken` — base64url on the
-  wire, raw bytes in the column. There is no cookie and no server-side session:
+  wire, raw bytes in memory for the length of the request, and only its digest
+  in the column. There is no cookie and no server-side session:
   a request either carries a live token row or it is anonymous. That is what
   makes revocation immediate, and it is why the generated cookie, remember-me,
   and token-reissue machinery is gone rather than adapted. Reissue in
@@ -61,11 +62,15 @@ defmodule HospitalityComsWeb.PersonAuth do
   The socket id is per session rather than per person (KTD7): ending one
   session must not take down the same worker's other sessions. Teardown is best
   effort — the client reconnects, and the refused rejoin is the revocation.
+
+  The tokens are the *stored* rows, so the value being read here is a digest
+  and never a credential. That matters because a topic name is not a secret: it
+  crosses distributed Erlang on every broadcast and shows up in telemetry.
   """
   @spec disconnect_sessions([%{token: binary()}]) :: :ok
   def disconnect_sessions(tokens) do
-    Enum.each(tokens, fn %{token: token} ->
-      Endpoint.broadcast(session_topic(token), "disconnect", %{})
+    Enum.each(tokens, fn %{token: stored_token} ->
+      Endpoint.broadcast(session_topic(stored_token), "disconnect", %{})
     end)
   end
 
@@ -76,7 +81,7 @@ defmodule HospitalityComsWeb.PersonAuth do
   def encode_token(token) when is_binary(token), do: Base.url_encode64(token, padding: false)
 
   @spec session_topic(binary()) :: String.t()
-  defp session_topic(token), do: "session:#{encode_token(token)}"
+  defp session_topic(stored_token), do: "session:#{encode_token(stored_token)}"
 
   @spec authenticate(binary() | nil, DateTime.t()) :: Person.t() | nil
   defp authenticate(nil, _now), do: nil

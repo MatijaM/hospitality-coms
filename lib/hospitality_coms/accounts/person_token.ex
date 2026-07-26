@@ -9,6 +9,15 @@ defmodule HospitalityComs.Accounts.PersonToken do
   expires, which makes revocation — the thing this product is about — a promise
   the transport cannot keep.
 
+  Nothing in `people_tokens.token` is a usable credential. Every context stores
+  the SHA-256 digest of the bytes the holder carries, session tokens included:
+  the generated stack hashes email tokens and stores session tokens in the
+  clear, which is survivable when a session is a cookie behind a browser and is
+  not survivable here, where the column is the bearer credential for the API.
+  This application's whole boundary is a Postgres role that cannot read
+  `people`; a `SELECT` leak on the token table must not hand the reader a live
+  worker session either.
+
   Every expiry here is derived against an instant passed in by the caller
   (KTD5). The generated code used `Ecto.Query.ago/2`, which expands to
   `DateTime.utc_now/0` inside the query macro: invisible to the clock-authority
@@ -71,12 +80,22 @@ defmodule HospitalityComs.Accounts.PersonToken do
   def magic_link_validity_in_minutes, do: @magic_link_validity_in_minutes
 
   @doc """
+  Hashes a token into the value the database holds for it.
+
+  This is the one direction that exists. The digest identifies a row — for
+  lookup, for deletion, and for naming the PubSub topic a session's sockets
+  listen on — without any of those uses needing the credential itself.
+  """
+  @spec hash_token(binary()) :: binary()
+  def hash_token(token) when is_binary(token), do: :crypto.hash(@hash_algorithm, token)
+
+  @doc """
   Builds the token a session runs on, along with the row that makes it
   revocable.
 
-  The token is returned as raw bytes. It is the caller's job to encode it for
-  whatever transport it leaves on; `HospitalityComsWeb.PersonAuth` does that
-  for HTTP.
+  The token is returned as raw bytes and the row holds only its digest. It is
+  the caller's job to encode the raw bytes for whatever transport they leave
+  on; `HospitalityComsWeb.PersonAuth` does that for HTTP.
   """
   @spec build_session_token(Person.t(), DateTime.t()) :: {binary(), t()}
   def build_session_token(%Person{} = person, %DateTime{} = now) do
@@ -85,7 +104,7 @@ defmodule HospitalityComs.Accounts.PersonToken do
 
     {token,
      %PersonToken{
-       token: token,
+       token: hash_token(token),
        context: "session",
        person_id: person.id,
        authenticated_at: person.authenticated_at || stamped_at,
@@ -97,13 +116,13 @@ defmodule HospitalityComs.Accounts.PersonToken do
   Checks if the token is valid and returns its underlying lookup query.
 
   The query returns the person found by the token, if any, along with the
-  token's creation time. The token is valid if it matches the value in the
-  database and it has not expired as of `now`.
+  token's creation time. The token is valid if its digest matches the value in
+  the database and it has not expired as of `now`.
   """
   @spec verify_session_token_query(binary(), DateTime.t()) :: {:ok, Ecto.Query.t()}
   def verify_session_token_query(token, %DateTime{} = now) when is_binary(token) do
     query =
-      from token in by_token_and_context_query(token, "session"),
+      from token in by_token_and_context_query(hash_token(token), "session"),
         join: person in assoc(token, :person),
         where: token.inserted_at > ^horizon(now, @session_validity_in_days, :day),
         select: {%{person | authenticated_at: token.authenticated_at}, token.inserted_at}
@@ -130,7 +149,7 @@ defmodule HospitalityComs.Accounts.PersonToken do
           {String.t(), t()}
   defp build_hashed_token(person, context, sent_to, now) do
     token = :crypto.strong_rand_bytes(@rand_size)
-    hashed_token = :crypto.hash(@hash_algorithm, token)
+    hashed_token = hash_token(token)
 
     {Base.url_encode64(token, padding: false),
      %PersonToken{
@@ -155,7 +174,7 @@ defmodule HospitalityComs.Accounts.PersonToken do
   @spec verify_magic_link_token_query(String.t(), DateTime.t()) :: {:ok, Ecto.Query.t()} | :error
   def verify_magic_link_token_query(token, %DateTime{} = now) when is_binary(token) do
     with {:ok, decoded_token} <- Base.url_decode64(token, padding: false) do
-      hashed_token = :crypto.hash(@hash_algorithm, decoded_token)
+      hashed_token = hash_token(decoded_token)
 
       query =
         from token in by_token_and_context_query(hashed_token, "login"),
@@ -182,7 +201,7 @@ defmodule HospitalityComs.Accounts.PersonToken do
   def verify_change_email_token_query(token, "change:" <> _rest = context, %DateTime{} = now)
       when is_binary(token) do
     with {:ok, decoded_token} <- Base.url_decode64(token, padding: false) do
-      hashed_token = :crypto.hash(@hash_algorithm, decoded_token)
+      hashed_token = hash_token(decoded_token)
 
       query =
         from token in by_token_and_context_query(hashed_token, context),

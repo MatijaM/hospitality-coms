@@ -227,10 +227,22 @@ defmodule HospitalityComs.AccountsTest do
       token = Accounts.generate_person_session_token(person, @now)
 
       assert %PersonToken{context: "session", inserted_at: inserted_at, person_id: person_id} =
-               Repo.get_by(PersonToken, token: token)
+               Repo.get_by(PersonToken, token: PersonToken.hash_token(token))
 
       assert person_id == person.id
       assert inserted_at == DateTime.truncate(@now, :second)
+    end
+
+    test "stores the digest and never the credential itself", %{person: person} do
+      token = Accounts.generate_person_session_token(person, @now)
+
+      assert %PersonToken{token: stored} =
+               Repo.one(from(t in PersonToken, where: t.context == "session"))
+
+      # A read of `people_tokens` must not hand the reader a working bearer
+      # credential: the column holds a digest that cannot be replayed.
+      refute stored == token
+      assert stored == :crypto.hash(:sha256, token)
     end
 
     test "issues a distinct token every time", %{person: person} do
@@ -267,8 +279,19 @@ defmodule HospitalityComs.AccountsTest do
 
     test "stops verifying the moment its row is deleted", %{token: token} do
       assert Accounts.get_person_by_session_token(token, @now)
-      assert :ok = Accounts.delete_person_session_token(token)
+
+      assert {:ok, [%PersonToken{context: "session", token: stored}]} =
+               Accounts.delete_person_session_token(token)
+
+      # The row handed back is the stored one, which is what names the PubSub
+      # topic the session's sockets are torn down on.
+      assert stored == PersonToken.hash_token(token)
       refute Accounts.get_person_by_session_token(token, @now)
+    end
+
+    test "deletes nothing when the credential matches no row", %{person: person} do
+      assert {:ok, []} = Accounts.delete_person_session_token("nobody issued this")
+      assert Repo.aggregate(from(t in PersonToken, where: t.person_id == ^person.id), :count) == 1
     end
   end
 

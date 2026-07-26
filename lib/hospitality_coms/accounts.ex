@@ -287,11 +287,23 @@ defmodule HospitalityComs.Accounts do
 
   @doc """
   Deletes the session token, ending the session it stands for.
+
+  Returns the rows that were deleted, so the caller can disconnect the sockets
+  they belong to. They carry the stored digest rather than the credential the
+  request arrived with, which is the value a session's PubSub topic is named
+  after; handing them back is what keeps the caller from having to hash
+  anything itself.
   """
-  @spec delete_person_session_token(binary()) :: :ok
+  @spec delete_person_session_token(binary()) :: {:ok, [PersonToken.t()]}
   def delete_person_session_token(token) when is_binary(token) do
-    Repo.delete_all(from(PersonToken, where: [token: ^token, context: "session"]))
-    :ok
+    digest = PersonToken.hash_token(token)
+
+    {_count, deleted} =
+      Repo.delete_all(
+        from(t in PersonToken, where: [token: ^digest, context: "session"], select: t)
+      )
+
+    {:ok, deleted}
   end
 
   ## Token helper

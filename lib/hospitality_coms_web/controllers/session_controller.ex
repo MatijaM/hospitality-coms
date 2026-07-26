@@ -68,9 +68,8 @@ defmodule HospitalityComsWeb.SessionController do
   """
   @spec delete(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def delete(conn, _params) do
-    token = conn.assigns.person_token
-    :ok = Accounts.delete_person_session_token(token)
-    :ok = PersonAuth.disconnect_sessions([%{token: token}])
+    {:ok, ended} = Accounts.delete_person_session_token(conn.assigns.person_token)
+    :ok = PersonAuth.disconnect_sessions(ended)
 
     send_resp(conn, :no_content, "")
   end

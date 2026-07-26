@@ -86,10 +86,15 @@ defmodule HospitalityComs.AccountsFixtures do
   @doc """
   Backdates a token's stamps, for tests that need a token to already be old
   rather than to wait for it.
+
+  Takes the raw credential and finds the row by its digest, because that is
+  what the column holds.
   """
   @spec override_token_authenticated_at(binary(), DateTime.t()) :: :ok
   def override_token_authenticated_at(token, authenticated_at) when is_binary(token) do
-    Repo.update_all(from(t in PersonToken, where: t.token == ^token),
+    digest = PersonToken.hash_token(token)
+
+    Repo.update_all(from(t in PersonToken, where: t.token == ^digest),
       set: [authenticated_at: DateTime.truncate(authenticated_at, :second)]
     )
 

@@ -120,7 +120,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
                |> Map.fetch!(:assigns)
                |> Map.fetch!(:current_scope)
 
-      :ok = Accounts.delete_person_session_token(token)
+      {:ok, [_deleted]} = Accounts.delete_person_session_token(token)
 
       assert %Scope{person: nil} =
                conn
