@@ -1,6 +1,8 @@
 defmodule HospitalityComsWeb.Router do
   use HospitalityComsWeb, :router
 
+  import HospitalityComsWeb.PersonAuth
+
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
@@ -8,6 +10,7 @@ defmodule HospitalityComsWeb.Router do
     plug :put_root_layout, html: {HospitalityComsWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
+    plug :fetch_current_scope_for_person
   end
 
   pipeline :api do
@@ -40,5 +43,33 @@ defmodule HospitalityComsWeb.Router do
       live_dashboard "/dashboard", metrics: HospitalityComsWeb.Telemetry
       forward "/mailbox", Plug.Swoosh.MailboxPreview
     end
+  end
+
+  ## Authentication routes
+
+  scope "/", HospitalityComsWeb do
+    pipe_through [:browser, :require_authenticated_person]
+
+    live_session :require_authenticated_person,
+      on_mount: [{HospitalityComsWeb.PersonAuth, :require_authenticated}] do
+      live "/people/settings", PersonLive.Settings, :edit
+      live "/people/settings/confirm-email/:token", PersonLive.Settings, :confirm_email
+    end
+
+    post "/people/update-password", PersonSessionController, :update_password
+  end
+
+  scope "/", HospitalityComsWeb do
+    pipe_through [:browser]
+
+    live_session :current_person,
+      on_mount: [{HospitalityComsWeb.PersonAuth, :mount_current_scope}] do
+      live "/people/register", PersonLive.Registration, :new
+      live "/people/log-in", PersonLive.Login, :new
+      live "/people/log-in/:token", PersonLive.Confirmation, :new
+    end
+
+    post "/people/log-in", PersonSessionController, :create
+    delete "/people/log-out", PersonSessionController, :delete
   end
 end

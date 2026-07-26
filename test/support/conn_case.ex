@@ -35,4 +35,45 @@ defmodule HospitalityComsWeb.ConnCase do
     HospitalityComs.DataCase.setup_sandbox(tags)
     {:ok, conn: Phoenix.ConnTest.build_conn()}
   end
+
+  @doc """
+  Setup helper that registers and logs in people.
+
+      setup :register_and_log_in_person
+
+  It stores an updated connection and a registered person in the
+  test context.
+  """
+  def register_and_log_in_person(%{conn: conn} = context) do
+    person = HospitalityComs.AccountsFixtures.person_fixture()
+    scope = HospitalityComs.Accounts.Scope.for_person(person)
+
+    opts =
+      context
+      |> Map.take([:token_authenticated_at])
+      |> Enum.into([])
+
+    %{conn: log_in_person(conn, person, opts), person: person, scope: scope}
+  end
+
+  @doc """
+  Logs the given `person` into the `conn`.
+
+  It returns an updated `conn`.
+  """
+  def log_in_person(conn, person, opts \\ []) do
+    token = HospitalityComs.Accounts.generate_person_session_token(person)
+
+    maybe_set_token_authenticated_at(token, opts[:token_authenticated_at])
+
+    conn
+    |> Phoenix.ConnTest.init_test_session(%{})
+    |> Plug.Conn.put_session(:person_token, token)
+  end
+
+  defp maybe_set_token_authenticated_at(_token, nil), do: nil
+
+  defp maybe_set_token_authenticated_at(token, authenticated_at) do
+    HospitalityComs.AccountsFixtures.override_token_authenticated_at(token, authenticated_at)
+  end
 end

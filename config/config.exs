@@ -7,6 +7,19 @@
 # General application configuration
 import Config
 
+config :hospitality_coms, :scopes,
+  person: [
+    default: true,
+    module: HospitalityComs.Accounts.Scope,
+    assign_key: :current_scope,
+    access_path: [:person, :id],
+    schema_key: :person_id,
+    schema_type: :binary_id,
+    schema_table: :people,
+    test_data_fixture: HospitalityComs.AccountsFixtures,
+    test_setup_helper: :register_and_log_in_person
+  ]
+
 config :hospitality_coms,
   # HospitalityComs.EmployerRepo addresses the same database and is
   # deliberately excluded: migrations run through the primary repo alone.
