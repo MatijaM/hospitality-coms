@@ -2,12 +2,26 @@ defmodule HospitalityComs.BoundaryTest do
   @moduledoc """
   The proof suite for the boundary the product's central claim rests on.
 
-  Four tiers hold an employer session away from person data, and only one of
-  them produces an error rather than a leak when it is violated: the Postgres
-  grants. This file asserts that tier against `has_table_privilege` — the
-  privilege bit itself — rather than against an error response, because an
-  error response is evidence that *this* query was refused and the privilege
-  bit is evidence that every query is.
+  Several things hold an employer session away from person data, and only one
+  of them produces an error rather than a leak when it is violated: the
+  Postgres grants. This file asserts that tier against `has_table_privilege`
+  and `has_any_column_privilege` — the privilege bits themselves — rather than
+  against an error response, because an error response is evidence that *this*
+  query was refused and the privilege bit is evidence that every query is.
+
+  ## What this suite does not claim
+
+  It does not claim the grants are a tier *below* the BEAM guards, reachable
+  only by somebody with a psql prompt. `EmployerRepo` logs in as the
+  application's own role and assumes `employer_role` on connect, so one
+  `RESET ROLE` over a raw `query/3` — which no guard sees — puts every
+  privilege back. "the escapes neither guard closes" pins all three, so they
+  are a decision on the record rather than a discovery somebody makes later.
+
+  What the whole boundary is strong against is *accident*: a join added three
+  units from now, a context function called from the wrong zone, a forgotten
+  filter. It is not strong against a caller who means to get out, and no test
+  here pretends otherwise.
 
   ## Why half of this file is about the tests rather than about the boundary
 
@@ -615,6 +629,69 @@ defmodule HospitalityComs.BoundaryTest do
       # Which is what says the query is well formed and the refusal above is the
       # boundary rather than a typo.
       assert Repo.all(from(p in Person, select: p.id)) == []
+    end
+  end
+
+  describe "the escapes neither guard closes" do
+    # Pinned rather than described. A hole nobody asserts is a hole somebody
+    # closes by accident and reopens by accident, and two of these are load
+    # bearing: the wrapper is built on the first, and the third is the honest
+    # limit of what the whole boundary claims.
+
+    test "raw SQL outside the wrapper is not refused, and must not be" do
+      # Ecto dispatches `query/3`, `query!/3`, `query_many/3` and `to_sql/3`
+      # straight to `Ecto.Adapters.SQL` without consulting
+      # `default_options/1`, so the unscoped guard never sees them.
+      #
+      # This is the exemption the wrapper comes in through: `write_settings/1`
+      # is a raw query issued before the scope is registered, so a `query/3`
+      # that went through the guard could never satisfy it. Closing this would
+      # close the door.
+      assert %{rows: [[1]]} = EmployerRepo.query!("SELECT 1", [])
+    end
+
+    test "raw SQL inside the wrapper skips the zone guard and is left to Postgres" do
+      # `prepare_query/3` sees an `Ecto.Query`. A string is not one, so the
+      # only thing between this statement and `people` is the grant.
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert_raise Postgrex.Error, ~r/permission denied for table people/, fn ->
+        EmployerRepo.scoped_transaction(scope, fn _scope ->
+          {:ok, EmployerRepo.query!("SELECT id FROM people", [])}
+        end)
+      end
+    end
+
+    test "RESET ROLE gives back every privilege the grants were withholding" do
+      # The grant tier is one `SET ROLE` deep. Connections log in as the
+      # application's own role and assume `employer_role` on connect, and
+      # `GRANT employer_role TO CURRENT_USER` from U1 is what lets them — so
+      # the login role is still there to go back to, and raw SQL is how you get
+      # at it.
+      #
+      # This is not a tier below the BEAM guards. It is the same tier: code
+      # that means to get out, gets out. What the boundary is strong against is
+      # accident. Closing it needs `EmployerRepo` to log in as a role of its
+      # own, which is infrastructure rather than code and is filed separately.
+      #
+      # The role is restored by the sandbox: `SET ROLE` is transactional, and
+      # every connection here is inside a transaction that is rolled back.
+      assert_raise Postgrex.Error, ~r/permission denied for table people/, fn ->
+        EmployerRepo.query!("SELECT count(*) FROM people", [])
+      end
+
+      EmployerRepo.query!("RESET ROLE", [])
+
+      assert %{rows: [[_count]]} = EmployerRepo.query!("SELECT count(*) FROM people", [])
+
+      EmployerRepo.query!("SET ROLE #{Zones.employer_role()}", [])
+
+      # And back, on this connection, before it can be lent to anything else.
+      # Without this the test above would leave an open door behind it and
+      # every refusal in this file could start passing for the wrong reason.
+      assert_raise Postgrex.Error, ~r/permission denied for table people/, fn ->
+        EmployerRepo.query!("SELECT count(*) FROM people", [])
+      end
     end
   end
 

@@ -55,7 +55,15 @@ Everywhere else, the instant arrives on the scope struct — `%HospitalityComs.A
 Two repos, one database.
 
 - `HospitalityComs.Repo` — the application's own role. The only repo in `:ecto_repos`, so migrations run through it alone.
-- `HospitalityComs.EmployerRepo` — assumes the Postgres role `employer_role` via `after_connect`. Every read goes through `EmployerRepo.scoped_transaction/2`, which writes `app.employer_id` and `app.now` transaction-locally; an operation outside it raises `EmployerRepo.UnscopedError`, and a query reaching a person-zone table raises `EmployerRepo.ZoneViolationError` before Postgres is asked.
+- `HospitalityComs.EmployerRepo` — assumes the Postgres role `employer_role` via `after_connect`. Every read goes through `EmployerRepo.scoped_transaction/2`, which writes `app.employer_id` and `app.now` transaction-locally; an operation outside it raises `EmployerRepo.UnscopedError`, and a query reaching a person-zone table raises `EmployerRepo.ZoneViolationError` before Postgres is asked. Opening the wrapper again inside itself for a *different* employer raises `EmployerRepo.NestedScopeError`: there is no savepoint between the two, so the inner `set_config` would stay in force after the inner call returned. An identical scope nests freely and writes nothing.
+
+PostgreSQL 17 is the minimum. `Zones.employer_privileges/1` asks about `MAINTAIN`, which does not exist before 17.
+
+Neither guard is the boundary, and the boundary is not below them. Three escapes, each pinned by a test in `boundary_test.exs` rather than only described:
+
+- Raw `EmployerRepo.query/3`, `query!/3`, `query_many/3` and `to_sql/3` go to `Ecto.Adapters.SQL` without `default_options/1`, so the unscoped guard never sees them. That exemption is load-bearing — `write_settings/1` is a raw query issued before the scope is registered — so it is documented, not closed.
+- A raw statement is not an `Ecto.Query`, so the zone guard never sees it either. Postgres refuses it.
+- `RESET ROLE` returns the connection to the login role, which holds everything. The grant tier is therefore defeatable from the BEAM exactly as the guards are. The boundary is strong against *accident*, not against a caller who means to get out; closing this needs a dedicated login role for `EmployerRepo`, which is filed separately.
 
 `employer_role` and `person_role` are created by `priv/repo/migrations/*_create_postgres_roles.exs`. Roles are cluster-global, not database-local; a test that drops one must run inside the sandbox transaction so it rolls back.
 
@@ -63,7 +71,9 @@ Grants are database-local while roles are not, so one privilege granted to `empl
 
 ## Zones
 
-`HospitalityComs.Zones` classifies every Ecto schema as person zone, employer zone, or shared, and `ZonesTest` fails on any schema in none of them. Adding a table is not finished until it is classified. Table names derive from `__schema__(:source)`; do not write a second list.
+`HospitalityComs.Zones` classifies every Ecto schema as person zone, employer zone, or shared, and `ZonesTest` fails on any schema in none of them. Adding a table is not finished until it is classified. Table names derive from `__schema__(:source)`; do not write a second list. That is nil for an embedded schema, and `Zones.tables/1` raises on it rather than handing Postgres a NULL the privilege sweep would silently skip.
+
+The sweep asks `has_table_privilege` *and* `has_any_column_privilege`: a column grant is invisible to the first. `GRANT SELECT (email) ON people TO employer_role` must fail the suite, and so must `GRANT SELECT ON people TO employer_role`.
 
 The boundary's proof suite is `test/hospitality_coms/boundary_test.exs`, with `boundary_lifetime_test.exs` holding the parts that cannot be asserted inside the sandbox — there, `EmployerRepo`'s transaction is a savepoint inside the test's own, so a `SET LOCAL` survives its commit and the production lifetime is not reproduced. Measured: with the wrapper writing session-level settings instead, the sandboxed file still passes everything and the non-sandboxed one fails.
 
