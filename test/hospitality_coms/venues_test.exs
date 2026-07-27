@@ -108,6 +108,35 @@ defmodule HospitalityComs.VenuesTest do
       assert "can't be blank" in errors_on(changeset).name
     end
 
+    test "does not let the caller choose the venue's id" do
+      # `id` used to be castable, so an id arriving in user attributes became
+      # the venue's while the grant was seeded against the id this function
+      # minted — two different venues, one of which does not exist.
+      chosen = Ecto.UUID.generate()
+
+      assert {:ok, %{venue: venue, grant: grant}} =
+               Venues.create_venue(creator_scope(@now), valid_venue_attributes(%{id: chosen}))
+
+      refute venue.id == chosen
+      assert grant.venue_id == venue.id
+    end
+
+    test "reports no error for an id that is already taken, because it never reaches the row" do
+      # The other half. A castable primary key also made a colliding caller
+      # id raise `Ecto.ConstraintError` out of a function whose contract is
+      # `{:ok, _} | {:error, _}` — an exception where the caller was promised
+      # a tuple.
+      {_scope, %{venue: existing}} = scoped_venue_fixture(%{}, @now)
+
+      assert {:ok, %{venue: venue}} =
+               Venues.create_venue(
+                 creator_scope(@now),
+                 valid_venue_attributes(%{id: existing.id})
+               )
+
+      refute venue.id == existing.id
+    end
+
     test "seeds exactly one grant for the venue it creates" do
       assert {:ok, %{venue: venue, grant: grant}} =
                Venues.create_venue(creator_scope(@now), valid_venue_attributes())

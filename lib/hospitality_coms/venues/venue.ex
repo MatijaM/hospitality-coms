@@ -70,9 +70,14 @@ defmodule HospitalityComs.Venues.Venue do
   @doc """
   A changeset for a venue, stamped from `now`.
 
-  `id` is taken from `attrs` when present. Venue creation mints the id before
-  the row exists, because the employer scope the insert runs under has to name
-  the venue it is about to create.
+  `id` is **not** castable. Venue creation mints the id before the row exists,
+  because the employer scope the insert runs under has to name the venue it is
+  about to create — so the id arrives on the struct
+  (`Venue.changeset(%Venue{id: minted}, ...)`), which Ecto surfaces into the
+  insert, and never out of `attrs`. A primary key taken from user attributes is
+  a caller choosing which row to be: it would collide with an existing venue
+  and raise `Ecto.ConstraintError` out of a function whose contract is a tuple,
+  and it would disagree with the venue the scope and the seeded grant name.
 
   `known_timezone?` decides whether the timezone names a zone the database
   knows. It is only consulted when a timezone is present and otherwise valid,
@@ -82,7 +87,7 @@ defmodule HospitalityComs.Venues.Venue do
   def changeset(venue, attrs, %DateTime{} = now, known_timezone?)
       when is_function(known_timezone?, 1) do
     venue
-    |> cast(attrs, [:id, :name, :timezone])
+    |> cast(attrs, [:name, :timezone])
     |> validate_required([:name, :timezone])
     |> update_change(:name, &String.trim/1)
     |> update_change(:timezone, &String.trim/1)
