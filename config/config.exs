@@ -33,6 +33,32 @@ config :hospitality_coms,
   generators: [timestamp_type: :utc_datetime, binary_id: true],
   clock: HospitalityComs.Clock.System
 
+# Liveness for engagements (KTD6). Correctness is derived — an expired
+# engagement is refused on the next request whether or not anything ran — so
+# what the queue buys is that an already-powerless socket finds out. It runs
+# through `HospitalityComs.Repo`, the application's own role: a sweep that sees
+# every venue is precisely what no employer session may do.
+#
+# The cron entry is the idempotent periodic half. The scheduled half is
+# inserted by the claim itself, in the claim's own transaction.
+#
+# The pruner is not housekeeping. `ExpireEngagement`'s uniqueness rule is
+# `period: :infinity`, so without a pruner `oban_jobs` grows monotonically for
+# the life of the installation and every insert scans all of it — correctness
+# resting on retention, which is not a thing to rest correctness on.
+#
+# `max_age` and `EngagementSweeper`'s lookback are a pair and the order between
+# them matters: a completed announcement is what stops the sweep re-announcing
+# the same expiry every five minutes, so retention has to outlast the window the
+# sweep looks back over. Seven days against one is the margin.
+config :hospitality_coms, Oban,
+  repo: HospitalityComs.Repo,
+  queues: [engagements: 5],
+  plugins: [
+    {Oban.Plugins.Cron, crontab: [{"*/5 * * * *", HospitalityComs.Workers.EngagementSweeper}]},
+    {Oban.Plugins.Pruner, max_age: 7 * 24 * 60 * 60}
+  ]
+
 # The employer zone acts as a Postgres role that will hold no privilege on
 # person-zone tables. The role is assumed on connection rather than logged in
 # as, so there is no second credential to manage.

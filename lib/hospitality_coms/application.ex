@@ -13,8 +13,11 @@ defmodule HospitalityComs.Application do
       HospitalityComs.EmployerRepo,
       {DNSCluster, query: Application.get_env(:hospitality_coms, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: HospitalityComs.PubSub},
-      # Start a worker by calling: HospitalityComs.Worker.start_link(arg)
-      # {HospitalityComs.Worker, arg},
+      # After both repos, because Oban connects on start, and before the
+      # endpoint, because a request that enqueues a job needs somewhere to
+      # enqueue it. In `:test` the configuration is `testing: :manual`, so this
+      # starts with no queues and no plugins and executes nothing on its own.
+      {Oban, Application.fetch_env!(:hospitality_coms, Oban)},
       # Start to serve requests, typically the last entry
       HospitalityComsWeb.Endpoint
     ]

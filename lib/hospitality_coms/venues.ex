@@ -82,9 +82,17 @@ defmodule HospitalityComs.Venues do
   13:00 is live at 12:00, and a unit of work running at 12:00 that counted it
   would leave the venue unadministrable from 13:00.
 
-  The invariant counts grant *rows*, not holders anybody can name — an honest
-  limitation between units, since who holds a grant is recorded on U5's
-  `engagements.grant_id` and that is what will make "holder" mean anything.
+  The invariant counts grant *rows*, and it still does. U5 recorded who holds
+  one — `engagements.grant_id` — and did **not** rewrite this check to count
+  holders instead, because the two rules protect different routes to the same
+  bad state and neither subsumes the other. This one says a venue cannot be left
+  with no outstanding authority; `HospitalityComs.Engagements.end_engagement/2`
+  says it cannot be left with an authority nobody holds. Folding them together
+  would make a venue whose sole manager's engagement expired both
+  unadministrable and revocable, which is worse than either.
+
+  Reading the bridge from here would also point an arrow out of the employer
+  zone, which is the direction KTD2 forbids.
 
   ## And so does the one thing lineage is for
 
@@ -511,6 +519,29 @@ defmodule HospitalityComs.Venues do
   end
 
   ## Authority
+
+  @doc """
+  The grant the scope is acting under, resolved against the database.
+
+  Live at the scope's instant and belonging to the scope's venue, or
+  `{:error, :no_grant}`. Nothing is believed from the struct: the scope says
+  which grant the session *claims*, and the row says whether that claim is still
+  true, so a grant revoked a second ago is refused on the next call with no job
+  having run.
+
+  Public because U5's `HospitalityComs.Engagements` acts under exactly the same
+  authority and must ask exactly the same question. Exposing this is what stops
+  a second, subtly different copy of it existing over there — the one place a
+  duplicated authorization check would be worst.
+
+  Must be called inside `HospitalityComs.EmployerRepo.scoped_transaction/2`; it
+  reads, so the unscoped guard refuses it otherwise.
+  """
+  @spec fetch_acting_grant(EmployerScope.t()) ::
+          {:ok, EmployerGrant.t()} | {:error, :no_grant}
+  def fetch_acting_grant(%EmployerScope{grant_id: grant_id} = scope) when is_binary(grant_id) do
+    authorize(scope)
+  end
 
   # The scope's grant, resolved against the database at the scope's instant.
   #

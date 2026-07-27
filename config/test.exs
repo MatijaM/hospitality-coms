@@ -24,6 +24,19 @@ config :hospitality_coms, HospitalityComs.EmployerRepo,
 # Tests assert on boundary instants rather than approximating them.
 config :hospitality_coms, clock: HospitalityComs.Clock.Offset
 
+# No queue runs and no plugin ticks. `testing: :manual` makes Oban start with
+# `queues: []`, `plugins: []` and an isolated non-leader peer, so a job inserted
+# by a test stays in `oban_jobs` until that test runs it with
+# `Oban.Testing.perform_job/3`.
+#
+# This is not tidiness. A job that executes for real in the suite runs on a
+# process the sandbox never lent a connection to, at an instant the injected
+# clock did not choose, against rows another test is still holding — three
+# independent sources of flake for a mechanism whose correctness this unit
+# deliberately does not depend on. Every assertion about expiry here is an
+# assertion about what the worker does when it is run, made by running it.
+config :hospitality_coms, Oban, testing: :manual
+
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
 config :hospitality_coms, HospitalityComsWeb.Endpoint,
