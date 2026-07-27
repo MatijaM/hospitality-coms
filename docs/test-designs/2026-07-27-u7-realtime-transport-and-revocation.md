@@ -288,7 +288,32 @@ explicitly.
    and these tests are non-sandboxed, so the real connections have to be shared with it.
    Putting `Sandbox.mode({:shared, self()})` in a case template rather than in five setup
    blocks is what keeps the ordering against `EngagementsFixtures`' purge correct in one
-   place.
+   place. It also **pins `Clock.Offset`** to the fixtures' instant, which the brief did not
+   anticipate: a channel reads the clock, so a test whose fixtures hang off March and whose
+   channel asks what time it is would be comparing March against today.
+
+9. **`ErrorEnvelope.for_changeset/3` was extracted and `SessionController` now calls it.**
+   Two channels needed the same `traverse_errors` interpolation the controller had inline,
+   and `ErrorEnvelope`'s own moduledoc already claimed every error body is built there. A
+   mechanical refactor with `session_controller_test.exs` asserting the output shape
+   unchanged; no behaviour moved.
+
+10. **`PersonAuth.session_topic/1` became public and `Accounts.session_token_digest/1` was
+    added.** KTD7's socket id has to be *the same string* `disconnect_sessions/1`
+    broadcasts to, and the sockets hold the raw token where that function holds the stored
+    digest. Two spellings that drifted would make log-out a silent no-op against an open
+    socket, so there is one function for the string and one for the digest, and the web
+    layer reaches the hashing through the context rather than through `PersonToken`.
+
+11. **Every claim in this brief about what a test would catch was checked by breaking the
+    code.** Five mutations, each reverted: removing the `{:stop, …}` (six revocation tests
+    fail, the rejoin test does **not** — which is the claim); removing the re-derivation
+    from `join/3` (the rejoin test fails, plus four join tests); stamping the instant at
+    join instead of per event (the three boundary-crossing send tests fail); returning a
+    per-person socket id (four KTD7 tests fail); routing `"peer"` on `EmployerSocket` (two
+    KTD9 tests fail); and collapsing `PubSub.subscribe/2` to one permissive clause (six
+    tests fail). A test-design brief that asserts a test is load-bearing without having
+    seen it fail is a sentence, not evidence.
 
 ## Quality scores (self-assessed)
 
@@ -301,3 +326,5 @@ explicitly.
   prefix; `pub_sub_test` is async and touches nothing.
 - Regression: U7 adds no table, no migration and no grant, and no existing assertion
   changed. The boundary sweep is re-run and reported.
+- Suite: 600 tests, green over three seeded runs; `mix quality` and
+  `mix format --check-formatted` clean; strict compile clean in `:dev` and `:prod`.

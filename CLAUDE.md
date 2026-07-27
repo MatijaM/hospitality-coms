@@ -42,7 +42,9 @@ In dev, `/dev/mailbox` is the only way to read a magic link — nothing renders 
 `HospitalityComs.Clock` is the only source of the current instant. `HospitalityComs.Credo.Check.ClockAuthority` enforces it:
 
 - `DateTime.utc_now/*` is flagged anywhere outside the `HospitalityComs.Clock` namespace.
-- `Clock.now/0` is flagged outside the modules listed in the check's `:boundary_modules` parameter in `.credo.exs`. That list holds three entries: `HospitalityComsWeb.PersonAuth` (the HTTP boundary) and the two Oban workers, `Workers.ExpireEngagement` and `Workers.EngagementSweeper` — one job attempt is one unit of work, and a retry is a new one that correctly reads the clock again. When you build the channel boundary in U7, add it there rather than working around the check.
+- `Clock.now/0` is flagged outside the modules listed in the check's `:boundary_modules` parameter in `.credo.exs`. That list holds four entries: `HospitalityComsWeb.PersonAuth` (the HTTP boundary), the two Oban workers `Workers.ExpireEngagement` and `Workers.EngagementSweeper` — one job attempt is one unit of work, and a retry is a new one that correctly reads the clock again — and `HospitalityComsWeb.ChannelAuth`, the channel boundary U7 added. When you build another, add it there rather than working around the check.
+
+  `ChannelAuth` is deliberately **one** entry for six modules. Two sockets and four channels need an instant; naming them all would turn the allowlist into an inventory of whatever happens to call the clock. Everything on the transport takes its instant from a scope `ChannelAuth` built.
 
 Everywhere else, the instant arrives on the scope struct — `%HospitalityComs.Accounts.PersonScope{person: _, now: _}`, assigned as `:current_scope` by `PersonAuth.fetch_person_scope/2`, or `%HospitalityComs.Accounts.EmployerScope{venue_id: _, now: _}`. `EmployerRepo`'s transaction wrapper takes the instant off the scope for the same reason; a repo is not a unit of work, so it is not a boundary module.
 
@@ -167,6 +169,28 @@ What a grant may revoke is itself and its transitive descendants through `grante
 
 **Three more test files are not sandboxed:** `rooms_test.exs`, `rosters_test.exs` and `rooms_concurrency_test.exs`, all through `EngagementsFixtures.real_connections/0`, for the reason U5's three are.
 
+## Realtime
+
+Two sockets, declared in `HospitalityComsWeb.Endpoint` with `auth_token: true` so the session token arrives on the `Sec-WebSocket-Protocol` header instead of a query parameter that lands in access logs. It reaches `connect/3` as `connect_info[:auth_token]`.
+
+**`PersonSocket` routes `venue_room:*`, `shift_room:*` and the exact topic `peer`. `EmployerSocket` routes `employer_venue:*` and nothing else** (KTD9). The absences are the design: no `peer`, so an employer session's join is refused in Phoenix's dispatch with no application code running; no room topic, because room conversation is worker-facing and `employer_role` holds nothing on `room_messages`. Adding a route to `EmployerSocket` is a boundary change, not a feature. `sockets_test.exs` asserts against `__channel__/1` — the table itself — with the person socket's matching entry as the control, so an empty table cannot pass it.
+
+**`id/1` is the session, never the person** (KTD7): `HospitalityComsWeb.PersonAuth.session_topic/1` of the token's digest, which is the exact string `disconnect_sessions/1` already broadcasts `"disconnect"` to. Both sockets return the same string for the same token, so logging out drops both transports of that session and neither transport of any other. There is one spelling of it; two that drifted would make log-out a silent no-op against an open socket.
+
+**Connect authenticates; join authorises.** Nothing about membership is cached on a socket. `join/3` asks `Rooms.fetch_venue_room_membership/2`, `Rooms.fetch_shift_room_reader/2` or `Engagements.fetch_grant_holding_engagement/2` again, every time — which is what makes the *refused rejoin* the revocation (KTD8). `revocation_test.exs` asserts that rejoin without looking at the channel process at all: deleting the `{:stop, …}` leaves it passing, deleting the re-derivation is what makes it fail. Both measured.
+
+**The instant is per inbound event, not per join** (KTD5). `ChannelAuth.person_scope/1` reads the clock at the top of every `join/3` and every `handle_in/3`. A channel joined at 22:00 has its 23:31 send refused by a room that closed at 23:30, on the same process, with no rejoin and no job.
+
+There is no separate employer credential. An employer session is a person session plus a venue on the channel topic; `Engagements.fetch_grant_holding_engagement/2` resolves the engagement at that venue holding a grant the venue has not revoked, and `ChannelAuth.employer_scope/2` turns it into an `EmployerScope`.
+
+`HospitalityComs.PubSub` is both the module and the registered name of the PubSub server. Every subscription goes through `subscribe(scope, target)`, whose clauses key on the scope struct and pin the id where the scope carries one — an employer scope handed a peer topic, or a person scope handed another person's, is a `FunctionClauseError` before a registration exists. `subscribe` issues no query, so no privilege and no query backstop can have an opinion about it; this is the tier that does. `{:engagement, id}` resolves through `Engagements.topic/1` — U5's after-commit broadcast, not a second mechanism.
+
+**Presence is keyed on `engagement_id`, never `person_id`** (KTD15b), and lives only on person-socket topics. That is what stops it becoming the arithmetic U6 closed: a suspended person is absent from presence and still on the room's roll, and no employer surface can reach the diffs. The residue is the same class as `RESET ROLE` — any code in this VM can call `Presence.list/1`, because presence is a process registry rather than a privilege. There is no `untrack` call anywhere; the tracker monitors the channel process, and `presence_test.exs` proves it by killing a channel outright and watching the leave arrive.
+
+`max_channels_per_transport` is left at Phoenix's default of 100. KTD10 is what makes that enough: peer conversations multiplex through one `peer` channel, so a worker's channel count is bounded by rooms rather than by people.
+
+**Three more test files are not sandboxed**, through `HospitalityComsWeb.ChannelCase`: it takes real connections like `EngagementsFixtures.real_connections/0`, then makes ownership `{:shared, self()}` because a channel runs in a process of its own with no connection checked out, and pins `Clock.Offset` to the fixtures' instant because a channel reads the clock. Getting the shared ownership wrong does not look like a failure — it looks like `DBConnection.OwnershipError` inside `join/3`, which the channel reports as a crash, which reads like the join being refused.
+
 ## Two disclosures on the record
 
 Neither is a bug and neither is closed here. Both are written down so a later unit decides about them deliberately.
@@ -181,9 +205,9 @@ Neither is a bug and neither is closed here. Both are written down so a later un
 
 Magic link in, bearer token out. `POST /api/log-in` registers the address if it is new and mails a link; `POST /api/log-in/token` redeems it and returns the API token; `GET /api/me` and `DELETE /api/log-out` require it. There is no password anywhere in the tree and no cookie session — the generator's password column, changeset, and `bcrypt_elixir` were removed, because with no HTML layer nothing could ever set one.
 
-The API token *is* the generated session token: a row in `people_tokens`, base64url on the wire and SHA-256 in the column. Every context stores a digest, session included — the column is the bearer credential for this API, so a `SELECT` leak must not yield a working one. Deleting the row ends the session on the next request, which is the point: U7's revocation depends on it, and a signed stateless token could not deliver it.
+The API token *is* the generated session token: a row in `people_tokens`, base64url on the wire and SHA-256 in the column. Every context stores a digest, session included — the column is the bearer credential for this API, so a `SELECT` leak must not yield a working one. Deleting the row ends the session on the next request, and it is also the credential both sockets connect with, so the same delete drops the transports.
 
-Every error the API returns is one envelope, built only by `HospitalityComsWeb.ErrorEnvelope`: `{"error": {"code": <status atom>, "message": ..., "fields": {...}}}`, with `fields` present only for per-field validation failures. Controllers, `PersonAuth`, and `ErrorJSON` all go through it; do not hand-roll a body.
+Every error the API returns is one envelope, built only by `HospitalityComsWeb.ErrorEnvelope`: `{"error": {"code": <status atom>, "message": ..., "fields": {...}}}`, with `fields` present only for per-field validation failures. Controllers, `PersonAuth`, `ErrorJSON` and every channel refusal go through it; do not hand-roll a body. `ErrorEnvelope.for_changeset/3` is the one place Ecto's `%{count}` placeholders are interpolated.
 
 Production requires `MAGIC_LINK_BASE_URL` — `config/runtime.exs` raises without it, because the `localhost:4000` default in `config/config.exs` fails silently by mailing links to the wrong host.
 
