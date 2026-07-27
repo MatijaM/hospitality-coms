@@ -44,11 +44,20 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
   Presence entries are keyed on `engagements.id` and carry the
   employer-authored role label, never a person id and never a name. See
   `HospitalityComsWeb.Presence`.
+
+  ## What this file no longer says twice
+
+  The after-join presence track, the terminal push-and-stop, the wire rendering
+  of a message, and the two clauses that stop a channel crashing on an event or
+  a message it was not written for are all
+  `HospitalityComsWeb.RoomChannel`'s. This channel and
+  `HospitalityComsWeb.ShiftRoomChannel` differ in exactly one value there — the
+  key a payload names the room by — and it is passed as `t:RoomChannel.closure/0`'s
+  `:room` rather than written out in both files. What stays here is `join/3`
+  and the send path, which are where the two channels differ in substance.
   """
 
   use HospitalityComsWeb, :channel
-
-  require Logger
 
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Engagements.Engagement
@@ -57,22 +66,12 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComsWeb.ChannelAuth
   alias HospitalityComsWeb.ErrorEnvelope
-  alias HospitalityComsWeb.Presence
+  alias HospitalityComsWeb.RoomChannel
   alias Phoenix.Socket
 
   # One sentence for every way a join or a send can be refused about a room the
   # caller named. Saying more would say whether the venue exists.
   @refusal "this session is not in that venue's room"
-
-  @unknown_event "this channel does not handle that event"
-
-  @typedoc "What a rendered message looks like on the wire. No person id, ever."
-  @type rendered() :: %{
-          id: Ecto.UUID.t(),
-          body: String.t(),
-          sent_at: String.t(),
-          author_engagement_id: Ecto.UUID.t()
-        }
 
   @doc """
   Joins a venue's room, if this session is in it at this instant.
@@ -113,7 +112,7 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
   Sends a message to the room, authorised at the instant it arrives.
   """
   @impl true
-  @spec handle_in(String.t(), map(), Socket.t()) :: {:reply, term(), Socket.t()}
+  @spec handle_in(String.t(), map(), Socket.t()) :: {:reply, RoomChannel.reply(), Socket.t()}
   def handle_in("send", %{"body" => body}, socket) when is_binary(body) do
     scope = ChannelAuth.person_scope(socket)
 
@@ -126,20 +125,14 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
     {:reply, {:error, ErrorEnvelope.new(:bad_request, "body is required")}, socket}
   end
 
-  # `Phoenix.Channel.Server` dispatches to `handle_in/3` unconditionally — there
-  # is no warn-and-ignore fallback for an event, the way there is for a message
-  # — so a channel without this clause crashes on every event it was not
-  # written for, which a client reaches by inventing one word.
-  def handle_in(_event, _payload, socket) do
-    {:reply, {:error, ErrorEnvelope.new(:bad_request, @unknown_event)}, socket}
-  end
+  def handle_in(_event, _payload, socket), do: RoomChannel.unknown_event(socket)
 
   @spec sent(
           {:ok, RoomMessage.t()} | {:error, :not_a_member | Ecto.Changeset.t(RoomMessage.t())},
           Socket.t()
-        ) :: {:reply, term(), Socket.t()}
+        ) :: {:reply, RoomChannel.reply(), Socket.t()}
   defp sent({:ok, %RoomMessage{} = message}, socket) do
-    rendered = render(message)
+    rendered = RoomChannel.rendered(message)
     broadcast!(socket, "message", rendered)
     {:reply, {:ok, rendered}, socket}
   end
@@ -161,59 +154,25 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
   @impl true
   @spec handle_info(term(), Socket.t()) ::
           {:noreply, Socket.t()} | {:stop, {:shutdown, :revoked}, Socket.t()}
-  def handle_info(:after_join, socket) do
-    scope = ChannelAuth.person_scope(socket)
-    {:ok, _ref} = Presence.track_engagement(socket, socket.assigns.engagement, scope.now)
-    push(socket, "presence_state", Presence.list(socket))
-    {:noreply, socket}
-  end
+  def handle_info(:after_join, socket), do: RoomChannel.joined(socket)
 
   def handle_info({:engagement_revoked, %{engagement_id: engagement_id} = revocation}, socket) do
-    revoke(engagement_id == socket.assigns.engagement.id, revocation, socket)
+    RoomChannel.closed(
+      engagement_id == socket.assigns.engagement.id,
+      revocation_closure(socket),
+      revocation,
+      socket
+    )
   end
 
-  # **The engagement topic is shared by every channel that engagement opened**,
-  # so a message no clause matches does not crash one channel — it crashes all
-  # of them at once, and takes the venue room down because somebody added a
-  # message type to a shift room. Phoenix falls back to warn-and-ignore only for
-  # a channel that exports no `handle_info/2` at all; exporting one opts out of
-  # that, so this restores it.
-  #
-  # The topic and nothing else. An unmatched message is by definition a term
-  # nobody has audited, and `AGENTS.md`'s redaction list cannot cover one.
-  def handle_info(_message, socket) do
-    Logger.debug("unmatched channel message topic=#{socket.topic}")
-    {:noreply, socket}
-  end
+  def handle_info(_message, socket), do: RoomChannel.ignored(socket)
 
-  # The nudge, not the revocation. No `Presence.untrack/2` call: the tracker
-  # monitors this process, so the stop *is* the leave, and an explicit untrack
-  # before it would only be a second way to say the same thing — one that would
-  # go missing if the channel died for any other reason.
-  @spec revoke(boolean(), map(), Socket.t()) ::
-          {:noreply, Socket.t()} | {:stop, {:shutdown, :revoked}, Socket.t()}
-  defp revoke(true, revocation, socket) do
-    push(socket, "access_revoked", %{
-      venue_id: socket.assigns.venue_id,
-      engagement_id: revocation.engagement_id,
-      at: DateTime.to_iso8601(revocation.at)
-    })
-
-    {:stop, {:shutdown, :revoked}, socket}
-  end
-
-  # Another engagement's revocation, which this channel is not about. It cannot
-  # arrive today — the subscription is per engagement — and ignoring it is what
-  # keeps that true rather than assumed.
-  defp revoke(false, _revocation, socket), do: {:noreply, socket}
-
-  @spec render(RoomMessage.t()) :: rendered()
-  defp render(%RoomMessage{} = message) do
+  @spec revocation_closure(Socket.t()) :: RoomChannel.closure()
+  defp revocation_closure(socket) do
     %{
-      id: message.id,
-      body: message.body,
-      sent_at: DateTime.to_iso8601(message.sent_at),
-      author_engagement_id: message.author_engagement_id
+      event: "access_revoked",
+      reason: :revoked,
+      room: %{venue_id: socket.assigns.venue_id}
     }
   end
 end

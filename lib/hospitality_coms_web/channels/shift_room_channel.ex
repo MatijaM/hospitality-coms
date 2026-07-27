@@ -33,11 +33,17 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
   `:room_closed` and `:not_rostered` are only ever said about a room inside the
   caller's own venues, where they tell them nothing their venue's published
   shift times do not.
+
+  ## What this file no longer says twice
+
+  Presence, the terminal push-and-stop, message rendering and the two
+  crash-proofing clauses are `HospitalityComsWeb.RoomChannel`'s — see
+  `HospitalityComsWeb.VenueRoomChannel`. What stays here is `join/3` and the
+  send path, because readability and membership being different questions is
+  the one thing this file exists to say.
   """
 
   use HospitalityComsWeb, :channel
-
-  require Logger
 
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Engagements.Engagement
@@ -46,21 +52,12 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComsWeb.ChannelAuth
   alias HospitalityComsWeb.ErrorEnvelope
-  alias HospitalityComsWeb.Presence
+  alias HospitalityComsWeb.RoomChannel
   alias Phoenix.Socket
 
   @unreadable "this session cannot read that shift room"
   @closed "that shift room is closed to new messages"
   @not_rostered "this session is not on that shift's roster"
-  @unknown_event "this channel does not handle that event"
-
-  @typedoc "What a rendered message looks like on the wire. No person id, ever."
-  @type rendered() :: %{
-          id: Ecto.UUID.t(),
-          body: String.t(),
-          sent_at: String.t(),
-          author_engagement_id: Ecto.UUID.t()
-        }
 
   @doc """
   Joins a shift room, if this session may read it at this instant.
@@ -98,7 +95,7 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
   Sends a message to the room, authorised at the instant it arrives.
   """
   @impl true
-  @spec handle_in(String.t(), map(), Socket.t()) :: {:reply, term(), Socket.t()}
+  @spec handle_in(String.t(), map(), Socket.t()) :: {:reply, RoomChannel.reply(), Socket.t()}
   def handle_in("send", %{"body" => body}, socket) when is_binary(body) do
     scope = ChannelAuth.person_scope(socket)
 
@@ -111,20 +108,15 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
     {:reply, {:error, ErrorEnvelope.new(:bad_request, "body is required")}, socket}
   end
 
-  # See `HospitalityComsWeb.VenueRoomChannel`: `handle_in/3` has no
-  # warn-and-ignore fallback, so without this clause every event the channel was
-  # not written for is a crash a client can reach by inventing one word.
-  def handle_in(_event, _payload, socket) do
-    {:reply, {:error, ErrorEnvelope.new(:bad_request, @unknown_event)}, socket}
-  end
+  def handle_in(_event, _payload, socket), do: RoomChannel.unknown_event(socket)
 
   @spec sent(
           {:ok, RoomMessage.t()}
           | {:error, Rooms.refusal() | :not_rostered | Ecto.Changeset.t(RoomMessage.t())},
           Socket.t()
-        ) :: {:reply, term(), Socket.t()}
+        ) :: {:reply, RoomChannel.reply(), Socket.t()}
   defp sent({:ok, %RoomMessage{} = message}, socket) do
-    rendered = render(message)
+    rendered = RoomChannel.rendered(message)
     broadcast!(socket, "message", rendered)
     {:reply, {:ok, rendered}, socket}
   end
@@ -156,47 +148,25 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
   @impl true
   @spec handle_info(term(), Socket.t()) ::
           {:noreply, Socket.t()} | {:stop, {:shutdown, :revoked}, Socket.t()}
-  def handle_info(:after_join, socket) do
-    scope = ChannelAuth.person_scope(socket)
-    {:ok, _ref} = Presence.track_engagement(socket, socket.assigns.engagement, scope.now)
-    push(socket, "presence_state", Presence.list(socket))
-    {:noreply, socket}
-  end
+  def handle_info(:after_join, socket), do: RoomChannel.joined(socket)
 
   def handle_info({:engagement_revoked, %{engagement_id: engagement_id} = revocation}, socket) do
-    revoke(engagement_id == socket.assigns.engagement.id, revocation, socket)
+    RoomChannel.closed(
+      engagement_id == socket.assigns.engagement.id,
+      revocation_closure(socket),
+      revocation,
+      socket
+    )
   end
 
-  # The engagement topic is shared by every channel that engagement opened — the
-  # venue room and every shift room at once — so an unmatched message here does
-  # not crash one channel, it crashes all of them. See
-  # `HospitalityComsWeb.VenueRoomChannel`.
-  def handle_info(_message, socket) do
-    Logger.debug("unmatched channel message topic=#{socket.topic}")
-    {:noreply, socket}
-  end
+  def handle_info(_message, socket), do: RoomChannel.ignored(socket)
 
-  @spec revoke(boolean(), map(), Socket.t()) ::
-          {:noreply, Socket.t()} | {:stop, {:shutdown, :revoked}, Socket.t()}
-  defp revoke(true, revocation, socket) do
-    push(socket, "access_revoked", %{
-      shift_room_id: socket.assigns.shift_room_id,
-      engagement_id: revocation.engagement_id,
-      at: DateTime.to_iso8601(revocation.at)
-    })
-
-    {:stop, {:shutdown, :revoked}, socket}
-  end
-
-  defp revoke(false, _revocation, socket), do: {:noreply, socket}
-
-  @spec render(RoomMessage.t()) :: rendered()
-  defp render(%RoomMessage{} = message) do
+  @spec revocation_closure(Socket.t()) :: RoomChannel.closure()
+  defp revocation_closure(socket) do
     %{
-      id: message.id,
-      body: message.body,
-      sent_at: DateTime.to_iso8601(message.sent_at),
-      author_engagement_id: message.author_engagement_id
+      event: "access_revoked",
+      reason: :revoked,
+      room: %{shift_room_id: socket.assigns.shift_room_id}
     }
   end
 end
