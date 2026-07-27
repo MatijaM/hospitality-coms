@@ -1,9 +1,10 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ApiClient } from "../api/client";
+import type { ApiClient, ApiResult } from "../api/client";
+import type { Person } from "../api/types";
 import {
   createFakeApi,
   fails,
@@ -24,6 +25,7 @@ function Probe() {
     <div>
       <p>status: {state.status}</p>
       {state.status === "authenticated" && <p>person: {state.person.email}</p>}
+      {state.status === "authenticated" && <p>token: {state.token}</p>}
       <p>redemption: {redemption}</p>
       <button
         onClick={() => {
@@ -38,6 +40,16 @@ function Probe() {
       <button onClick={retry}>retry</button>
     </div>
   );
+}
+
+/** A promise this test settles by hand, to hold an answer in flight. */
+function deferred<T>() {
+  let settle: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((resolve) => {
+    settle = resolve;
+  });
+
+  return { promise, settle };
 }
 
 function renderSession(api: ApiClient, tokenStore: TokenStore) {
@@ -91,6 +103,79 @@ describe("resolving a stored token on load", () => {
     expect(store.read()).toBe("c2Vzc2lvbg");
   });
 
+  it("ignores an answer about a token the store no longer holds", async () => {
+    // The provider is still resolving the stored token when a redemption
+    // lands. The old token's answer arrives afterwards and is about a session
+    // nobody is in any more: applying it — a 401 in particular — wipes a
+    // session that has just succeeded, and there is no way back except the
+    // inbox.
+    const store = createMemoryTokenStore("stale-token");
+    const stale = deferred<ApiResult<Person>>();
+
+    renderSession(
+      createFakeApi({
+        currentPerson: () => stale.promise,
+        redeemMagicLink: () =>
+          Promise.resolve(ok({ token: "fresh-token", person: somePerson })),
+      }),
+      store,
+    );
+
+    await screen.findByText("status: resolving");
+    await userEvent.click(screen.getByRole("button", { name: "redeem" }));
+    await screen.findByText("token: fresh-token");
+
+    await act(async () => {
+      stale.settle(fails(unauthorized()));
+      await stale.promise;
+    });
+
+    expect(screen.getByText("status: authenticated")).toBeInTheDocument();
+    expect(screen.getByText("token: fresh-token")).toBeInTheDocument();
+    expect(store.read()).toBe("fresh-token");
+  });
+
+  it("ignores a stale success about a token the store no longer holds", async () => {
+    const store = createMemoryTokenStore("stale-token");
+    const stale = deferred<ApiResult<Person>>();
+    const otherPerson = { id: "8b1b0a3c-0000-4000-8000-000000000002", email: null };
+
+    renderSession(
+      createFakeApi({
+        currentPerson: () => stale.promise,
+        redeemMagicLink: () =>
+          Promise.resolve(ok({ token: "fresh-token", person: somePerson })),
+      }),
+      store,
+    );
+
+    await screen.findByText("status: resolving");
+    await userEvent.click(screen.getByRole("button", { name: "redeem" }));
+    await screen.findByText("token: fresh-token");
+
+    await act(async () => {
+      stale.settle(ok(otherPerson));
+      await stale.promise;
+    });
+
+    expect(screen.getByText("person: worker@example.com")).toBeInTheDocument();
+    expect(screen.getByText("token: fresh-token")).toBeInTheDocument();
+  });
+
+  it("settles anonymous when a retry finds the token gone", async () => {
+    const store = createMemoryTokenStore("c2Vzc2lvbg");
+
+    renderSession(
+      createFakeApi({ currentPerson: () => Promise.resolve(fails(offline())) }),
+      store,
+    );
+    await screen.findByText("status: unavailable");
+    store.clear();
+    await userEvent.click(screen.getByRole("button", { name: "retry" }));
+
+    expect(await screen.findByText("status: anonymous")).toBeInTheDocument();
+  });
+
   it("resolves on a retry after the network comes back", async () => {
     const currentPerson = vi
       .fn(() => Promise.resolve(ok(somePerson)))
@@ -118,6 +203,33 @@ describe("redeeming a link", () => {
     expect(await screen.findByText("person: worker@example.com")).toBeInTheDocument();
     expect(redeemMagicLink).toHaveBeenCalledWith("pasted-token");
     expect(store.read()).toBe("aXNzdWVk");
+  });
+
+  it("still signs the person in when the token could not be stored", async () => {
+    // A browser blocking storage throws on write. The token is valid and was
+    // just issued, so failing the redemption over it would throw away a
+    // working credential — and rejecting out of `redeem` strands both call
+    // sites, which `void` the promise, on "Logging you in…" for ever.
+    const refusingStore: TokenStore = {
+      read: () => null,
+      write: () => {
+        throw new DOMException("QuotaExceededError");
+      },
+      clear: () => undefined,
+    };
+
+    renderSession(
+      createFakeApi({
+        redeemMagicLink: () =>
+          Promise.resolve(ok({ token: "aXNzdWVk", person: somePerson })),
+      }),
+      refusingStore,
+    );
+    await screen.findByText("status: anonymous");
+    await userEvent.click(screen.getByRole("button", { name: "redeem" }));
+
+    expect(await screen.findByText("person: worker@example.com")).toBeInTheDocument();
+    expect(screen.getByText("redemption: accepted")).toBeInTheDocument();
   });
 
   it("hands a refusal back to the caller and stays anonymous", async () => {

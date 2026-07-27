@@ -57,6 +57,27 @@ export type SessionContextValue = {
 
 const SessionContext = createContext<SessionContextValue | null>(null);
 
+// `TokenStore` says its three operations do not throw. These two hold the
+// application to that even when a store handed in from outside does not: a
+// storage failure must never become a rejected promise, because every caller
+// of `redeem` and `logOut` is an event handler that voids the result.
+function persist(tokenStore: TokenStore, token: string): void {
+  try {
+    tokenStore.write(token);
+  } catch {
+    // The session is real; it just will not survive a refresh.
+  }
+}
+
+function forget(tokenStore: TokenStore): void {
+  try {
+    tokenStore.clear();
+  } catch {
+    // Nothing to remove, or nothing that can be. The state says anonymous
+    // either way, which is what the person asked for.
+  }
+}
+
 export function useSession(): SessionContextValue {
   const value = use(SessionContext);
 
@@ -91,9 +112,19 @@ export function SessionProvider({ api, tokenStore, children }: SessionProviderPr
     let abandoned = false;
 
     void api.currentPerson(token).then((result) => {
-      // The effect runs twice under StrictMode and again on every retry, so a
-      // late answer from an abandoned run must not overwrite a newer state.
-      if (abandoned) return;
+      // Two ways this answer can be about a session nobody is in any more.
+      //
+      // `abandoned` covers the effect being torn down — StrictMode's double
+      // mount, and every retry.
+      //
+      // The store check covers the one that is not a teardown at all: a
+      // redemption landing while this request is in flight replaces the token
+      // without unmounting anything, and `redeem` writes the new token to the
+      // store before it touches state. So an answer about a token the store no
+      // longer holds is stale by definition. Applying it either way is wrong,
+      // and applying a stale 401 is worse than wrong — it clears a credential
+      // that was just issued and sends the worker back to their inbox.
+      if (abandoned || tokenStore.read() !== token) return;
 
       if (result.ok) {
         setState({ status: "authenticated", token, person: result.value });
@@ -122,7 +153,13 @@ export function SessionProvider({ api, tokenStore, children }: SessionProviderPr
 
       if (!result.ok) return { ok: false, failure: result.failure };
 
-      tokenStore.write(result.value.token);
+      // `TokenStore` promises not to throw and the implementations here keep
+      // that promise, but this call site is the one where breaking it costs
+      // most: the token has been issued, the session is real, and rejecting
+      // out of here would strand a caller that `void`s the promise on
+      // "Logging you in…" while throwing away a working credential. So the
+      // session is established whether or not it was persisted.
+      persist(tokenStore, result.value.token);
       setState({
         status: "authenticated",
         token: result.value.token,
@@ -141,14 +178,24 @@ export function SessionProvider({ api, tokenStore, children }: SessionProviderPr
     // one thing that is certainly right. The row it leaves behind expires.
     if (state.status === "authenticated") await api.logOut(state.token);
 
-    tokenStore.clear();
+    forget(tokenStore);
     setState({ status: "anonymous" });
   }, [api, tokenStore, state]);
 
   const retry = useCallback(() => {
+    // Asked here rather than in the effect, where a synchronous `setState`
+    // would be a cascading render. If the token went while the retry button
+    // was on screen — a log-out in another tab — the effect would find nothing
+    // to ask about and return, leaving `resolving` on screen for ever.
+    if (tokenStore.read() === null) {
+      setState({ status: "anonymous" });
+
+      return;
+    }
+
     setState({ status: "resolving" });
     setAttempt((previous) => previous + 1);
-  }, []);
+  }, [tokenStore]);
 
   const value = useMemo(
     () => ({ state, api, redeem, logOut, retry }),

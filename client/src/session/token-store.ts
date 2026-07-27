@@ -14,6 +14,15 @@
  * without hunting for the string key.
  */
 
+/**
+ * None of these three may throw.
+ *
+ * That is part of the contract rather than an implementation detail: the
+ * callers are `redeem` and `logOut`, both of which are invoked as
+ * `void redeem(…).then(…)` from an event handler, so a throw becomes a rejected
+ * promise nobody catches and the surface waiting on it — "Logging you in…" —
+ * stays there for ever.
+ */
 export type TokenStore = {
   read(): string | null;
   write(token: string): void;
@@ -22,19 +31,65 @@ export type TokenStore = {
 
 export const SESSION_TOKEN_KEY = "hospitality-coms.session-token";
 
+/**
+ * The browser's storage, with every call tolerant of a browser that refuses.
+ *
+ * Private-mode Safari throws `QuotaExceededError` on write and a browser with
+ * site data switched off throws `SecurityError` on everything. Neither is worth
+ * a blank page: a swallowed write degrades to a session that does not survive a
+ * refresh, which is a bad afternoon rather than an unusable application.
+ */
 export function createLocalStorageTokenStore(
   storage: Storage,
   key: string = SESSION_TOKEN_KEY,
 ): TokenStore {
   return {
-    read: () => storage.getItem(key),
+    read: () => {
+      try {
+        return storage.getItem(key);
+      } catch {
+        return null;
+      }
+    },
     write: (token) => {
-      storage.setItem(key, token);
+      try {
+        storage.setItem(key, token);
+      } catch {
+        // Documented above: the session lives for this page load only.
+      }
     },
     clear: () => {
-      storage.removeItem(key);
+      try {
+        storage.removeItem(key);
+      } catch {
+        // Nothing was persisted, so there is nothing to remove.
+      }
     },
   };
+}
+
+/**
+ * What the application actually runs on: storage if the browser has it, memory
+ * if it does not.
+ *
+ * `window.localStorage` is typed as always present and is not. Reading the
+ * property throws `SecurityError` where storage is blocked, and it is plainly
+ * `undefined` under this project's own test environment, where jsdom defers to
+ * Node's experimental implementation. Both of those are a TypeError at module
+ * scope in `main.tsx`, which is a blank page and no error the worker can act on.
+ */
+export function createBrowserTokenStore(): TokenStore {
+  try {
+    const storage = globalThis.localStorage;
+    // Use it rather than test for it. Absent, it is `undefined` and this is a
+    // TypeError; blocked, it throws `SecurityError`; present, this is a read
+    // of a key that is usually not there. One probe, every failure caught.
+    storage.getItem(SESSION_TOKEN_KEY);
+
+    return createLocalStorageTokenStore(storage);
+  } catch {
+    return createMemoryTokenStore();
+  }
 }
 
 /** For tests, and for anywhere a session deliberately should not survive. */
