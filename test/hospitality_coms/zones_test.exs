@@ -21,6 +21,11 @@ defmodule HospitalityComs.ZonesTest do
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Zones
 
+  # Two schemas defined at the bottom of this file, in the states the
+  # classification has to fail on: unclassified, and classified but nameless.
+  alias __MODULE__.Embedded
+  alias __MODULE__.Ghost
+
   describe "totality" do
     test "every Ecto schema compiled into the application is classified" do
       unclassified = Zones.unclassified()
@@ -111,6 +116,34 @@ defmodule HospitalityComs.ZonesTest do
     test "derives from the schemas rather than from a second list" do
       assert Zones.person_zone_tables() ==
                Enum.map(Zones.person_zone(), & &1.__schema__(:source))
+    end
+  end
+
+  describe "tables/1" do
+    test "names the tables of the schemas it is handed" do
+      # The control. Without it the refusal below passes on a function that
+      # refuses everything.
+      assert Zones.tables([Person, PersonToken]) == ["people", "people_tokens"]
+    end
+
+    test "refuses a schema that names no table" do
+      # `__schema__(:source)` is nil for an embedded schema, and a nil is not
+      # false to Postgres: `has_table_privilege(role, NULL, priv)` is NULL, the
+      # sweep's WHERE drops the row, and the audit reports the table clean
+      # having never asked about it. A silent skip is the one failure this
+      # module must not have, so it is an exception instead.
+      assert_raise ArgumentError, ~r/names no table/, fn -> Zones.tables([Embedded]) end
+    end
+  end
+
+  defmodule Embedded do
+    @moduledoc "A schema with rows but no table of its own, which is what nil means."
+
+    use Ecto.Schema
+
+    @primary_key false
+    embedded_schema do
+      field(:note, :string)
     end
   end
 

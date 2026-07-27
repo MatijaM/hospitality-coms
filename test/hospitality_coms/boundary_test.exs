@@ -111,6 +111,40 @@ defmodule HospitalityComs.BoundaryTest do
       assert {"people_tokens", "UPDATE"} in offences
       refute {"people_tokens", "SELECT"} in offences
     end
+
+    test "are reported when the grant is on one column rather than on the table" do
+      # The blind spot every other control in this block shares. Measured:
+      #
+      #   GRANT SELECT (email) ON people TO employer_role;
+      #   has_table_privilege('employer_role','people','SELECT')      -> f
+      #   has_any_column_privilege('employer_role','people','SELECT') -> t
+      #
+      # A sweep asking only the first question reported nothing while the
+      # employer role could read every worker's address — and no control above
+      # could fail on it, because they all grant at table level.
+      Repo.query!("GRANT SELECT (email) ON people TO employer_role")
+
+      assert {"people", "SELECT"} in Zones.employer_privileges(Repo)
+    end
+
+    test "are reported for a column grant on a write privilege too" do
+      Repo.query!("GRANT UPDATE (email) ON people TO employer_role")
+
+      offences = Zones.employer_privileges(Repo)
+
+      assert {"people", "UPDATE"} in offences
+      refute {"people", "SELECT"} in offences
+    end
+
+    test "cover MAINTAIN, which the sweep asks about and PostgreSQL 17 answers" do
+      # The list the sweep asks about is the whole of what Postgres can grant on
+      # a table, and MAINTAIN is part of that on 17. This is also where a
+      # PostgreSQL older than 17 fails: `has_table_privilege` answers
+      # `unrecognized privilege type` there rather than false.
+      Repo.query!("GRANT MAINTAIN ON people TO employer_role")
+
+      assert {"people", "MAINTAIN"} in Zones.employer_privileges(Repo)
+    end
   end
 
   describe "the grant migration" do
@@ -155,7 +189,7 @@ defmodule HospitalityComs.BoundaryTest do
       #
       # U4 will have to: the employer zone is unreadable without real grants on
       # real tables. This is the test that tells it so.
-      assert shared_dependencies("employer_role") == 0
+      assert shared_dependencies(Zones.employer_role()) == 0
     end
   end
 
@@ -554,10 +588,10 @@ defmodule HospitalityComs.BoundaryTest do
         """
         SELECT CASE
                  WHEN to_regprocedure($1) IS NULL THEN NULL
-                 ELSE has_function_privilege('employer_role', to_regprocedure($1), 'EXECUTE')
+                 ELSE has_function_privilege($2, to_regprocedure($1), 'EXECUTE')
                END
         """,
-        [signature]
+        [signature, Zones.employer_role()]
       )
 
     held

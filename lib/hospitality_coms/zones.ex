@@ -45,6 +45,19 @@ defmodule HospitalityComs.Zones do
   application's grant migration does anything at all. The suite grants a
   privilege behind the sweep's back and asserts the sweep catches it, which is
   the only thing that distinguishes a working audit from a silent one.
+
+  ## The sweep requires PostgreSQL 17
+
+  `MAINTAIN` became a table privilege in PostgreSQL 17, and it is in the list
+  the sweep asks about. On 16 or earlier `has_table_privilege` answers
+  `unrecognized privilege type` and the sweep raises rather than answering.
+
+  That is the deliberate choice. The alternative — reading `server_version_num`
+  and dropping `MAINTAIN` below 17 — makes the audit's coverage depend on the
+  server it happens to run against, so the suite would be strong in CI and
+  quietly weaker somewhere else, which is the failure this whole module exists
+  to avoid. A hard minimum states the requirement where somebody will read it,
+  and 17 is what this project already runs.
   """
 
   alias HospitalityComs.Accounts.Person
@@ -66,7 +79,16 @@ defmodule HospitalityComs.Zones do
   # them rather than about `SELECT`, because `INSERT` on `people` is a way to
   # manufacture a worker and `UPDATE` on `people_tokens` is a way to mint a
   # session, and neither is a read.
-  @table_privileges ~w(SELECT INSERT UPDATE DELETE TRUNCATE REFERENCES TRIGGER)
+  #
+  # `MAINTAIN` is a PostgreSQL 17 privilege and this list is why the
+  # application requires 17 or later. See the moduledoc.
+  @table_privileges ~w(SELECT INSERT UPDATE DELETE TRUNCATE REFERENCES TRIGGER MAINTAIN)
+
+  # The subset that can also be granted per column. `has_any_column_privilege`
+  # raises `unrecognized privilege type` on the others — measured, not assumed:
+  # DELETE, TRUNCATE, TRIGGER and MAINTAIN all fail — so the predicate has to
+  # know which is which rather than asking about all eight.
+  @column_privileges ~w(SELECT INSERT UPDATE REFERENCES)
 
   @doc """
   The Postgres role the employer zone connects as.
@@ -150,16 +172,44 @@ defmodule HospitalityComs.Zones do
   defp zones, do: [person: @person_zone, employer: @employer_zone, shared: @shared]
 
   @doc """
+  The table names of the given schemas.
+
+  Raises `ArgumentError` on a schema that names no table. Takes the list for
+  the same reason `unclassified/1` does: the loud failure and the test that
+  watches it fail have to run the same code.
+  """
+  @spec tables([module()]) :: [String.t()]
+  def tables(schemas), do: Enum.map(schemas, &table_source!/1)
+
+  @spec table_source!(module()) :: String.t()
+  defp table_source!(schema), do: schema |> apply(:__schema__, [:source]) |> named!(schema)
+
+  @spec named!(String.t() | nil, module()) :: String.t()
+  defp named!(source, _schema) when is_binary(source), do: source
+
+  defp named!(nil, schema) do
+    raise ArgumentError, """
+    #{inspect(schema)} is classified in a zone but names no table.
+
+    `__schema__(:source)` is nil for an embedded schema. A nil reaches the \
+    privilege sweep as has_table_privilege(role, NULL, privilege), which is \
+    NULL rather than false — so the row is dropped and the sweep reports \
+    nothing, having looked at nothing. The zones are a statement about \
+    tables; classify the schema that persists the rows.
+    """
+  end
+
+  @doc """
   The table names of the person zone.
   """
   @spec person_zone_tables() :: [String.t()]
-  def person_zone_tables, do: Enum.map(@person_zone, & &1.__schema__(:source))
+  def person_zone_tables, do: tables(@person_zone)
 
   @doc """
   The table names of the employer zone.
   """
   @spec employer_zone_tables() :: [String.t()]
-  def employer_zone_tables, do: Enum.map(@employer_zone, & &1.__schema__(:source))
+  def employer_zone_tables, do: tables(@employer_zone)
 
   @doc """
   Whether the named table belongs to the person zone.
@@ -189,6 +239,20 @@ defmodule HospitalityComs.Zones do
   It raises on a table that does not exist, which is the loud failure wanted
   here: a person-zone schema pointing at a missing table would otherwise make
   the sweep skip it in silence.
+
+  It is not, on its own, enough. `has_table_privilege` answers about the
+  *table*, and a column grant is not one — measured:
+
+      GRANT SELECT (email) ON people TO employer_role;
+      has_table_privilege('employer_role','people','SELECT')      -> f
+      has_any_column_privilege('employer_role','people','SELECT') -> t
+
+  So `GRANT SELECT (email) ON people` would have left the sweep reporting an
+  empty list while the employer role could read every worker's address, and no
+  control in the proof suite could have caught it because they all grant at
+  table level. The predicate therefore asks both questions, and a column grant
+  is reported under the table's name: the fix differs but the exposure does
+  not, and the sweep's job is to say which door is open.
   """
   @spec employer_privileges(Ecto.Repo.t()) :: [offence()]
   def employer_privileges(repo) do
@@ -199,9 +263,11 @@ defmodule HospitalityComs.Zones do
         FROM unnest($1::text[]) WITH ORDINALITY AS t(name, tord)
         CROSS JOIN unnest($2::text[]) WITH ORDINALITY AS p(privilege, pord)
         WHERE has_table_privilege($3, t.name, p.privilege)
+           OR (p.privilege = ANY($4::text[])
+               AND has_any_column_privilege($3, t.name, p.privilege))
         ORDER BY t.tord, p.pord
         """,
-        [person_zone_tables(), @table_privileges, @employer_role]
+        [person_zone_tables(), @table_privileges, @employer_role, @column_privileges]
       )
 
     Enum.map(rows, fn [table, privilege] -> {table, privilege} end)
