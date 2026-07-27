@@ -27,8 +27,31 @@ defmodule HospitalityComsWeb.EmployerVenueChannel do
   `EmployerSocket` routes no room. See that module for why each absence is a
   decision rather than an omission.
 
-  U9 hangs the per-employer view off this channel. It needs nothing from here
-  but the scope the join already resolved.
+  ## A note for U9, which used to say the opposite
+
+  U9 hangs the per-employer view off this channel. **It must build its scope by
+  calling `HospitalityComsWeb.ChannelAuth.employer_scope/2` again, on every
+  inbound event, and must not read `socket.assigns.grant_id`.**
+
+  This paragraph used to say U9 "needs nothing from here but the scope the join
+  already resolved", which invited exactly the cached authority the rest of this
+  file argues against. The assigns are a convenience for naming the venue back
+  to the client, not a capability: they were written once, at join, and nothing
+  refreshes them. An event authorised against them would be authorised against a
+  grant that may have been revoked hours ago — which is the failure the per-join
+  re-derivation exists to prevent, reintroduced one layer in.
+
+  ## What this channel does not do, and what that costs today
+
+  It subscribes to nothing. A manager whose grant is revoked while connected
+  keeps an open channel until they rejoin — there is no employer-side analogue
+  of the engagement topic that would stop it.
+
+  That is inert while the channel carries no events: an open channel that can do
+  nothing is not access. It stops being inert the moment U9 adds the first
+  event, which is the other half of the note above — re-deriving per event makes
+  the missing subscription a latency problem rather than an authority one, and
+  reading the assigns would make it an authority one.
   """
 
   use HospitalityComsWeb, :channel

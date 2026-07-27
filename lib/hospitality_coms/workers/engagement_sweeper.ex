@@ -31,6 +31,36 @@ defmodule HospitalityComs.Workers.EngagementSweeper do
   `ExpireEngagement`. A job that failed permanently used to suppress this
   sweeper's replacement for it.
 
+  ## What it does cover, and the one thing it does not
+
+  It covers more than the moduledoc above claims, and the extra case is worth
+  naming because a reviewer looked for it and concluded it was missing.
+
+  **A crash between `Engagements.end_engagement/2`'s commit and its broadcast is
+  recovered by this sweep.** Closing a term rewrites `ends_at` to the closing
+  instant, so the engagement lands inside this window; and `ends_at` is one of
+  `ExpireEngagement`'s uniqueness args, so the insert does not collide with the
+  job scheduled for the term's *original* upper bound. The same is true of a
+  broadcast that was simply lost — including the one U7 records against
+  `HospitalityComsWeb.VenueRoomChannel`, where a channel subscribes a statement
+  after the read that admitted it and can therefore miss the first announcement.
+  Worst case is one tick, five minutes.
+
+  **The gap is the second loss, and it is permanent.** Once this sweep's
+  `ExpireEngagement` job completes, `period: :infinity` over a state list that
+  keeps `:completed` means every later insert with those args is suppressed for
+  as long as `Oban.Plugins.Pruner` keeps the row. So if *that* announcement is
+  also lost — the broadcast reaches no subscriber, or the node holding them
+  drops between the commit and the delivery — nothing announces the expiry
+  again. The engagement stays outside its term for ever and no socket is ever
+  told.
+
+  That is survivable for the reason at the top of this file: correctness does
+  not depend on the announcement. The rejoin is refused whether or not anything
+  swept, so what is lost is a socket noticing promptly rather than a socket
+  keeping access. It is written down because "the sweeper is the backstop" reads
+  like the backstop has no bottom, and it has one.
+
   ## It sees every venue, which is the point and the limit
 
   The sweeper is the application acting for itself rather than for an employer,

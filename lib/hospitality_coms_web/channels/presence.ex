@@ -44,6 +44,39 @@ defmodule HospitalityComsWeb.Presence do
   accident and against a session; it is not a Postgres grant and does not claim
   to be.
 
+  ## Three things on the record, none of them closed here
+
+  Written down so a later unit decides about them deliberately, in the place
+  somebody extending presence will read.
+
+  **A manager is also a worker, and can watch.** The three defences above are
+  about the *employer* session. A manager holds a person scope at their own
+  venue too — that is how they read the venue room at all — so they join the
+  room's channel and receive its `presence_diff` stream like anybody else.
+  Presence is a moment; watched over days it is a pattern, and somebody who is
+  never once present while their colleagues come and go is distinguishable from
+  somebody merely offline. That is KTD18's leak arriving through a door U6 did
+  not close, because U6's fix was about two *lists* being the same set and this
+  is about one list observed over time. Nothing here can fix it: presence is
+  what it is for, and the alternative is not having it.
+
+  **The meta is stamped at join and never refreshed.** `role_label` is copied
+  off the engagement when the channel tracks itself. An employer renaming a role
+  leaves every open channel advertising the old label until its next join, so
+  two clients in one room can disagree about what somebody is called. Harmless
+  today because nothing authorises on a label; it stops being harmless the first
+  time something does.
+
+  **A netsplit keeps a revoked worker visible for about twenty minutes.**
+  `Phoenix.Tracker`'s `:permdown_period` defaults to 1_200_000 ms, and until it
+  elapses a partitioned replica's presences stay listed on the surviving nodes.
+  `HospitalityComs.Application` starts `DNSCluster`, so more than one node is
+  intended rather than hypothetical. This costs nothing in *authority* — the
+  revoked person's own channel is on the far side of the split and their rejoin
+  is refused wherever it lands — but the room shows them as present for as long
+  as the period runs, which is the one place presence and membership can visibly
+  disagree.
+
   ## `fetch/2` is left as the identity, deliberately
 
   The framework invokes `fetch/2` from a process of its own, which is why its
