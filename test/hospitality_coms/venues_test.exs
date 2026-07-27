@@ -862,6 +862,12 @@ defmodule HospitalityComs.VenuesTest do
     test "cannot be asked for a venue other than the scope's, because there is no argument" do
       # Structural rather than filtered: `fetch_venue/1` takes no id, so a
       # cross-venue read is unrepresentable instead of refused.
+      #
+      # The module is loaded first because `function_exported?/3` answers
+      # false for one that merely has not been loaded yet — so without this
+      # the assertion passes or fails on whether some earlier test in this
+      # async run happened to call the context first.
+      assert Code.ensure_loaded?(Venues)
       assert function_exported?(Venues, :fetch_venue, 1)
       refute function_exported?(Venues, :fetch_venue, 2)
     end

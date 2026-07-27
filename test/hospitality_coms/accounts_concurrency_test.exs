@@ -25,9 +25,21 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
 
   Postgres supplies the barrier. A row lock held by a third connection makes
   both racers finish reading before either can write, and an uncommitted insert
-  makes the second inserter of a unique key block rather than fail. The test
-  waits until it can see the racers blocked in `pg_stat_activity` before
-  releasing the barrier, so the interleaving is forced rather than hoped for.
+  makes the second inserter of a unique key block rather than fail. Each racer
+  reports the Postgres backend it checked out before it starts, and the test
+  waits until it can see *those* backends parked in `pg_stat_activity` before
+  releasing the barrier — not until it can see some number of blocked backends,
+  which any unrelated waiter satisfies while the race quietly degrades into a
+  sequential run that passes on code with no lock at all.
+
+  The barrier is released in an `after`. `await_blocked/1` flunks on a hard
+  wall-clock budget, and a barrier that is never released leaves the holder
+  inside an open transaction holding its lock for as long as the VM lives:
+  ExUnit catches the assertion error in the test process, so it exits `:normal`
+  and nothing kills the linked tasks, and the purge that follows blocks on the
+  rows they are still holding. The purge carries a `statement_timeout` for the
+  same reason — the application's own role has none, so cleanup that cannot
+  proceed has to fail rather than wait.
   """
 
   use ExUnit.Case, async: false
@@ -89,8 +101,12 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
       winner = start_uncommitted_registration(email)
 
       task = detached(fn -> Accounts.request_login_instructions(email, url_builder(), @now) end)
-      await_blocked(1)
-      release(winner)
+
+      try do
+        await_blocked(backend_pids(1))
+      after
+        release(winner)
+      end
 
       # A 422 here would say "has already been taken" to somebody who has never
       # used this application, which is the enumeration oracle the single
@@ -124,8 +140,11 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
     holder = hold_row(token_id)
     tasks = Enum.map(1..count, fn _index -> detached(fun) end)
 
-    await_blocked(count)
-    release(holder)
+    try do
+      await_blocked(backend_pids(count))
+    after
+      release(holder)
+    end
 
     Task.await_many(tasks, @barrier_timeout)
   end
@@ -136,16 +155,36 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
   end
 
   # A task on its own real connection. It is not `allow`ed onto the test's
-  # connection, because sharing one is the opposite of what this file needs.
+  # connection, because sharing one is the opposite of what this file needs. It
+  # reports the Postgres backend it checked out before it starts work, so the
+  # barrier can wait on this backend rather than on any backend that happens to
+  # be blocked.
   defp detached(fun) do
+    test = self()
+
     Task.async(fn ->
       Sandbox.checkout(Repo, sandbox: false)
 
       try do
+        send(test, {:backend, backend_pid()})
         fun.()
       after
         Sandbox.checkin(Repo)
       end
+    end)
+  end
+
+  # `Sandbox.checkout/2` pins one connection to the calling process, so the
+  # backend this names is the one that process's work will block on.
+  defp backend_pid do
+    %{rows: [[pid]]} = Repo.query!("SELECT pg_backend_pid()", [])
+    pid
+  end
+
+  defp backend_pids(count) do
+    Enum.map(1..count, fn _index ->
+      assert_receive {:backend, pid}, @barrier_timeout
+      pid
     end)
   end
 
@@ -193,40 +232,47 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
     Task.await(holder, @barrier_timeout)
   end
 
-  # Waits until `count` backends are parked on a lock. Without this the racers
-  # could finish one after another and the test would pass without ever having
-  # raced.
-  defp await_blocked(count), do: await_blocked(count, @barrier_timeout)
+  # Waits until every one of `pids` is parked on a lock. Named backends rather
+  # than a count: a count of blocked backends anywhere in the database is
+  # satisfied by an unrelated waiter, and the racers then finish one after
+  # another with the test still green — which is the same green tick code with
+  # no lock at all would produce.
+  defp await_blocked(pids), do: await_blocked(pids, @barrier_timeout)
 
-  defp await_blocked(count, remaining) when remaining <= 0 do
-    flunk("expected #{count} blocked backends, saw #{blocked_backends()}")
+  defp await_blocked(pids, remaining) when remaining <= 0 do
+    flunk("expected backends #{list(pids)} to be blocked, saw #{list(blocked(pids))}")
   end
 
-  defp await_blocked(count, remaining) do
-    blocked_or_wait(blocked_backends() >= count, count, remaining)
+  defp await_blocked(pids, remaining) do
+    pids |> blocked() |> all_of?(pids) |> blocked_or_wait(pids, remaining)
   end
 
-  defp blocked_or_wait(true, _count, _remaining), do: :ok
+  defp all_of?(blocked, pids), do: MapSet.new(blocked) == MapSet.new(pids)
 
-  defp blocked_or_wait(false, count, remaining) do
+  defp blocked_or_wait(true, _pids, _remaining), do: :ok
+
+  defp blocked_or_wait(false, pids, remaining) do
     Process.sleep(25)
-    await_blocked(count, remaining - 25)
+    await_blocked(pids, remaining - 25)
   end
 
-  defp blocked_backends do
-    %{rows: [[count]]} =
+  defp blocked(pids) do
+    %{rows: rows} =
       Repo.query!(
         """
-        SELECT count(*) FROM pg_stat_activity
+        SELECT pid FROM pg_stat_activity
         WHERE datname = current_database()
           AND wait_event_type = 'Lock'
-          AND pid <> pg_backend_pid()
+          AND pid = ANY($1::int[])
         """,
-        []
+        [pids]
       )
 
-    count
+    Enum.map(rows, &hd/1)
   end
+
+  # Backend pids are small integers, which `inspect/1` renders as a charlist.
+  defp list(pids), do: Enum.map_join(pids, ", ", &to_string/1)
 
   ## Fixtures, committed for real
 
@@ -257,7 +303,19 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
 
   ## Cleanup
 
+  # Bounded rather than open-ended. `purge/0` runs through the application's own
+  # role, which carries no `statement_timeout` of its own, so a row still held
+  # by a task that outlived its test would make cleanup wait for the VM to die
+  # rather than fail.
+  @purge_timeout "10s"
+
   defp purge do
+    {:ok, _deleted} = Repo.transaction(&purge_committed/0)
+    :ok
+  end
+
+  defp purge_committed do
+    Repo.query!("SET LOCAL statement_timeout = '#{@purge_timeout}'")
     Repo.delete_all(from(p in Person, where: like(p.email, ^"%@#{@domain}")))
   end
 
