@@ -8,18 +8,24 @@ defmodule HospitalityComs.PostgresRolesTest do
   therefore runs inside the sandbox transaction, which rolls the roles back to
   their pre-test state even when an assertion fails.
 
-  ## Why the grants migration is rolled back first
+  ## Why the grants migrations are rolled back first
 
-  U4 gave `employer_role` real privileges on the employer zone, and a `GRANT`
-  writes a row in `pg_shdepend`. `DROP ROLE` refuses while any of those rows
-  exists, so from U4 onward the roles migration cannot be rolled back on its
-  own — which is not a defect in it. Ecto rolls migrations back in reverse
-  order, so the real sequence is U4's `down` and then U1's, and that is the
-  sequence asserted here.
+  U4 gave `employer_role` real privileges on the employer zone and U5 gave it
+  more, and a `GRANT` writes a row in `pg_shdepend`. `DROP ROLE` refuses while
+  any of those rows exists, so from U4 onward the roles migration cannot be
+  rolled back on its own — which is not a defect in it. Ecto rolls migrations
+  back in reverse order, so the real sequence is U5's `down`, then U4's, then
+  U1's, and that is the sequence asserted here.
 
-  Rolling U1 back *without* rolling U4 back is not a scenario that has to work.
-  What has to work is that U1's `down` removes the roles once nothing depends
-  on them, and `rolled_back_grants/0` is what puts the database in that state.
+  This list grows with every unit that grants something, and that is the point
+  of asserting it rather than describing it: a unit that adds a grant migration
+  and forgets to add it here finds out from this file rather than from a
+  `dependent_objects_still_exist` in the middle of a production rollback.
+
+  Rolling U1 back *without* rolling the grants back is not a scenario that has
+  to work. What has to work is that U1's `down` removes the roles once nothing
+  depends on them, and `rolled_back_grants/0` is what puts the database in that
+  state.
 
   ## The cluster-wide caveat, made legible
 
@@ -38,11 +44,20 @@ defmodule HospitalityComs.PostgresRolesTest do
 
   alias HospitalityComs.Repo.Migrations.CreatePostgresRoles
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
+  alias HospitalityComs.Repo.Migrations.GrantEngagementZone
 
   @roles_migration "create_postgres_roles"
-  @grants_migration "grant_employer_zone"
+  @employer_grants_migration "grant_employer_zone"
+  @engagement_grants_migration "grant_engagement_zone"
 
-  @migrations [{@roles_migration, CreatePostgresRoles}, {@grants_migration, GrantEmployerZone}]
+  # In the order Ecto applies them, which is the reverse of the order
+  # `rolled_back_grants/0` unwinds them in.
+  @grant_migrations [
+    {@employer_grants_migration, GrantEmployerZone},
+    {@engagement_grants_migration, GrantEngagementZone}
+  ]
+
+  @migrations [{@roles_migration, CreatePostgresRoles} | @grant_migrations]
 
   # Migration files are not compiled into the application, so the modules have
   # to be loaded before the migrator can be handed them directly.
@@ -116,7 +131,10 @@ defmodule HospitalityComs.PostgresRolesTest do
   @migrator_opts [log: false, migration_lock: false]
 
   defp rolled_back_grants do
-    migrate(@grants_migration, :down)
+    @grant_migrations
+    |> Enum.reverse()
+    |> Enum.each(fn {name, _module} -> migrate(name, :down) end)
+
     assert_no_foreign_dependencies()
     :ok
   end
