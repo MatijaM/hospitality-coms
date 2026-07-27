@@ -14,6 +14,30 @@ defmodule HospitalityComs.EmployerRepo.UnscopedError do
   @type t() :: %__MODULE__{message: String.t()}
 end
 
+defmodule HospitalityComs.EmployerRepo.NestedScopeError do
+  @moduledoc """
+  Raised when `HospitalityComs.EmployerRepo.scoped_transaction/2` is entered
+  inside a transaction that already carries a *different* employer's scope.
+
+  There is no savepoint between the two. `DBConnection.transaction/3` on a
+  connection already in a transaction runs the inner function on that same
+  transaction, so the inner `set_config(..., true)` overwrites `app.employer_id`
+  and `app.now` for the whole of it and nothing puts them back when the inner
+  call returns. The outer work would carry on believing it was scoped to the
+  first employer while Postgres answered as the second — a cross-tenant read
+  with no error anywhere.
+
+  Restoring the settings on the way out is not an option either: the inner call
+  may have returned because it raised, in which case the transaction is aborted
+  and the restoring statement fails too, masking the original error with a
+  second one. So the reentry is refused before either scope is written.
+  """
+
+  defexception [:message]
+
+  @type t() :: %__MODULE__{message: String.t()}
+end
+
 defmodule HospitalityComs.EmployerRepo.ZoneViolationError do
   @moduledoc """
   Raised when an employer query names a person-zone table.
@@ -58,6 +82,12 @@ defmodule HospitalityComs.EmployerRepo do
   and reading it again here would let the view and the query it filters
   disagree about which side of a period boundary the request fell on (KTD5).
 
+  Entering the wrapper again inside itself with a *different* employer raises
+  `NestedScopeError`, because there is no savepoint between the two and the
+  inner settings would stay in force after the inner call returned. Entering it
+  again with an identical scope is a no-op that runs the work and writes
+  nothing: the settings it would write are the ones already there.
+
   ## The guards
 
   `default_options/1` refuses any operation issued outside the wrapper. The
@@ -66,10 +96,10 @@ defmodule HospitalityComs.EmployerRepo do
   else's scope. Only `:transaction` is exempt, because the wrapper has to be
   able to open one.
 
-  `prepare_query/3` walks a query's sources — including subqueries, common
-  table expressions, unions, and association joins, whose source the planner
-  has not yet resolved when this runs — and refuses any that reaches a
-  person-zone table.
+  `prepare_query/3` walks a query's sources — including subqueries in every
+  position Ecto parks them, common table expressions, unions, and association
+  joins, whose source the planner has not yet resolved when this runs — and
+  refuses any that reaches a person-zone table.
 
   Neither is the boundary. Both live in the BEAM, and anything in the BEAM can
   be worked around by code that means to. They exist so that the ordinary way
@@ -77,11 +107,36 @@ defmodule HospitalityComs.EmployerRepo do
   a message naming the table, before Postgres answers with a message naming the
   connection's role.
 
+  ## What the guards do not see
+
+  Three holes, pinned by tests in `HospitalityComs.BoundaryTest` rather than
+  only described here, because a documented hole nobody asserts is a hole
+  somebody closes by accident and reopens by accident.
+
   Writes go through `default_options/1` but not through `prepare_query/3`;
   Ecto has no hook on the insert path that sees a table. An
   `EmployerRepo.insert/2` of a person-zone struct inside the wrapper therefore
   reaches Postgres and is refused there. That is the guarantee doing its job,
   with none of the legibility.
+
+  Raw SQL goes through neither. `query/3`, `query!/3`, `query_many/3` and
+  `to_sql/3` are dispatched by Ecto straight to `Ecto.Adapters.SQL` without
+  consulting `default_options/1`, so `EmployerRepo.query!("SELECT 1", [])`
+  outside the wrapper runs. The exemption is load-bearing rather than
+  accidental — `write_settings/1` is itself a raw query, issued before the
+  scope is registered, so a `query/3` that went through the guard could never
+  satisfy it — and closing it would mean closing the door the wrapper comes in
+  through.
+
+  Raw SQL is also how the role assumption is escapable. Connections log in as
+  the application's own role and assume `employer_role` with `SET ROLE`, so a
+  single `RESET ROLE` puts the login role back and with it every privilege the
+  grants were withholding. The grant tier is therefore defeatable from the BEAM
+  exactly as the two guards are; what the whole boundary is strong against is
+  *accident* — a join, a forgotten filter, a context function called from the
+  wrong zone — and not against a caller who means to get out. Closing it needs
+  `EmployerRepo` to log in as a dedicated role of its own, which is an
+  infrastructure decision rather than a code one and is filed separately.
   """
 
   use Ecto.Repo,
@@ -89,6 +144,7 @@ defmodule HospitalityComs.EmployerRepo do
     adapter: Ecto.Adapters.Postgres
 
   alias HospitalityComs.Accounts.EmployerScope
+  alias HospitalityComs.EmployerRepo.NestedScopeError
   alias HospitalityComs.EmployerRepo.UnscopedError
   alias HospitalityComs.EmployerRepo.ZoneViolationError
   alias HospitalityComs.Zones
@@ -107,6 +163,10 @@ defmodule HospitalityComs.EmployerRepo do
   `{:error, reason}` — the `transact/1` contract the rest of the application
   writes transactions against, so that a failure is a value rather than a
   `rollback/1` somebody has to remember.
+
+  Raises `NestedScopeError` when a scope for a different employer is already in
+  force on this process. Nesting an identical scope is allowed and writes
+  nothing.
   """
   @spec scoped_transaction(
           EmployerScope.t(),
@@ -114,7 +174,9 @@ defmodule HospitalityComs.EmployerRepo do
         ) :: {:ok, result} | {:error, reason}
         when result: var, reason: var
   def scoped_transaction(%EmployerScope{} = scope, fun) when is_function(fun, 1) do
-    transact(fn -> run_scoped(scope, fun) end)
+    scope
+    |> reentry(Process.get(@scope_key))
+    |> transact_scoped(scope, fun)
   end
 
   @typedoc "The operations Ecto invokes `c:Ecto.Repo.default_options/1` for."
@@ -155,20 +217,59 @@ defmodule HospitalityComs.EmployerRepo do
 
   ## The wrapper
 
+  # Whether this call is the one that opens the scope, or one inside it.
+  @typep entry() :: :outermost | :reentrant
+
+  # Decided before `transact/1` is called, so that the refusal does not itself
+  # mark somebody else's transaction as failed on the way out.
+  @spec reentry(EmployerScope.t(), EmployerScope.t() | nil) :: entry()
+  defp reentry(_scope, nil), do: :outermost
+  defp reentry(same, same), do: :reentrant
+
+  defp reentry(%EmployerScope{} = scope, %EmployerScope{} = in_force) do
+    raise NestedScopeError,
+      message: """
+      #{inspect(__MODULE__)} was asked to open a scope for employer \
+      #{scope.employer_id} inside one already in force for #{in_force.employer_id}.
+
+      The two would share one Postgres transaction — there is no savepoint \
+      between them — so the inner set_config would overwrite app.employer_id \
+      and app.now for the rest of it and stay there after the inner call \
+      returned. The outer work would read as the inner employer with nothing \
+      raised anywhere.
+
+      One unit of work is one employer. Pass the scope down rather than \
+      opening a second one.
+      """
+  end
+
+  @spec transact_scoped(
+          entry(),
+          EmployerScope.t(),
+          (EmployerScope.t() -> {:ok, result} | {:error, reason})
+        ) :: {:ok, result} | {:error, reason}
+        when result: var, reason: var
+  defp transact_scoped(:outermost, scope, fun), do: transact(fn -> run_scoped(scope, fun) end)
+
+  # The settings this call would write are the ones already written, so it runs
+  # the work and touches neither the connection nor the process dictionary. The
+  # transaction is kept so that the return and rollback shapes do not depend on
+  # how deep the caller happens to be.
+  defp transact_scoped(:reentrant, scope, fun), do: transact(fn -> fun.(scope) end)
+
   @spec run_scoped(
           EmployerScope.t(),
           (EmployerScope.t() -> {:ok, result} | {:error, reason})
         ) :: {:ok, result} | {:error, reason}
         when result: var, reason: var
   defp run_scoped(scope, fun) do
-    outer = Process.get(@scope_key)
     write_settings(scope)
     Process.put(@scope_key, scope)
 
     try do
       fun.(scope)
     after
-      restore_scope(outer)
+      Process.delete(@scope_key)
     end
   end
 
@@ -181,17 +282,6 @@ defmodule HospitalityComs.EmployerRepo do
       [employer_id, DateTime.to_iso8601(now)]
     )
 
-    :ok
-  end
-
-  @spec restore_scope(EmployerScope.t() | nil) :: :ok
-  defp restore_scope(nil) do
-    Process.delete(@scope_key)
-    :ok
-  end
-
-  defp restore_scope(%EmployerScope{} = outer) do
-    Process.put(@scope_key, outer)
     :ok
   end
 

@@ -199,6 +199,78 @@ defmodule HospitalityComs.BoundaryTest do
       assert {:ok, ^scope} = EmployerRepo.scoped_transaction(scope, &{:ok, &1})
     end
 
+    test "refuses to open a second employer's scope inside the first" do
+      # There is no savepoint between the two. Before this refusal existed the
+      # inner `set_config` overwrote `app.employer_id` for the rest of the
+      # shared transaction and nothing put it back, so the outer work carried on
+      # reading as the inner employer.
+      outer = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+      inner = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert_raise EmployerRepo.NestedScopeError, ~r/already in force/, fn ->
+        EmployerRepo.scoped_transaction(outer, fn _scope ->
+          EmployerRepo.scoped_transaction(inner, fn _scope -> {:ok, :leaked} end)
+        end)
+      end
+    end
+
+    test "refuses before the second employer's scope reaches the connection" do
+      # The refusal is only worth anything if it arrives first. This is the
+      # assertion that would have caught the leak: after the nested call, the
+      # connection still answers with the outer employer.
+      outer = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+      inner = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert {:ok, resolved} =
+               EmployerRepo.scoped_transaction(outer, fn _scope ->
+                 assert_raise EmployerRepo.NestedScopeError, fn ->
+                   EmployerRepo.scoped_transaction(inner, fn _scope -> {:ok, :leaked} end)
+                 end
+
+                 {:ok, current_employer_id()}
+               end)
+
+      assert resolved == outer.employer_id
+      refute resolved == inner.employer_id
+    end
+
+    test "allows an identical scope to be entered again, writing nothing" do
+      # The control for the refusal above: it must refuse a *conflict*, not
+      # nesting. An identical scope would write the two settings that are
+      # already there, so there is nothing to leak and nothing to refuse.
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert {:ok, {inner, after_inner}} =
+               EmployerRepo.scoped_transaction(scope, fn _scope ->
+                 {:ok, inner} =
+                   EmployerRepo.scoped_transaction(scope, fn _scope ->
+                     {:ok, current_employer_id()}
+                   end)
+
+                 {:ok, {inner, current_employer_id()}}
+               end)
+
+      assert inner == scope.employer_id
+      assert after_inner == scope.employer_id
+    end
+
+    test "leaves nothing behind for the next caller after the refusal" do
+      # The refusal must not strand the process dictionary in a state where the
+      # unscoped guard waves the next operation through.
+      outer = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+      inner = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert_raise EmployerRepo.NestedScopeError, fn ->
+        EmployerRepo.scoped_transaction(outer, fn _scope ->
+          EmployerRepo.scoped_transaction(inner, fn _scope -> {:ok, :leaked} end)
+        end)
+      end
+
+      assert_raise EmployerRepo.UnscopedError, fn ->
+        EmployerRepo.all(from(c in "pg_class", select: c.relname, limit: 1))
+      end
+    end
+
     test "lets a query the employer is entitled to run through" do
       # The control for everything below: a backstop that refused everything
       # would pass every refusal test in this file and ship a repo nobody can
@@ -407,6 +479,13 @@ defmodule HospitalityComs.BoundaryTest do
   end
 
   ## Helpers
+
+  # The employer the *connection* is scoped to, as the view will read it, which
+  # is the only side of the wrapper that can leak.
+  defp current_employer_id do
+    %{rows: [[id]]} = EmployerRepo.query!("SELECT app_current_employer_id()::text", [])
+    id
+  end
 
   # Runs a query the way the application will: inside the wrapper, so that what
   # refuses it is the zone rule and not the absence of a scope.
