@@ -27,6 +27,22 @@ defmodule HospitalityComs.Venues.Venue do
   one is a dependency this POC does not otherwise need, and Postgres is already
   in the transaction.
 
+  ### What that check does not exclude
+
+  `pg_timezone_names` is not a list of IANA zones. It also carries the legacy
+  aliases the tz database ships — `GB-Eire`, `EST5EDT`, `Navajo`, and
+  `Factory`, which is a placeholder whose local time is deliberately undefined.
+  A venue can therefore be created with a name Postgres knows and a wall clock
+  nobody should reason about, and end-of-day for it is whatever `AT TIME ZONE`
+  happens to return.
+
+  Recorded rather than fixed. Narrowing the list is not obviously right: the
+  aliases include names people really type (`US/Pacific`), and a
+  hand-maintained allow-list drifts from the database's own copy of IANA, which
+  is the drift this validation exists to avoid. The check is worth having as a
+  typo catcher; it is not a statement that the zone is one anybody should run a
+  venue in. U6 is where end-of-day starts to matter.
+
   ## No person, no employer key
 
   There is no `created_by`, no `owner_id`, and no other column naming a human.

@@ -119,6 +119,20 @@ defmodule HospitalityComs.Venues do
   two steps fail for unrelated reasons — a rejected timezone is the caller's
   problem and a rejected grant is this module's — and collapsing them would
   lose which.
+
+  The trailing map is `Ecto.Multi`'s changes-so-far. On a `:venue` failure it
+  is empty; on a `:grant` failure it would carry `%{venue: %Venue{}}` — a
+  struct for a row the same transaction rolled back, which is misleading to
+  anybody who reads it as persisted.
+
+  It is left that way on purpose, because the `:grant` branch is unreachable.
+  The grant step's only changeset-level failures are a foreign key to the venue
+  inserted immediately above it, a unique violation on a freshly generated
+  UUID, and check constraints on columns a founding grant does not set. Nothing
+  that can be passed to `create_venue/2` gets there, so stripping the map would
+  be a behaviour change no test could have watched fail first. If a later unit
+  gives the grant step a reachable failure, strip it then — with a test in
+  front of the change.
   """
   @type creation_failure() ::
           {:error, :venue, Ecto.Changeset.t(Venue.t()), map()}
