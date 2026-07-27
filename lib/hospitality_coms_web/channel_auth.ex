@@ -113,6 +113,30 @@ defmodule HospitalityComsWeb.ChannelAuth do
     do: token |> Accounts.session_token_digest() |> PersonAuth.session_topic()
 
   @doc """
+  The entity id a channel topic's suffix names, if it is one.
+
+  A topic arrives from the client, so its suffix is user input in a place that
+  does not look like one — `"venue_room:" <> venue_id` reads like a route
+  parameter and is not validated like one. Handed to a context it reaches Ecto's
+  query builder uncast and raises `Ecto.Query.CastError`, which the transport
+  reports as a crash rather than a refusal. That is worse than untidy: a caller
+  can then tell a *malformed* id from an unknown one by which answer they get,
+  which is the not-found-rather-than-forbidden rule (AE1) lost at the one place
+  the id comes from outside.
+
+  The shape is `HospitalityComs.Accounts.EmployerScope`'s `uuid!/1`, and taking
+  `byte_size(id) == 36` first is the load-bearing half rather than a cheap
+  pre-filter: `Ecto.UUID.cast/1` on its own also accepts sixteen raw bytes and
+  encodes them, so any sixteen-character string would come back a valid-looking
+  id. That module raises, because a scope built from nonsense fails three layers
+  away inside Postgres; this one returns, because a channel's answer to nonsense
+  is the same refusal it gives an id that names nothing.
+  """
+  @spec topic_id(String.t()) :: {:ok, Ecto.UUID.t()} | :error
+  def topic_id(id) when byte_size(id) == 36, do: Ecto.UUID.cast(id)
+  def topic_id(_id), do: :error
+
+  @doc """
   A person scope for this socket, at a freshly read instant.
 
   Called at the top of every `join/3` and every `handle_in/3` on a person

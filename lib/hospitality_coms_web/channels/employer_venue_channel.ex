@@ -51,7 +51,19 @@ defmodule HospitalityComsWeb.EmployerVenueChannel do
   @impl true
   @spec join(String.t(), map(), Socket.t()) ::
           {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
-  def join("employer_venue:" <> venue_id, _payload, socket) do
+  def join("employer_venue:" <> suffix, _payload, socket) do
+    suffix |> ChannelAuth.topic_id() |> resolve(socket)
+  end
+
+  # A suffix that is not a uuid answers exactly what an unknown venue answers.
+  # It used to crash two ways: the id reached Ecto's query builder and raised
+  # `Ecto.Query.CastError`, and `EmployerScope.for_grant/3` raises
+  # `ArgumentError` on anything that is not a canonical uuid.
+  @spec resolve({:ok, Ecto.UUID.t()} | :error, Socket.t()) ::
+          {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
+  defp resolve(:error, _socket), do: {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
+
+  defp resolve({:ok, venue_id}, socket) do
     socket
     |> ChannelAuth.employer_scope(venue_id)
     |> admit(socket)

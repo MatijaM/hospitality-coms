@@ -105,6 +105,36 @@ defmodule HospitalityComsWeb.VenueRoomChannelTest do
       assert refusal.error == @refused
     end
 
+    test "gives a topic suffix that is not a uuid the identical refusal" do
+      # The caller supplies the id, so a malformed one and an unknown one have
+      # to answer the same (AE1). Before this, a malformed one reached Ecto's
+      # query builder and raised `Ecto.Query.CastError` — which the transport
+      # reports as a crash, not a refusal, and which tells the caller their
+      # input was *shaped* differently from a real venue id.
+      %{socket: socket} = engaged()
+
+      for suffix <- ["", "nope", "not-a-uuid", String.duplicate("x", 36)] do
+        assert {:error, refusal} = join(socket, "venue_room:" <> suffix, %{})
+        assert refusal.error == @refused
+      end
+    end
+
+    test "does not accept sixteen raw bytes as a venue id" do
+      # `Ecto.UUID.cast/1` on its own encodes sixteen raw bytes into a
+      # valid-looking uuid, which would turn an arbitrary sixteen-character
+      # string into a venue reference. `HospitalityComs.Accounts.EmployerScope`
+      # already gets this right by taking `byte_size(id) == 36` first; the
+      # transport reuses that shape rather than inventing a second one.
+      %{venue: venue, socket: socket} = engaged()
+      raw = Ecto.UUID.dump!(venue.id)
+
+      assert byte_size(raw) == 16
+      assert {:ok, venue.id} == Ecto.UUID.cast(raw)
+
+      assert {:error, refusal} = join(socket, "venue_room:" <> raw, %{})
+      assert refusal.error == @refused
+    end
+
     test "is refused while the person has suspended the room" do
       # KTD18 reaching the transport. Suspension closes the suspended person's
       # own access and nothing else.

@@ -65,7 +65,18 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
   @impl true
   @spec join(String.t(), map(), Socket.t()) ::
           {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
-  def join("shift_room:" <> shift_room_id, _payload, socket) do
+  def join("shift_room:" <> suffix, _payload, socket) do
+    suffix |> ChannelAuth.topic_id() |> resolve(socket)
+  end
+
+  # A suffix that is not a uuid answers exactly what an unknown room answers.
+  # See `HospitalityComsWeb.VenueRoomChannel`; it used to raise
+  # `Ecto.Query.CastError` out of `join/3`.
+  @spec resolve({:ok, Ecto.UUID.t()} | :error, Socket.t()) ::
+          {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
+  defp resolve(:error, _socket), do: {:error, ErrorEnvelope.new(:unauthorized, @unreadable)}
+
+  defp resolve({:ok, shift_room_id}, socket) do
     scope = ChannelAuth.person_scope(socket)
 
     scope

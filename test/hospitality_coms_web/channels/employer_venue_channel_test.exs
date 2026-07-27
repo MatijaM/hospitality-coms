@@ -137,6 +137,19 @@ defmodule HospitalityComsWeb.EmployerVenueChannelTest do
                subscribe_and_join(employer_socket(stranger), topic(elsewhere), %{})
     end
 
+    test "gives a topic suffix that is not a uuid the identical refusal" do
+      # Two ways this crashed rather than refusing: the id reached Ecto's query
+      # builder and raised `Ecto.Query.CastError`, and
+      # `EmployerScope.for_grant/3` raises `ArgumentError` on anything that is
+      # not a canonical uuid. Both are now the venue-does-not-exist answer.
+      %{socket: socket} = manager()
+
+      for suffix <- ["", "nope", "not-a-uuid", String.duplicate("x", 36)] do
+        assert {:error, refusal} = join(socket, "employer_venue:" <> suffix, %{})
+        assert refusal.error == @refused
+      end
+    end
+
     test "answers an event it does not handle rather than crashing on it" do
       # This channel exports no `handle_in/3` for U9 to grow, so without a
       # terminal clause every event a client invents is an

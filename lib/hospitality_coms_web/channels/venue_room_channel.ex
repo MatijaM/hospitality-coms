@@ -79,7 +79,20 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
   @impl true
   @spec join(String.t(), map(), Socket.t()) ::
           {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
-  def join("venue_room:" <> venue_id, _payload, socket) do
+  def join("venue_room:" <> suffix, _payload, socket) do
+    suffix |> ChannelAuth.topic_id() |> resolve(socket)
+  end
+
+  # A suffix that is not a uuid answers exactly what an unknown venue answers.
+  # Telling them apart would say that the caller's input was *shaped* wrong,
+  # which is one bit more than AE1 permits about an id the caller supplied — and
+  # before this it did not even do that: it raised `Ecto.Query.CastError` out of
+  # `join/3` and the transport reported a crash.
+  @spec resolve({:ok, Ecto.UUID.t()} | :error, Socket.t()) ::
+          {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
+  defp resolve(:error, _socket), do: {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
+
+  defp resolve({:ok, venue_id}, socket) do
     scope = ChannelAuth.person_scope(socket)
 
     scope

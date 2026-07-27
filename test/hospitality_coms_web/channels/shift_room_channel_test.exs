@@ -71,6 +71,17 @@ defmodule HospitalityComsWeb.ShiftRoomChannelTest do
       assert refusal.error == @unreadable
     end
 
+    test "gives a topic suffix that is not a uuid the identical refusal" do
+      # A malformed id and an unknown one answer the same, so the refusal still
+      # enumerates nothing (AE1). It used to raise `Ecto.Query.CastError`.
+      %{socket: socket} = rostered()
+
+      for suffix <- ["", "nope", "not-a-uuid", String.duplicate("x", 36)] do
+        assert {:error, refusal} = join(socket, "shift_room:" <> suffix, %{})
+        assert refusal.error == @unreadable
+      end
+    end
+
     test "still succeeds after the person is taken off the roster" do
       # KTD6b as a transport behaviour. Removal closes a period; the part that
       # already overlapped the room's window is untouchable, so readability
