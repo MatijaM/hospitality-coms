@@ -95,7 +95,11 @@ Every employer-zone table other than `venues` carries `venue_id` and a unique in
 
 `EmployerScope` also gained `grant_id`. `for_employer/2` builds a scope with tenancy and no authority — enough for `EmployerRepo` and for U9's per-employer view — and `for_grant/3` builds one with both. Every `Venues` function *other than* `create_venue/2` heads on `grant_id` being a binary, so a grantless scope is refused by function clause, and the grant is then resolved against the database on every call: live at the scope's instant, and belonging to the scope's venue. Nothing caches it. `create_venue/2` is the exception, and heads on a `PersonScope`: the grant it acts under does not exist until it writes it.
 
-`Venues.revoke_grant/2` refuses the venue's last live grant (KTD17, R22) and takes the venue's live grants under `FOR UPDATE`, ordered by id, before counting. `venues_concurrency_test.exs` is not sandboxed and proves the lock matters: without it, two concurrent revocations of two grants both succeed and orphan the venue.
+`Venues.revoke_grant/2` refuses the venue's last live grant (KTD17, R22) and takes the venue's live grants under `FOR UPDATE`, ordered by `(granted_at, id)`, before counting — the acting grant is resolved out of that locked set rather than by a separate read in front of it. `venues_concurrency_test.exs` is not sandboxed and proves the lock matters: without it, two concurrent revocations of two grants both succeed and orphan the venue.
+
+A survivor only counts if it carries no revocation at all, not merely if it is live at this instant: a grant revoked at 13:00 is live at 12:00, and counting it at 12:00 orphans the venue from 13:00. A grant that already carries a revocation is `{:error, :not_found}` whichever instant asks.
+
+What a grant may revoke is itself and its transitive descendants through `granted_by_grant_id`, walked with a recursive CTE so that a descendant hanging off an already-revoked link is still reachable. Everything else — an ancestor, a peer, another venue's grant, an id that names nothing — is `{:error, :not_found}`, so the refusal enumerates nothing. Revocation is **not** transitive in the other direction: closing a grant leaves the grants it issued live.
 
 ## Authentication
 

@@ -1,6 +1,6 @@
 defmodule HospitalityComs.VenuesConcurrencyTest do
   @moduledoc """
-  Two managers revoking two grants at the same moment, which is the one way an
+  Two managers each standing down at the same moment, which is the one way an
   invariant enforced by "count, then decide, then write" produces a venue
   nobody can administer.
 
@@ -11,6 +11,17 @@ defmodule HospitalityComs.VenuesConcurrencyTest do
   live grants under `FOR UPDATE` before counting so that the count and the
   write are one decision; this file is what says that lock is load-bearing
   rather than decorative.
+
+  ## Why each session revokes its own grant
+
+  Because that is the shape that makes the loser's refusal the same whichever
+  order Postgres picks. The acting grant is resolved from the locked set, so a
+  session whose *own* grant a rival revoked first is refused `:no_grant` rather
+  than `:last_grant_holder` — correctly, since its authority did not survive
+  the wait. Two sessions each closing their own grant can never take each
+  other's authority away, so the loser is always the one left holding the
+  venue's last live grant, and the assertion can name the error rather than
+  accepting either.
 
   ## Why this file does not use the sandbox
 
@@ -59,26 +70,26 @@ defmodule HospitalityComs.VenuesConcurrencyTest do
 
   describe "two concurrent revocations of a venue's only two grants" do
     test "leave the venue with exactly one live grant" do
-      {scope, first, second} = venue_with_two_grants()
+      {venue_id, sessions} = venue_with_two_grants()
 
-      results = race([first, second], scope)
+      results = race(sessions, venue_id)
 
       assert Enum.count(results, &match?({:ok, %EmployerGrant{}}, &1)) == 1
       assert Enum.count(results, &(&1 == {:error, :last_grant_holder})) == 1
 
-      assert length(live_grants(scope.venue_id)) == 1
+      assert length(live_grants(venue_id)) == 1
     end
 
     test "leave a venue that is still administrable" do
       # The invariant stated as the thing it protects rather than as an error
       # tuple: whatever the interleaving, the surviving grant still authorises
       # a session.
-      {scope, first, second} = venue_with_two_grants()
+      {venue_id, sessions} = venue_with_two_grants()
 
-      race([first, second], scope)
+      race(sessions, venue_id)
 
-      [survivor] = live_grants(scope.venue_id)
-      surviving_scope = EmployerScope.for_grant(scope.venue_id, survivor.id, @now)
+      [survivor] = live_grants(venue_id)
+      surviving_scope = EmployerScope.for_grant(venue_id, survivor.id, @now)
 
       assert {:ok, %Venue{}} = Venues.fetch_venue(surviving_scope)
     end
@@ -89,14 +100,14 @@ defmodule HospitalityComs.VenuesConcurrencyTest do
       # at all. `race/2` flunks if it cannot see both backends parked on the
       # lock, so this asserts that the barrier machinery is doing its job on
       # this database rather than silently degrading to a sequential run.
-      {scope, first, second} = venue_with_two_grants()
-      holder = hold_grants(scope.venue_id)
+      {venue_id, sessions} = venue_with_two_grants()
+      holder = hold_grants(venue_id)
 
-      tasks = Enum.map([first, second], &revoker(&1, scope))
+      tasks = Enum.map(sessions, &revoker/1)
       await_blocked(2)
 
       # Both are inside `revoke_grant/2` and neither has written anything.
-      assert length(live_grants(scope.venue_id)) == 2
+      assert length(live_grants(venue_id)) == 2
 
       release(holder)
       results = Task.await_many(tasks, @barrier_timeout)
@@ -107,17 +118,18 @@ defmodule HospitalityComs.VenuesConcurrencyTest do
 
   ## Racing
 
-  defp race(grant_ids, scope) do
-    holder = hold_grants(scope.venue_id)
-    tasks = Enum.map(grant_ids, &revoker(&1, scope))
+  defp race(sessions, venue_id) do
+    holder = hold_grants(venue_id)
+    tasks = Enum.map(sessions, &revoker/1)
 
-    await_blocked(length(grant_ids))
+    await_blocked(length(sessions))
     release(holder)
 
     Task.await_many(tasks, @barrier_timeout)
   end
 
-  defp revoker(grant_id, scope) do
+  # One session standing down: the scope acts under the very grant it closes.
+  defp revoker({scope, grant_id}) do
     detached(fn -> Venues.revoke_grant(scope, grant_id) end)
   end
 
@@ -210,10 +222,11 @@ defmodule HospitalityComs.VenuesConcurrencyTest do
     {:ok, %{venue: venue, grant: founding}} =
       Venues.create_venue(PersonScope.for_person(person, @now), attrs)
 
-    scope = EmployerScope.for_grant(venue.id, founding.id, @now)
-    {:ok, second} = Venues.issue_grant(scope)
+    founding_scope = EmployerScope.for_grant(venue.id, founding.id, @now)
+    {:ok, second} = Venues.issue_grant(founding_scope)
+    second_scope = EmployerScope.for_grant(venue.id, second.id, @now)
 
-    {scope, founding.id, second.id}
+    {venue.id, [{founding_scope, founding.id}, {second_scope, second.id}]}
   end
 
   # Read outside the context, because either grant may be the one the race

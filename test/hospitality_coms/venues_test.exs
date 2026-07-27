@@ -62,8 +62,10 @@ defmodule HospitalityComs.VenuesTest do
   alias HospitalityComs.Venues.ShiftType
   alias HospitalityComs.Venues.Venue
 
+  @earlier ~U[2026-03-01 11:00:00.000000Z]
   @now ~U[2026-03-01 12:00:00.000000Z]
   @later ~U[2026-03-01 13:00:00.000000Z]
+  @even_later ~U[2026-03-01 14:00:00.000000Z]
 
   setup do
     sandbox_owners(true)
@@ -265,6 +267,127 @@ defmodule HospitalityComs.VenuesTest do
       assert employer_count(EmployerGrant) == 2
       assert Venues.revoke_grant(later, founding.id) == {:error, :last_grant_holder}
     end
+
+    test "counts no survivor that already carries a revocation of its own" do
+      # Two units of work whose instants fall either side of a second
+      # boundary, which is all it takes: at 12:00 the second grant is still
+      # live because its revocation is at 13:00, so a survivor count that only
+      # asks "live now" says one and lets the founding grant go — leaving the
+      # venue with nobody administering it from 13:00 onwards, and every
+      # individual decision correct.
+      {scope, %{venue: venue, grant: founding}} = scoped_venue_fixture(%{}, @now)
+      {:ok, second} = Venues.issue_grant(scope)
+
+      later = EmployerScope.for_grant(scope.venue_id, founding.id, @later)
+      {:ok, _revoked} = Venues.revoke_grant(later, second.id)
+
+      assert Venues.revoke_grant(scope, founding.id) == {:error, :last_grant_holder}
+      assert live_grant_ids(venue.id) == [founding.id]
+    end
+  end
+
+  describe "what a grant may revoke" do
+    # The lineage the schema pays a composite foreign key to record, used for
+    # the one thing it can be used for. Without this the key was provenance
+    # nothing consulted, and any grant could close any other — including the
+    # one that appointed it.
+
+    test "includes its own row, so a holder can stand down" do
+      # The control. A revocable set that excluded the acting grant would make
+      # every test below pass and resignation impossible.
+      {scope, _creation} = scoped_venue_fixture(%{}, @now)
+      {:ok, child} = Venues.issue_grant(scope)
+      child_scope = EmployerScope.for_grant(scope.venue_id, child.id, @now)
+
+      assert {:ok, %EmployerGrant{id: id}} = Venues.revoke_grant(child_scope, child.id)
+      assert id == child.id
+    end
+
+    test "includes a grant it issued" do
+      {scope, _creation} = scoped_venue_fixture(%{}, @now)
+      {:ok, child} = Venues.issue_grant(scope)
+
+      assert {:ok, %EmployerGrant{id: id}} = Venues.revoke_grant(scope, child.id)
+      assert id == child.id
+    end
+
+    test "includes a grant its own descendant issued" do
+      {scope, _creation} = scoped_venue_fixture(%{}, @now)
+      {:ok, middle} = Venues.issue_grant(scope)
+      middle_scope = EmployerScope.for_grant(scope.venue_id, middle.id, @now)
+      {:ok, leaf} = Venues.issue_grant(middle_scope)
+
+      assert {:ok, %EmployerGrant{id: id}} = Venues.revoke_grant(scope, leaf.id)
+      assert id == leaf.id
+    end
+
+    test "excludes the grant that issued it" do
+      # A subordinate closing the authority that appointed them is the one
+      # thing recording lineage and ignoring it made possible.
+      {scope, %{grant: founding}} = scoped_venue_fixture(%{}, @now)
+      {:ok, child} = Venues.issue_grant(scope)
+      child_scope = EmployerScope.for_grant(scope.venue_id, child.id, @now)
+
+      assert Venues.revoke_grant(child_scope, founding.id) == {:error, :not_found}
+    end
+
+    test "excludes a peer issued alongside it" do
+      {scope, _creation} = scoped_venue_fixture(%{}, @now)
+      {:ok, first} = Venues.issue_grant(scope)
+      {:ok, second} = Venues.issue_grant(scope)
+      first_scope = EmployerScope.for_grant(scope.venue_id, first.id, @now)
+
+      assert Venues.revoke_grant(first_scope, second.id) == {:error, :not_found}
+    end
+
+    test "reports a grant outside the set as not found, disclosing nothing" do
+      # `:not_found` rather than an authorisation error, and the same answer a
+      # grant belonging to another venue gets — so a caller cannot use the
+      # refusal to learn which grants exist.
+      {scope, _creation} = scoped_venue_fixture(%{}, @now)
+      {_other_scope, %{grant: stranger}} = scoped_venue_fixture(%{}, @now)
+      {:ok, child} = Venues.issue_grant(scope)
+      child_scope = EmployerScope.for_grant(scope.venue_id, child.id, @now)
+
+      assert Venues.revoke_grant(child_scope, stranger.id) == {:error, :not_found}
+      assert Venues.revoke_grant(child_scope, Ecto.UUID.generate()) == {:error, :not_found}
+    end
+  end
+
+  describe "revocation is not transitive" do
+    test "leaves the grants a revoked grant issued live" do
+      # Authority at a venue is not a delegation that evaporates when its
+      # issuer leaves: the people a departing manager engaged are still
+      # engaged. The alternative is one call closing an unbounded number of
+      # authorities, which is the shape of an accident.
+      {scope, %{grant: founding}} = scoped_venue_fixture(%{}, @now)
+      {:ok, middle} = Venues.issue_grant(scope)
+      middle_scope = EmployerScope.for_grant(scope.venue_id, middle.id, @now)
+      {:ok, leaf} = Venues.issue_grant(middle_scope)
+
+      {:ok, _revoked} = Venues.revoke_grant(scope, middle.id)
+
+      later = EmployerScope.for_grant(scope.venue_id, founding.id, @later)
+      assert {:ok, grants} = Venues.list_grants(later)
+      assert Enum.map(grants, & &1.id) == [founding.id, leaf.id]
+    end
+
+    test "leaves an ancestor's reach over the orphaned descendant intact" do
+      # Which is what makes non-transitivity survivable rather than a way to
+      # strand a live grant nobody can close. The revoked link is still a row,
+      # so the walk through it still resolves.
+      {scope, %{grant: founding}} = scoped_venue_fixture(%{}, @now)
+      {:ok, middle} = Venues.issue_grant(scope)
+      middle_scope = EmployerScope.for_grant(scope.venue_id, middle.id, @now)
+      {:ok, leaf} = Venues.issue_grant(middle_scope)
+
+      {:ok, _revoked} = Venues.revoke_grant(scope, middle.id)
+
+      later = EmployerScope.for_grant(scope.venue_id, founding.id, @later)
+
+      assert {:ok, %EmployerGrant{id: id}} = Venues.revoke_grant(later, leaf.id)
+      assert id == leaf.id
+    end
   end
 
   describe "revoke_grant/2" do
@@ -283,6 +406,23 @@ defmodule HospitalityComs.VenuesTest do
       later = EmployerScope.for_grant(scope.venue_id, scope.grant_id, @later)
 
       assert Venues.revoke_grant(later, second.id) == {:error, :not_found}
+
+      assert DateTime.compare(reload_grant(later, second.id).revoked_at, revoked.revoked_at) ==
+               :eq
+    end
+
+    test "reports one revoked at a later instant as not found, rather than moving it back" do
+      # The other direction of the same rule, and the one an instant-ordered
+      # check does not get for free: at 12:00 a grant revoked at 13:00 is
+      # still live, so it matches the live set and a second revocation would
+      # stamp `revoked_at` an hour earlier than the first one did.
+      {scope, _creation} = scoped_venue_fixture(%{}, @now)
+      {:ok, second} = Venues.issue_grant(scope)
+
+      later = EmployerScope.for_grant(scope.venue_id, scope.grant_id, @later)
+      {:ok, revoked} = Venues.revoke_grant(later, second.id)
+
+      assert Venues.revoke_grant(scope, second.id) == {:error, :not_found}
 
       assert DateTime.compare(reload_grant(later, second.id).revoked_at, revoked.revoked_at) ==
                :eq
@@ -374,6 +514,28 @@ defmodule HospitalityComs.VenuesTest do
       forged = EmployerScope.for_grant(venue.id, other_grant.id, @now)
 
       assert Venues.issue_grant(forged) == {:error, :no_grant}
+    end
+  end
+
+  describe "list_grants/1" do
+    test "returns live grants oldest first rather than in primary key order" do
+      # "oldest first" was a docstring the query did not implement: it ordered
+      # by `id`, which is random on a `binary_id` schema. Every other
+      # assertion in this file matches a single-element list, which any order
+      # satisfies — so this is the first one that can tell the two apart.
+      #
+      # The planted ids are chosen so that id order and instant order
+      # disagree: the newest grant sorts first by id and the oldest sorts
+      # last.
+      {scope, %{grant: founding}} = scoped_venue_fixture(%{}, @now)
+
+      newest = planted_grant(scope, "00000000-0000-4000-8000-000000000000", @later)
+      oldest = planted_grant(scope, "ffffffff-ffff-4fff-bfff-ffffffffffff", @earlier)
+
+      reading = EmployerScope.for_grant(scope.venue_id, founding.id, @even_later)
+
+      assert {:ok, grants} = Venues.list_grants(reading)
+      assert Enum.map(grants, & &1.id) == [oldest.id, founding.id, newest.id]
     end
   end
 
@@ -617,7 +779,7 @@ defmodule HospitalityComs.VenuesTest do
   # filter is not what is being asserted. The scope carries no grant: reading
   # the employer zone needs tenancy, and authority is the context's business.
   defp live_grant_ids(venue_id) do
-    employer_read(venue_id, fn ->
+    employer_work(venue_id, fn ->
       EmployerRepo.all(
         from grant in EmployerGrant,
           where: grant.venue_id == ^venue_id and is_nil(grant.revoked_at),
@@ -628,17 +790,30 @@ defmodule HospitalityComs.VenuesTest do
   end
 
   defp employer_count(schema) do
-    employer_read(Ecto.UUID.generate(), fn -> EmployerRepo.aggregate(schema, :count) end)
+    employer_work(Ecto.UUID.generate(), fn -> EmployerRepo.aggregate(schema, :count) end)
   end
 
   defp reload_grant(scope, id) do
-    employer_read(scope.venue_id, fn -> EmployerRepo.get!(EmployerGrant, id) end)
+    employer_work(scope.venue_id, fn -> EmployerRepo.get!(EmployerGrant, id) end)
   end
 
-  defp employer_read(venue_id, fun) do
+  defp employer_work(venue_id, fun) do
     scope = EmployerScope.for_employer(venue_id, @now)
     {:ok, result} = EmployerRepo.scoped_transaction(scope, fn _scope -> {:ok, fun.()} end)
     result
+  end
+
+  # A grant with a chosen id and a chosen instant, written through the employer
+  # repo so the context can see it. Ordering by id and ordering by instant are
+  # indistinguishable until the two disagree, and on a `binary_id` schema only
+  # a chosen id can make them disagree.
+  defp planted_grant(scope, id, granted_at) do
+    employer_work(scope.venue_id, fn ->
+      scope.venue_id
+      |> EmployerGrant.issued_changeset(scope.grant_id, granted_at)
+      |> Ecto.Changeset.put_change(:id, id)
+      |> EmployerRepo.insert!()
+    end)
   end
 
   defp a_second_before(instant), do: DateTime.add(instant, -1, :second)

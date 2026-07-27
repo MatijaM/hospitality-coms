@@ -65,9 +65,27 @@ defmodule HospitalityComs.Venues do
   where the exemption can be stated once.
 
   The check is taken under `FOR UPDATE` on the venue's live grants, ordered by
-  id. Two managers each revoking a different one of two grants would otherwise
-  both read two, both decide they are not the last, and both commit — leaving
-  the venue orphaned with every individual decision correct.
+  `(granted_at, id)`. Two managers each revoking a different one of two grants
+  would otherwise both read two, both decide they are not the last, and both
+  commit — leaving the venue orphaned with every individual decision correct.
+
+  It counts survivors that carry no revocation rather than survivors that are
+  live at this instant, because those are different sets: a grant revoked at
+  13:00 is live at 12:00, and a unit of work running at 12:00 that counted it
+  would leave the venue unadministrable from 13:00.
+
+  The invariant counts grant *rows*, not holders anybody can name — an honest
+  limitation between units, since who holds a grant is recorded on U5's
+  `engagements.grant_id` and that is what will make "holder" mean anything.
+
+  ## And so does the one thing lineage is for
+
+  `revoke_grant/2` restricts what a grant may close to itself and its
+  transitive descendants. Recording lineage in a composite foreign key and then
+  letting any grant close any other would make the key decoration and let a
+  subordinate close the authority that appointed them. Revocation is not
+  transitive in the other direction: closing a grant leaves the grants it
+  issued live. See `revoke_grant/2`.
   """
 
   import Ecto.Query
@@ -198,6 +216,11 @@ defmodule HospitalityComs.Venues do
 
   @doc """
   The venue's grants that are live at the scope's instant, oldest first.
+
+  Oldest by `granted_at`, with `id` breaking ties. Ordering by `id` alone is
+  random on a `binary_id` schema, so "oldest first" would be a sentence the
+  query did not implement — and `(granted_at, id)` is still a total order, so
+  the `FOR UPDATE` in `revoke_grant/2` keeps acquiring locks deterministically.
   """
   @spec list_grants(EmployerScope.t()) ::
           {:ok, [EmployerGrant.t()]} | {:error, :no_grant}
@@ -236,12 +259,53 @@ defmodule HospitalityComs.Venues do
   end
 
   @doc """
-  Revokes a grant, unless it is the venue's last live one.
+  Revokes a grant, unless it is outside the acting grant's reach or the venue's
+  last live one.
 
-  Refusing the last one is the invariant KTD17 puts in the context rather than
-  only in the demo control: a venue nobody can administer is not a state any
-  code path may reach. It binds voluntary removal; erasure is exempt and lives
-  in U10.
+  ## What a grant may revoke
+
+  Its own row, and every grant descended from it through `granted_by_grant_id`
+  — transitively, and through links that have themselves been revoked, because
+  a revoked row is still the record of who issued whom. Anything else comes
+  back `{:error, :not_found}`: the grant that issued the acting one, a peer
+  issued alongside it, a grant belonging to another venue, and an id that names
+  nothing all get the same answer, so the refusal discloses nothing about which
+  grants exist.
+
+  That is the lineage the schema pays a composite foreign key to record, spent
+  on the one thing it can be spent on. The alternative — any grant may close
+  any other — makes the key pure provenance and lets a subordinate close the
+  authority that appointed them.
+
+  ## Revocation is not transitive
+
+  Closing a grant leaves every grant it issued live. Authority at a venue is
+  not a delegation that evaporates when its issuer leaves: the people a
+  departing manager engaged are still engaged, and one call that closes an
+  unbounded number of authorities is the shape of an accident rather than of an
+  administrative act. The lineage foreign key is `ON DELETE RESTRICT`, so
+  lineage is a hard dependency for *deletion* and pure provenance for
+  revocation.
+
+  An orphaned descendant is still reachable: the revoked link is a row, so the
+  walk through it still resolves and an ancestor keeps its reach.
+
+  ## What it refuses
+
+  Refusing the venue's last live grant is the invariant KTD17 puts in the
+  context rather than only in the demo control: a venue nobody can administer
+  is not a state any code path may reach. It binds voluntary removal; erasure
+  is exempt and lives in U10.
+
+  A survivor only counts if it carries no revocation at all. One that is live
+  at *this* instant but already stamped with a later `revoked_at` stops being
+  live the moment that instant passes, so counting it leaves the venue
+  unadministrable from then on — reachable whenever two units of work run with
+  instants either side of a second boundary, which is as fine as the columns
+  are.
+
+  A grant that already carries a revocation is `{:error, :not_found}` whichever
+  instant asks, rather than a second write moving `revoked_at` backwards.
 
   Revocation writes `revoked_at` and derives nothing — the grant stops being
   live because the instant has passed its upper bound, not because a flag was
@@ -259,6 +323,11 @@ defmodule HospitalityComs.Venues do
     EmployerRepo.scoped_transaction(scope, &close_grant(&1, grant_id))
   end
 
+  # Everything here is decided from the locked set, the acting grant included.
+  # Resolving the authority through a separate unlocked read — which is what
+  # this used to do — meant the grant a revocation was authorised by was not
+  # the grant the `FOR UPDATE` was holding, so a concurrent revocation of the
+  # acting grant could land between the two.
   @spec close_grant(EmployerScope.t(), Ecto.UUID.t()) ::
           {:ok, EmployerGrant.t()}
           | {:error,
@@ -267,20 +336,21 @@ defmodule HospitalityComs.Venues do
              | :last_grant_holder
              | Ecto.Changeset.t(EmployerGrant.t())}
   defp close_grant(scope, grant_id) do
-    with {:ok, _authority} <- authorize(scope) do
-      scope
-      |> locked_live_grants()
+    live = locked_live_grants(scope)
+
+    with {:ok, _authority} <- acting_grant(scope, live) do
+      live
       |> Enum.split_with(&(&1.id == grant_id))
-      |> revoke(scope.now)
+      |> close(scope, grant_id)
     end
   end
 
-  # `FOR UPDATE` on every live grant of the venue, in id order. The count and
+  # `FOR UPDATE` on every live grant of the venue, oldest first. The count and
   # the write have to be one atomic decision: two managers revoking two
   # different grants of two would each read two, each conclude they are not
-  # removing the last, and together leave the venue unadministrable. Ordering
-  # makes the lock acquisition deterministic, so the two block rather than
-  # deadlock.
+  # removing the last, and together leave the venue unadministrable. A total
+  # order — `(granted_at, id)` — makes the lock acquisition deterministic, so
+  # the two block rather than deadlock.
   @spec locked_live_grants(EmployerScope.t()) :: [EmployerGrant.t()]
   defp locked_live_grants(scope) do
     scope
@@ -289,15 +359,71 @@ defmodule HospitalityComs.Venues do
     |> EmployerRepo.all()
   end
 
-  @spec revoke({[EmployerGrant.t()], [EmployerGrant.t()]}, DateTime.t()) ::
-          {:ok, EmployerGrant.t()}
-          | {:error, :not_found | :last_grant_holder | Ecto.Changeset.t(EmployerGrant.t())}
-  defp revoke({[grant], [_survivor | _rest]}, now) do
-    grant |> EmployerGrant.revocation_changeset(now) |> EmployerRepo.update()
+  @spec acting_grant(EmployerScope.t(), [EmployerGrant.t()]) ::
+          {:ok, EmployerGrant.t()} | {:error, :no_grant}
+  defp acting_grant(%EmployerScope{grant_id: grant_id}, live) do
+    live |> Enum.find(&(&1.id == grant_id)) |> held()
   end
 
-  defp revoke({[_grant], []}, _now), do: {:error, :last_grant_holder}
-  defp revoke({[], _live}, _now), do: {:error, :not_found}
+  @spec close({[EmployerGrant.t()], [EmployerGrant.t()]}, EmployerScope.t(), Ecto.UUID.t()) ::
+          {:ok, EmployerGrant.t()}
+          | {:error, :not_found | :last_grant_holder | Ecto.Changeset.t(EmployerGrant.t())}
+  defp close({[%EmployerGrant{revoked_at: %DateTime{}}], _survivors}, _scope, _grant_id) do
+    {:error, :not_found}
+  end
+
+  defp close({[target], survivors}, scope, grant_id) do
+    scope |> revocable?(grant_id) |> within_reach(target, survivors, scope.now)
+  end
+
+  defp close({[], _survivors}, _scope, _grant_id), do: {:error, :not_found}
+
+  @spec within_reach(boolean(), EmployerGrant.t(), [EmployerGrant.t()], DateTime.t()) ::
+          {:ok, EmployerGrant.t()}
+          | {:error, :not_found | :last_grant_holder | Ecto.Changeset.t(EmployerGrant.t())}
+  defp within_reach(false, _target, _survivors, _now), do: {:error, :not_found}
+
+  defp within_reach(true, target, survivors, now) do
+    survivors |> Enum.any?(&is_nil(&1.revoked_at)) |> revoke(target, now)
+  end
+
+  @spec revoke(boolean(), EmployerGrant.t(), DateTime.t()) ::
+          {:ok, EmployerGrant.t()} | {:error, Ecto.Changeset.t(EmployerGrant.t())}
+  defp revoke(true, target, now) do
+    target |> EmployerGrant.revocation_changeset(now) |> EmployerRepo.update()
+  end
+
+  defp revoke(false, _target, _now), do: {:error, :last_grant_holder}
+
+  # Whether `grant_id` is the acting grant or descends from it.
+  #
+  # Walked in the database rather than over the locked live set, because a live
+  # descendant may hang off a link that has itself been revoked — and a walk
+  # over live rows alone would drop that link and the whole subtree under it,
+  # stranding grants nobody could close.
+  @spec revocable?(EmployerScope.t(), Ecto.UUID.t()) :: boolean()
+  defp revocable?(scope, grant_id) do
+    scope |> lineage() |> where([grant], grant.id == ^grant_id) |> EmployerRepo.exists?()
+  end
+
+  @spec lineage(EmployerScope.t()) :: Ecto.Query.t()
+  defp lineage(%EmployerScope{venue_id: venue_id, grant_id: grant_id}) do
+    acting =
+      from grant in EmployerGrant,
+        where: grant.venue_id == ^venue_id and grant.id == ^grant_id,
+        select: %{id: grant.id}
+
+    issued =
+      from grant in EmployerGrant,
+        join: ancestor in "lineage",
+        on: grant.granted_by_grant_id == ancestor.id,
+        where: grant.venue_id == ^venue_id,
+        select: %{id: grant.id}
+
+    {"lineage", EmployerGrant}
+    |> recursive_ctes(true)
+    |> with_cte("lineage", as: ^union_all(acting, ^issued))
+  end
 
   ## Shift types
 
@@ -374,6 +500,6 @@ defmodule HospitalityComs.Venues do
   defp live_grants(%EmployerScope{venue_id: venue_id, now: now}) do
     venue_id
     |> EmployerGrant.live_at(now)
-    |> order_by([grant], asc: grant.id)
+    |> order_by([grant], asc: grant.granted_at, asc: grant.id)
   end
 end
