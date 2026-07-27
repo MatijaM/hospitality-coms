@@ -91,12 +91,26 @@ defmodule HospitalityComs.Engagements.Invitation do
   @hash_algorithm :sha256
   @rand_size 32
   @max_label_length 160
+  @max_code_validity_in_days 14
 
   @doc """
   The longest role label an invitation or an engagement may carry.
   """
   @spec max_label_length() :: pos_integer()
   def max_label_length, do: @max_label_length
+
+  @doc """
+  The longest a claim code may stay redeemable after it is issued.
+
+  The same fourteen days `HospitalityComs.Accounts.PersonToken.session_validity_in_days/0`
+  gives a session, and for the same reason: both are bearer credentials that
+  grant something to whoever presents them first. The lifetime used to be
+  whatever the caller asked for and there is still no way to withdraw a code
+  early, so an unbounded one was a credential that could outlive the venue's
+  interest in it by years.
+  """
+  @spec max_code_validity_in_days() :: pos_integer()
+  def max_code_validity_in_days, do: @max_code_validity_in_days
 
   @doc """
   The digest a claim code is looked up by.
@@ -148,6 +162,7 @@ defmodule HospitalityComs.Engagements.Invitation do
       |> update_change(:role_label, &String.trim/1)
       |> validate_required([:role_label])
       |> validate_length(:role_label, max: @max_label_length)
+      |> validate_uuid(:grant_id)
       |> truncate(:starts_at)
       |> truncate(:ends_at)
       |> truncate(:code_expires_at)
@@ -180,12 +195,35 @@ defmodule HospitalityComs.Engagements.Invitation do
       name: :invitations_code_expiry_after_issue,
       message: "must be after the invitation is issued"
     )
+    |> check_constraint(:code_expires_at,
+      name: :invitations_code_expiry_within_bound,
+      message: "must be within #{@max_code_validity_in_days} day(s) of issue"
+    )
     |> unique_constraint(:claim_code_digest)
     |> unique_constraint([:id, :venue_id])
     |> foreign_key_constraint(:venue_id)
     |> foreign_key_constraint(:issued_by_grant_id, name: :invitations_issued_by_grant_fkey)
     |> foreign_key_constraint(:grant_id, name: :invitations_grant_fkey)
   end
+
+  # `:binary_id` accepts any binary at cast time — Ecto defers the check to
+  # dump time, where a malformed id raises `Ecto.Query.CastError` out of
+  # whichever query happened to reference it next. `grant_id` is the one field
+  # here a caller chooses, and `HospitalityComs.Engagements.issue_invitation/2`
+  # resolves it against the database before the insert, so without this the
+  # promise of a changeset became a raise from inside a `where`.
+  @spec validate_uuid(Ecto.Changeset.t(t()), atom()) :: Ecto.Changeset.t(t())
+  defp validate_uuid(changeset, field) do
+    changeset |> get_change(field) |> uuid?() |> refuse_uuid(changeset, field)
+  end
+
+  @spec uuid?(term()) :: boolean()
+  defp uuid?(nil), do: true
+  defp uuid?(value), do: match?({:ok, _cast}, Ecto.UUID.cast(value))
+
+  @spec refuse_uuid(boolean(), Ecto.Changeset.t(t()), atom()) :: Ecto.Changeset.t(t())
+  defp refuse_uuid(true, changeset, _field), do: changeset
+  defp refuse_uuid(false, changeset, field), do: add_error(changeset, field, "is invalid")
 
   @spec validate_term(Ecto.Changeset.t(t())) :: Ecto.Changeset.t(t())
   defp validate_term(changeset) do
@@ -213,6 +251,7 @@ defmodule HospitalityComs.Engagements.Invitation do
     issued_at
     |> ordered?(get_field(changeset, :code_expires_at))
     |> refuse_expiry(changeset)
+    |> validate_code_validity(issued_at)
   end
 
   @spec refuse_expiry(boolean(), Ecto.Changeset.t(t())) :: Ecto.Changeset.t(t())
@@ -220,6 +259,36 @@ defmodule HospitalityComs.Engagements.Invitation do
 
   defp refuse_expiry(false, changeset) do
     add_error(changeset, :code_expires_at, "must be after the invitation is issued")
+  end
+
+  # The upper bound on the same column the check above puts a lower bound on.
+  # Half-*closed* here, unlike every period in the application: expiring at
+  # exactly the limit is a code good for the full fourteen days rather than one
+  # that is a second over.
+  @spec validate_code_validity(Ecto.Changeset.t(t()), DateTime.t()) :: Ecto.Changeset.t(t())
+  defp validate_code_validity(changeset, issued_at) do
+    issued_at
+    |> DateTime.add(@max_code_validity_in_days, :day)
+    |> within_bound?(get_field(changeset, :code_expires_at))
+    |> refuse_validity(changeset)
+  end
+
+  @spec within_bound?(DateTime.t(), DateTime.t() | nil) :: boolean()
+  defp within_bound?(%DateTime{} = limit, %DateTime{} = code_expires_at) do
+    DateTime.compare(code_expires_at, limit) != :gt
+  end
+
+  defp within_bound?(_limit, _code_expires_at), do: true
+
+  @spec refuse_validity(boolean(), Ecto.Changeset.t(t())) :: Ecto.Changeset.t(t())
+  defp refuse_validity(true, changeset), do: changeset
+
+  defp refuse_validity(false, changeset) do
+    add_error(
+      changeset,
+      :code_expires_at,
+      "must be within #{@max_code_validity_in_days} day(s) of issue"
+    )
   end
 
   # Every instant column in this schema is second-precision, matching the rest

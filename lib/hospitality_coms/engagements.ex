@@ -117,6 +117,8 @@ defmodule HospitalityComs.Engagements do
 
   import Ecto.Query
 
+  require Logger
+
   alias Ecto.Multi
   alias HospitalityComs.Accounts.EmployerScope
   alias HospitalityComs.Accounts.Person
@@ -128,7 +130,6 @@ defmodule HospitalityComs.Engagements do
   alias HospitalityComs.Profiles.AttestedEntry
   alias HospitalityComs.Repo
   alias HospitalityComs.Venues
-  alias HospitalityComs.Venues.EmployerGrant
   alias HospitalityComs.Workers.ExpireEngagement
 
   @typedoc """
@@ -203,10 +204,23 @@ defmodule HospitalityComs.Engagements do
           {:ok, issued()}
           | {:error, :no_grant | :grant_not_live | Ecto.Changeset.t(Invitation.t())}
   defp write_invitation(scope, attrs) do
-    with {:ok, authority} <- Venues.fetch_acting_grant(scope),
-         :ok <- conferrable(scope, attrs) do
-      {changeset, code} = Invitation.issue(scope.venue_id, authority.id, attrs, scope.now)
+    with {:ok, authority} <- Venues.fetch_acting_grant(scope) do
+      scope.venue_id
+      |> Invitation.issue(authority.id, attrs, scope.now)
+      |> insert_if_conferrable(scope)
+    end
+  end
 
+  # The changeset is built *before* the conferred grant is resolved, and the
+  # order is the fix rather than an accident of style: resolving first meant a
+  # `grant_id` that is not a UUID reached Ecto's query builder uncast and raised
+  # `Ecto.Query.CastError` out of a function whose `@spec` promises a changeset.
+  # Cast first, and a malformed id is an ordinary field error.
+  @spec insert_if_conferrable({Ecto.Changeset.t(Invitation.t()), String.t()}, EmployerScope.t()) ::
+          {:ok, issued()}
+          | {:error, :grant_not_live | Ecto.Changeset.t(Invitation.t())}
+  defp insert_if_conferrable({changeset, code}, scope) do
+    with :ok <- conferrable(changeset, scope) do
       changeset |> EmployerRepo.insert() |> with_code(code)
     end
   end
@@ -220,20 +234,27 @@ defmodule HospitalityComs.Engagements do
   # composite foreign key already refuses another venue's grant; what it cannot
   # see is a grant this venue revoked yesterday, which would produce a manager
   # whose authority was gone before they accepted it.
-  @spec conferrable(EmployerScope.t(), map()) :: :ok | {:error, :grant_not_live}
-  defp conferrable(scope, attrs) do
-    attrs |> conferred_grant_id() |> live_grant?(scope) |> conferrable_or_refuse()
-  end
+  #
+  # A changeset that is already invalid is left alone: the insert will return it
+  # with its own errors, and asking the database about a grant named by a
+  # changeset that will not be written is a question with no consequence.
+  @spec conferrable(Ecto.Changeset.t(Invitation.t()), EmployerScope.t()) ::
+          :ok | {:error, :grant_not_live}
+  defp conferrable(%Ecto.Changeset{valid?: false}, _scope), do: :ok
 
-  @spec conferred_grant_id(map()) :: Ecto.UUID.t() | nil
-  defp conferred_grant_id(attrs), do: attrs[:grant_id] || attrs["grant_id"]
+  defp conferrable(changeset, scope) do
+    changeset
+    |> Ecto.Changeset.get_change(:grant_id)
+    |> live_grant?(scope)
+    |> conferrable_or_refuse()
+  end
 
   @spec live_grant?(Ecto.UUID.t() | nil, EmployerScope.t()) :: boolean()
   defp live_grant?(nil, _scope), do: true
 
   defp live_grant?(grant_id, %EmployerScope{venue_id: venue_id, now: now}) do
     venue_id
-    |> EmployerGrant.live_at(now)
+    |> Records.live_grant_ids(now)
     |> where([grant], grant.id == ^grant_id)
     |> EmployerRepo.exists?()
   end
@@ -548,11 +569,19 @@ defmodule HospitalityComs.Engagements do
              | :not_an_extension
              | :stale
              | Ecto.Changeset.t(Engagement.t())}
+  # `ends_at` is truncated before it is compared, and that is the whole of the
+  # sub-second fix: the column is second-precision and `close_at_changeset/3`
+  # truncates on the way in, so a renewal half a second past the current bound
+  # compared `:gt`, wrote the same instant back, and answered `{:ok, _}` having
+  # moved nothing — while consuming the optimistic lock, so a concurrent
+  # renewal that *would* have moved it failed as stale in its place.
   defp extend(scope, engagement_id, ends_at) do
+    truncated = DateTime.truncate(ends_at, :second)
+
     with {:ok, _grant} <- Venues.fetch_acting_grant(scope),
          {:ok, engagement} <- read_engagement(scope, engagement_id),
-         :ok <- extension?(engagement, ends_at) do
-      write_close_at(engagement, ends_at, scope.now)
+         :ok <- extension?(engagement, truncated) do
+      write_close_at(engagement, truncated, scope.now)
     end
   end
 
@@ -830,16 +859,39 @@ defmodule HospitalityComs.Engagements do
 
   @doc """
   Subscribes the calling process to one engagement's revocation.
+
+  `{:error, {:already_registered, pid}}` is `Registry.register/3`'s only
+  failure and it cannot happen here — `Phoenix.PubSub`'s registry is
+  `keys: :duplicate`, and a duplicate registry accepts every registration. It is
+  enumerated rather than dropped because the library's contract, not this
+  function, is what would have to change for it to appear.
   """
-  @spec subscribe(Ecto.UUID.t()) :: :ok | {:error, term()}
+  @spec subscribe(Ecto.UUID.t()) :: :ok | {:error, {:already_registered, pid()}}
   def subscribe(engagement_id) when is_binary(engagement_id) do
     Phoenix.PubSub.subscribe(HospitalityComs.PubSub, topic(engagement_id))
   end
 
   # Only on `{:ok, _}`. A broadcast for a change that rolled back would
   # disconnect clients whose access never actually ended (KTD8).
-  @spec announce({:ok, Engagement.t()} | {:error, term()}) ::
-          {:ok, Engagement.t()} | {:error, term()}
+  #
+  # The announcement's own outcome does not reach the caller, and that is the
+  # decision rather than an oversight — see `broadcast_revocation/2`.
+  @spec announce(
+          {:ok, Engagement.t()}
+          | {:error,
+             :no_grant
+             | :not_found
+             | :last_grant_holder
+             | :stale
+             | Ecto.Changeset.t(Engagement.t())}
+        ) ::
+          {:ok, Engagement.t()}
+          | {:error,
+             :no_grant
+             | :not_found
+             | :last_grant_holder
+             | :stale
+             | Ecto.Changeset.t(Engagement.t())}
   defp announce({:ok, %Engagement{} = engagement} = result) do
     broadcast_revocation(engagement, engagement.ends_at)
     result
@@ -847,13 +899,44 @@ defmodule HospitalityComs.Engagements do
 
   defp announce(result), do: result
 
+  # **The announcement is best-effort, deliberately, and it is logged rather
+  # than propagated.**
+  #
+  # The revocation is not this message. It is the rejoin that `join/3` refuses
+  # once the period no longer contains the instant (KTD8, U7) — derived, with
+  # nothing stored and nothing to keep in step. This broadcast is the nudge that
+  # makes an already-powerless socket notice, so a delivery failure costs
+  # latency and not correctness, and failing `end_engagement/2` over it would
+  # roll back a term that is genuinely closed in order to report that nobody was
+  # told.
+  #
+  # What it must not do is promise `:ok` and swallow the answer, which is what
+  # it used to. `{:error, :no_such_group}` is the one failure the `:pg` adapter
+  # can name, and on OTP's `:pg` it is unreachable — `:pg.get_members/2` answers
+  # `[]` for a group nobody has joined. The clause is here because the
+  # library's contract allows it, and the log line is what makes it visible if
+  # the adapter ever changes.
   @spec broadcast_revocation(Engagement.t(), DateTime.t()) :: :ok
   defp broadcast_revocation(%Engagement{} = engagement, %DateTime{} = instant) do
-    Phoenix.PubSub.broadcast(
-      HospitalityComs.PubSub,
+    HospitalityComs.PubSub
+    |> Phoenix.PubSub.broadcast(
       topic(engagement.id),
       {:engagement_revoked,
        %{engagement_id: engagement.id, venue_id: engagement.venue_id, at: instant}}
     )
+    |> announced(engagement)
+  end
+
+  @spec announced(:ok | {:error, term()}, Engagement.t()) :: :ok
+  defp announced(:ok, _engagement), do: :ok
+
+  defp announced({:error, reason}, %Engagement{} = engagement) do
+    Logger.warning(
+      "engagement revocation was not announced " <>
+        "engagement_id=#{engagement.id} venue_id=#{engagement.venue_id} " <>
+        "reason_code=#{inspect(reason)}"
+    )
+
+    :ok
   end
 end

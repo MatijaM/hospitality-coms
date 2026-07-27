@@ -118,6 +118,11 @@ defmodule HospitalityComs.Repo.Migrations.CreateEngagements do
   # would have refused too.
   @max_label_length 160
 
+  # Mirrored from `HospitalityComs.Engagements.Invitation`, for the reason the
+  # label bound is mirrored: a lifetime the database refuses is a lifetime the
+  # changeset would have refused too.
+  @max_code_validity_in_days 14
+
   @invitation_issuer_fkey "invitations_issued_by_grant_fkey"
   @invitation_grant_fkey "invitations_grant_fkey"
   @engagement_invitation_fkey "engagements_invitation_fkey"
@@ -227,6 +232,17 @@ defmodule HospitalityComs.Repo.Migrations.CreateEngagements do
     # is an invitation nobody can accept rather than one that has lapsed.
     create constraint(:invitations, :invitations_code_expiry_after_issue,
              check: "code_expires_at > issued_at"
+           )
+
+    # And the other end of the same interval. A claim code is a bearer
+    # credential that grants a state change to whoever presents it first, and
+    # there is no way to withdraw one early — so a lifetime the caller chose
+    # freely is a credential that can outlive the venue's interest in it by
+    # years. The bound is the one
+    # `HospitalityComs.Accounts.PersonToken.session_validity_in_days/0` puts on
+    # the other bearer credential in the tree.
+    create constraint(:invitations, :invitations_code_expiry_within_bound,
+             check: "code_expires_at <= issued_at + interval '#{@max_code_validity_in_days} days'"
            )
   end
 

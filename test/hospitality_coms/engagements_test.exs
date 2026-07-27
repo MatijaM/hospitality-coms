@@ -182,6 +182,67 @@ defmodule HospitalityComs.EngagementsTest do
       assert "must be after the invitation is issued" in errors_on(changeset).code_expires_at
     end
 
+    test "rejects a claim code good for longer than a code may be good for" do
+      # A claim code is a bearer credential that grants a state change to
+      # whoever presents it first, and its lifetime was whatever the caller
+      # asked for — a year, a decade — with no way to withdraw it afterwards.
+      # The bound mirrors `PersonToken.session_validity_in_days/0`, which is the
+      # other bearer credential in the tree.
+      {scope, _creation} = scoped_venue_fixture(@now)
+
+      too_long = DateTime.add(@now, Invitation.max_code_validity_in_days() + 1, :day)
+      attrs = valid_invitation_attributes(%{code_expires_at: too_long}, @now)
+
+      assert {:error, changeset} = Engagements.issue_invitation(scope, attrs)
+
+      assert "must be within #{Invitation.max_code_validity_in_days()} day(s) of issue" in errors_on(
+               changeset
+             ).code_expires_at
+    end
+
+    test "accepts a claim code good for exactly the maximum, which is the control" do
+      {scope, _creation} = scoped_venue_fixture(@now)
+
+      limit = DateTime.add(@now, Invitation.max_code_validity_in_days(), :day)
+      attrs = valid_invitation_attributes(%{code_expires_at: limit}, @now)
+
+      assert {:ok, %{invitation: invitation}} = Engagements.issue_invitation(scope, attrs)
+      assert DateTime.compare(invitation.code_expires_at, limit) == :eq
+    end
+
+    test "keeps the code's lifetime bounded in the database, not only in the changeset" do
+      # The pairing `invitations_code_expiry_after_issue` already has: a write
+      # that never passed through the changeset cannot get around the rule.
+      {scope, %{venue: venue, grant: grant}} = scoped_venue_fixture(@now)
+
+      assert_raise Postgrex.Error, ~r/invitations_code_expiry_within_bound/, fn ->
+        Repo.insert_all(Invitation, [
+          unbounded_invitation_row(venue, grant, DateTime.add(@now, 365, :day))
+        ])
+      end
+
+      # The control: the same row inside the bound goes in.
+      assert {1, _returned} =
+               Repo.insert_all(Invitation, [
+                 unbounded_invitation_row(venue, grant, DateTime.add(@now, 1, :day))
+               ])
+
+      assert {:ok, [_invitation]} = Engagements.list_invitations(scope)
+    end
+
+    test "reports a malformed conferred grant as a field error rather than raising" do
+      # The conferred grant used to be resolved against the database before it
+      # was cast, so a `grant_id` that is not a UUID reached Ecto's query
+      # builder and raised `Ecto.Query.CastError` — out of a function whose
+      # `@spec` promises a changeset.
+      {scope, _creation} = scoped_venue_fixture(@now)
+
+      attrs = valid_invitation_attributes(%{grant_id: "not-a-uuid"}, @now)
+
+      assert {:error, %Ecto.Changeset{} = changeset} = Engagements.issue_invitation(scope, attrs)
+      assert errors_on(changeset).grant_id == ["is invalid"]
+    end
+
     test "rejects a blank role label" do
       {scope, _creation} = scoped_venue_fixture(@now)
 
@@ -556,6 +617,36 @@ defmodule HospitalityComs.EngagementsTest do
       assert active_ids_at(venue, grant, @in_a_month) == [engagement.id]
     end
 
+    test "refuses one that would not move the upper bound once it is written" do
+      # `ends_at` is compared at whatever precision the caller passed and
+      # written truncated to the second, so a renewal half a second past the
+      # current bound used to answer `{:ok, _}` having moved nothing — while
+      # consuming the optimistic lock, so a concurrent renewal that *would*
+      # have moved it failed as stale in its place.
+      {employer, _creation} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      engagement = engagement_fixture(employer, scope, %{starts_at: @now, ends_at: @in_a_month})
+      within_the_second = DateTime.add(engagement.ends_at, 500, :millisecond)
+
+      assert Engagements.renew_engagement(employer, engagement.id, within_the_second) ==
+               {:error, :not_an_extension}
+
+      reloaded = Repo.get!(Engagement, engagement.id)
+      assert reloaded.lock_version == engagement.lock_version
+      assert DateTime.compare(reloaded.ends_at, engagement.ends_at) == :eq
+
+      # The control: a second later is a real extension and is accepted.
+      assert {:ok, renewed} =
+               Engagements.renew_engagement(
+                 employer,
+                 engagement.id,
+                 DateTime.add(engagement.ends_at, 1, :second)
+               )
+
+      assert renewed.lock_version == engagement.lock_version + 1
+    end
+
     test "refuses anything that is not an extension" do
       {employer, _creation} = scoped_venue_fixture(@now)
       scope = person_scope_fixture(@now)
@@ -917,6 +1008,42 @@ defmodule HospitalityComs.EngagementsTest do
       end
     end
 
+    test "fetches one of the venue's own engagements by id" do
+      {employer, _creation} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      engagement = engagement_fixture(employer, scope, %{starts_at: @now, ends_at: @in_a_month})
+
+      assert {:ok, %Engagement{id: id}} = Engagements.fetch_engagement(employer, engagement.id)
+      assert id == engagement.id
+    end
+
+    test "reports another venue's engagement, and an id that names nothing, as not found" do
+      {first_employer, _first} = scoped_venue_fixture(@now)
+      {second_employer, _second} = scoped_venue_fixture(@now)
+
+      engagement = engagement_fixture(first_employer, person_scope_fixture(@now))
+
+      assert Engagements.fetch_engagement(second_employer, engagement.id) ==
+               {:error, :not_found}
+
+      assert Engagements.fetch_engagement(first_employer, Ecto.UUID.generate()) ==
+               {:error, :not_found}
+    end
+
+    test "refuses a fetch under a grant that has been revoked" do
+      {employer, %{venue: venue}} = scoped_venue_fixture(@now)
+
+      engagement = engagement_fixture(employer, person_scope_fixture(@now))
+
+      {:ok, second} = Venues.issue_grant(employer)
+      {:ok, _revoked} = Venues.revoke_grant(employer, second.id)
+
+      revoked_scope = EmployerScope.for_grant(venue.id, second.id, @now)
+
+      assert Engagements.fetch_engagement(revoked_scope, engagement.id) == {:error, :no_grant}
+    end
+
     test "lists outstanding invitations and drops them once claimed" do
       {employer, _creation} = scoped_venue_fixture(@now)
       scope = person_scope_fixture(@now)
@@ -1133,6 +1260,27 @@ defmodule HospitalityComs.EngagementsTest do
   defp as_employer(scope, fun) do
     {:ok, result} = EmployerRepo.scoped_transaction(scope, fn _scope -> {:ok, fun.()} end)
     result
+  end
+
+  # An invitation written straight at the table, so that what refuses it is the
+  # check constraint rather than the changeset that would normally have
+  # refused it first.
+  defp unbounded_invitation_row(venue, grant, code_expires_at) do
+    stamped_at = DateTime.truncate(@now, :second)
+
+    %{
+      id: Ecto.UUID.generate(),
+      venue_id: venue.id,
+      issued_by_grant_id: grant.id,
+      role_label: "Bartender",
+      starts_at: stamped_at,
+      ends_at: DateTime.add(stamped_at, 30, :day),
+      claim_code_digest: :crypto.strong_rand_bytes(32),
+      code_expires_at: DateTime.truncate(code_expires_at, :second),
+      issued_at: stamped_at,
+      inserted_at: stamped_at,
+      updated_at: stamped_at
+    }
   end
 
   defp person_count, do: Repo.aggregate(Person, :count)
