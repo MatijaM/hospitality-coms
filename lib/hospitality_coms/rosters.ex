@@ -63,6 +63,34 @@ defmodule HospitalityComs.Rosters do
   `{:error, :not_found}` — the same answer an id that names nothing gets, so the
   refusal enumerates nothing. The composite foreign key refuses the same thing
   underneath, whatever this module believes.
+
+  ## Known limitation: a hire who has not started yet cannot be rostered
+
+  `add_to_roster/3` requires the engagement to be active at the *scope's
+  instant*, and "active" is half-open containment of that instant. A person who
+  claimed an invitation whose term opens next Monday therefore cannot be put on
+  next Tuesday's shift today, even though the roster entry created would be
+  `[today, ∞)` and would overlap Tuesday's room perfectly well.
+
+  Two things about it are worth writing down rather than leaving to be
+  rediscovered:
+
+    * the reasoning the paragraph above gives — "somebody who no longer works
+      there does not work the shift" — is about the *closed* case. It says
+      nothing about the not-yet-open case, which is a different state that the
+      same predicate happens to exclude;
+    * the refusal is `{:error, :not_found}`, indistinguishable from a bad id, so
+      an operator building next week's rota cannot learn why a name they can see
+      elsewhere will not go on it.
+
+  Nothing here depends on the restriction. Membership and readability both
+  intersect the roster with an engagement active *at the instant asked about*
+  (`HospitalityComs.Rooms.Records.shift_room_members/2` and
+  `shift_room_readers/2`), so an entry belonging to an engagement that has not
+  started confers nothing until it does — which is the property the check at
+  write time was presumably meant to deliver, delivered by the read instead.
+  Left as it is deliberately, and filed rather than fixed: widening it is a
+  product decision about when a rota may be built, not a bug fix.
   """
 
   import Ecto.Query

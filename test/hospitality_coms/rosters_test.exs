@@ -264,6 +264,33 @@ defmodule HospitalityComs.RostersTest do
                )
     end
 
+    test "closes an entry whose engagement has already ended" do
+      # The state the expiry worker leaves behind. `end_engagement/2` closes no
+      # roster entries, so an ended engagement can still hold an open period —
+      # and `add_to_roster/3` refuses to create one, so this call is the only
+      # way such a row can ever be closed. Refusing it here would leave the
+      # entry open for ever, with no operation anywhere able to reach it.
+      %{employer: employer, engagement: engagement} = engaged()
+      room = shift_room(employer)
+      entry = roster_entry_fixture(employer, room, engagement.id)
+
+      {:ok, _ended} = Engagements.end_engagement(employer, engagement.id)
+
+      assert {:ok, closed} =
+               Rosters.remove_from_roster(
+                 employer_at(employer, @an_hour_on),
+                 room.id,
+                 engagement.id
+               )
+
+      assert closed.id == entry.id
+      assert closed.left_at == @an_hour_on
+
+      # And it stays closed: the engagement is gone, so nothing reopens it.
+      assert {:error, :not_found} =
+               Rosters.add_to_roster(employer_at(employer, @two_hours_on), room.id, engagement.id)
+    end
+
     test "leaves another venue's roster alone" do
       %{employer: employer, engagement: engagement} = engaged()
       %{employer: other, engagement: theirs} = engaged()

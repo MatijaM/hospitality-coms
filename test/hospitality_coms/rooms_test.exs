@@ -536,6 +536,42 @@ defmodule HospitalityComs.RoomsTest do
       assert {:error, :not_found} = Rooms.list_shift_room_messages(viewer, room.id)
     end
 
+    test "rostering onto a room that shut yesterday grants nothing, because joined_at is now" do
+      # The one write that could hand out retroactive read access, and the whole
+      # reason `joined_at` is the instant of the *call* rather than the shift's
+      # start. The raw-row matrix covers the interval shape; this is the context
+      # path, where a manager really can roster somebody onto a room that has
+      # already closed and the answer has to be that they were never in it.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+
+      shift_type = shift_type_fixture(employer, @grace_minutes)
+      closed_yesterday = DateTime.add(@now, -1, :day)
+
+      room =
+        shift_room_fixture(
+          employer,
+          shift_type,
+          DateTime.add(closed_yesterday, -8, :hour),
+          closed_yesterday
+        )
+
+      entry = roster_entry_fixture(employer, room, engagement.id)
+
+      # The rostering happened, and it happened now.
+      assert entry.joined_at == @now
+      assert {:ok, [_live]} = Rosters.list_roster(employer, room.id)
+
+      # And it overlaps nothing, so it confers nothing.
+      refute Rooms.shift_room_member?(person, room.id)
+      refute Rooms.shift_room_readable?(person, room.id)
+      assert Rooms.list_readable_shift_rooms(person) == []
+      assert {:error, :not_found} = Rooms.list_shift_room_messages(person, room.id)
+      assert {:ok, []} = Rooms.list_shift_room_readers(employer, room.id)
+
+      # The room is reachable — it is this person's own venue — and shut.
+      assert {:error, :room_closed} = Rooms.send_shift_room_message(person, room.id, "too late")
+    end
+
     test "refuses a room that does not exist with the same answer as one it may not read" do
       %{person: person} = engaged()
 
