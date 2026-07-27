@@ -13,6 +13,11 @@ defmodule HospitalityComs.Application do
       HospitalityComs.EmployerRepo,
       {DNSCluster, query: Application.get_env(:hospitality_coms, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: HospitalityComs.PubSub},
+      # After PubSub, which it broadcasts diffs through, and before the
+      # endpoint, because a socket that accepted a connection before the tracker
+      # existed would have a channel calling `track/3` against a missing
+      # process. The name it is registered under is the module's own.
+      HospitalityComsWeb.Presence,
       # After both repos, because Oban connects on start, and before the
       # endpoint, because a request that enqueues a job needs somewhere to
       # enqueue it. In `:test` the configuration is `testing: :manual`, so this

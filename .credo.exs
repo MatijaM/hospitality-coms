@@ -173,13 +173,22 @@
           # reads the clock once per request in `fetch_person_scope/2` and puts
           # the result on the scope. The two workers are the job boundary — one
           # attempt is one unit of work (KTD5), and a retry is a new one that
-          # correctly reads the clock again. The channel boundary joins this
-          # list in U7. Test files are excluded: their whole job is to call
-          # these functions in isolation.
+          # correctly reads the clock again. `ChannelAuth` is U7's: a channel's
+          # unit of work is one inbound event, not the connection and not the
+          # join, so it reads the clock on every `join/3` and every
+          # `handle_in/3`.
+          #
+          # It is *one* entry rather than six. Two sockets and four channels
+          # need an instant; naming them all would turn this list from a
+          # statement about where units of work begin into an inventory of
+          # whatever happens to call the clock, and the check's value is that
+          # the list stays short enough to argue about. Test files are excluded:
+          # their whole job is to call these functions in isolation.
           {HospitalityComs.Credo.Check.ClockAuthority,
            files: %{included: ["lib/", "dev_support/"]},
            boundary_modules: [
              HospitalityComsWeb.PersonAuth,
+             HospitalityComsWeb.ChannelAuth,
              HospitalityComs.Workers.EngagementSweeper,
              HospitalityComs.Workers.ExpireEngagement
            ]}
