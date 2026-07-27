@@ -100,8 +100,8 @@ defmodule HospitalityComsWeb.PersonAuth do
   holder of the raw token gets one.
   """
   @spec session_topic(binary()) :: String.t()
-  def session_topic(stored_token) when is_binary(stored_token) do
-    "session:#{encode_token(stored_token)}"
+  def session_topic(digest) when is_binary(digest) do
+    "session:#{encode_token(digest)}"
   end
 
   @spec authenticate(binary() | nil, DateTime.t()) :: Person.t() | nil

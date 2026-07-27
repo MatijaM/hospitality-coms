@@ -73,8 +73,20 @@ defmodule HospitalityComsWeb.RoomChannel do
           room: %{optional(:venue_id) => Ecto.UUID.t(), optional(:shift_room_id) => Ecto.UUID.t()}
         }
 
-  @typedoc "What a broadcast that closes a channel carries."
-  @type notice() :: %{engagement_id: Ecto.UUID.t(), at: DateTime.t()}
+  @typedoc """
+  What a broadcast that closes a channel carries.
+
+  `venue_id` is optional because the two closures do not agree on it: an
+  engagement ending is about the engagement wherever it is read, while a
+  suspension is a person opting out of one venue's room and says which.
+  `closed/4` matches on `engagement_id` alone, so a third closure kind may
+  carry either.
+  """
+  @type notice() :: %{
+          :engagement_id => Ecto.UUID.t(),
+          :at => DateTime.t(),
+          optional(:venue_id) => Ecto.UUID.t()
+        }
 
   @doc """
   Tracks the joining channel's presence and hands it the room's current state.
