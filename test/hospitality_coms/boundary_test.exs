@@ -711,7 +711,14 @@ defmodule HospitalityComs.BoundaryTest do
     end
   end
 
-  describe "a person-zone context function" do
+  describe "the scope-first shape, where it is used" do
+    # Scoped down from "a person-zone context function", which is what this
+    # block used to claim. `sudo_mode?/2` is the only function in `Accounts`
+    # that takes a scope; the rest take a bare address, a bare token or a bare
+    # `DateTime`, so an employer caller reaches them with `employer_scope.now`
+    # and no clause refuses. What is asserted here is that the shape works
+    # where it is used — not that the person zone is closed by it.
+
     test "refuses an employer scope by function clause" do
       # Not a runtime check inside the body. The refusal is the absence of a
       # matching head, so it happens before the function runs and it happens
@@ -723,6 +730,20 @@ defmodule HospitalityComs.BoundaryTest do
       # Without this the test above passes on a function that refuses
       # everything, which is not the same guarantee at all.
       refute Accounts.sudo_mode?(scope(:person))
+    end
+
+    test "is not what keeps an employer caller out of the person zone" do
+      # The honest counterpart, pinned so the claim above cannot quietly grow
+      # back. An employer caller holds an `EmployerScope` and nothing else, and
+      # `get_person_by_email/1` takes no scope at all — so there is no clause
+      # to refuse it, and the address comes back. `Accounts` goes through
+      # `Repo`, which holds every privilege. What closes the zone is the grant
+      # on `EmployerRepo`'s role; the argument shape is legibility.
+      employer = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+      {:ok, person} = Accounts.register_person(%{email: "reachable@example.com"}, employer.now)
+
+      assert %Person{id: id} = Accounts.get_person_by_email(person.email)
+      assert id == person.id
     end
   end
 
