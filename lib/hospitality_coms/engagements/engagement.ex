@@ -202,10 +202,13 @@ defmodule HospitalityComs.Engagements.Engagement do
       name: @overlap_constraint,
       message: "overlaps an engagement this person already holds at this venue"
     )
-    |> check_constraint(:ends_at,
-      name: :engagements_term_not_reversed,
-      message: "cannot precede the start"
-    )
+    # No `check_constraint(:ends_at, name: :engagements_term_not_reversed)`.
+    # The table carries that CHECK and it is unreachable from here: `period` is
+    # `GENERATED ALWAYS AS tstzrange(starts_at, ends_at, '[)')`, generated
+    # expressions are evaluated while the tuple is formed, and a reversed pair
+    # makes `tstzrange/3` raise SQLSTATE 22000 before any CHECK is consulted. A
+    # declaration would read as though it turned that into a field error, and
+    # it never has. `HospitalityComs.EngagementsTest` pins which error arrives.
     |> check_constraint(:role_label,
       name: :engagements_role_label_present,
       message: "can't be blank"

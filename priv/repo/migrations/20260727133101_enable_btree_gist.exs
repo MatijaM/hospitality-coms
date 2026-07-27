@@ -26,11 +26,56 @@ defmodule HospitalityComs.Repo.Migrations.EnableBtreeGist do
   ordinary path drops the constraint first; the path that does not is an
   out-of-order rollback, which is exactly when a loud failure is worth having.
   `grant_zones` made the same choice about `app_current_employer_id()`.
+
+  ## And it only drops what it created
+
+  `up` is `IF NOT EXISTS`, so on a database that already had `btree_gist` — for
+  an index this application knows nothing about — it does nothing. A `down` that
+  dropped unconditionally would then remove an extension somebody else installed
+  and break whatever was using it, which is a rollback with a blast radius
+  outside its own schema.
+
+  So `up` records provenance: it creates the extension only when it is absent,
+  and comments it in the same statement. `down` drops it only when that comment
+  is there. An extension this migration found is left exactly as it found it,
+  and `\\dx` says which case a given database is in.
+
+  A comment rather than a table: `up` runs before this application owns anything
+  it could write a row into, and a comment is a catalogue fact that travels with
+  the object it describes and disappears with it.
   """
 
   use Ecto.Migration
 
-  def up, do: execute("CREATE EXTENSION IF NOT EXISTS btree_gist")
+  @extension "btree_gist"
+  @marker "created by hospitality_coms; see priv/repo/migrations/*_enable_btree_gist.exs"
 
-  def down, do: execute("DROP EXTENSION btree_gist")
+  def up do
+    execute("""
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = '#{@extension}') THEN
+        CREATE EXTENSION #{@extension};
+        COMMENT ON EXTENSION #{@extension} IS '#{@marker}';
+      END IF;
+    END $$
+    """)
+  end
+
+  def down do
+    execute("""
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM pg_extension extension
+        JOIN pg_description description ON description.objoid = extension.oid
+        WHERE extension.extname = '#{@extension}'
+          AND description.description = '#{@marker}'
+      ) THEN
+        DROP EXTENSION #{@extension};
+      END IF;
+    END $$
+    """)
+  end
 end

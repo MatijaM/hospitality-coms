@@ -323,17 +323,16 @@ defmodule HospitalityComs.Engagements do
     Multi.new()
     |> Multi.run(:consume, fn repo, _changes -> consume(repo, digest, now) end)
     |> Multi.run(:conferrable, fn repo, changes -> still_conferrable(repo, changes, now) end)
-    |> Multi.insert(:engagement, &claimed_engagement(&1, person_id, now))
-    |> Multi.insert(:attested_entry, &attestation(&1, now))
+    # `mode: :savepoint` on both constrained inserts, and it is explicit
+    # because `ecto_sql` opens a savepoint *only* when asked. Without it, a
+    # constraint violation caught and turned into a changeset error leaves the
+    # surrounding transaction aborted — which is invisible here today only
+    # because each of these is the last statement before the `Multi` rolls
+    # everything back. A step added after one would find a poisoned
+    # transaction and fail for a reason that had nothing to do with it.
+    |> Multi.insert(:engagement, &claimed_engagement(&1, person_id, now), mode: :savepoint)
+    |> Multi.insert(:attested_entry, &attestation(&1, now), mode: :savepoint)
     |> Oban.insert(:expiry_job, &expiry_job/1)
-    # No `mode: :savepoint`, unlike `HospitalityComs.Venues.create_venue/2`.
-    # That call's multi runs *inside* `EmployerRepo.scoped_transaction/2` and
-    # needs a savepoint so a rejected changeset does not poison the transaction
-    # the wrapper opened. This one is the outermost transaction there is, and
-    # asking DBConnection for a savepoint outside a transaction is an error.
-    # Ecto opens its own savepoint per operation for the declared constraints,
-    # which is what turns the exclusion violation into a changeset rather than
-    # an aborted transaction.
     |> Repo.transaction()
   end
 

@@ -32,18 +32,31 @@ defmodule HospitalityComs.Repo.Migrations.CreateEngagements do
   ## Composite foreign keys, and the two that cannot be MATCH FULL
 
   Every key into the employer zone carries `venue_id` alongside the id, so a row
-  at venue A cannot point at a grant or an invitation belonging to venue B. Four
-  of the six are `MATCH FULL`, which is what KTD2 asks for: the key is either
-  wholly null or wholly present.
+  at venue A cannot point at a grant or an invitation belonging to venue B. This
+  migration adds five of them; three are `MATCH FULL`, which is what KTD2 asks
+  for: the key is either wholly null or wholly present.
 
   Two are `MATCH SIMPLE`, and they are the same shape U4 documented on
-  `employer_grants.granted_by_grant_id`. `grant_id` is nullable on both
-  `invitations` and `engagements` — most engagements hold no administrative
-  authority — while `venue_id` is `NOT NULL`, so `MATCH FULL` would reject every
-  ordinary worker. `MATCH SIMPLE` skips the check only when *some* column is
-  null, and the only column that can be is the grant, so "some null" and "holds
-  no grant" are the same state; an engagement that does name a grant is checked
-  against both columns and degenerates to `MATCH FULL`.
+  `employer_grants.granted_by_grant_id` and `revoked_by_grant_id`. `grant_id` is
+  nullable on both `invitations` and `engagements` — most engagements hold no
+  administrative authority — while `venue_id` is `NOT NULL`, so `MATCH FULL`
+  would reject every ordinary worker. `MATCH SIMPLE` skips the check only when
+  *some* column is null, and the only column that can be is the grant, so "some
+  null" and "holds no grant" are the same state; an engagement that does name a
+  grant is checked against both columns and degenerates to `MATCH FULL`.
+
+  The rule across the whole schema is therefore "`MATCH FULL` unless a column of
+  the key is nullable", and `HospitalityComs.BoundaryTest` asserts it that way
+  rather than against a list somebody has to remember to extend.
+
+  ## `down` is written out, and the `execute/1` calls below have no reverse
+
+  Every constraint, generated column and index this migration adds belongs to
+  one of its three tables, so `down/0` dropping the tables takes all of it. The
+  raw statements are `execute/1` rather than `execute/2` for that reason: a
+  reverse handed to `execute/2` is only ever run by `change/0` or by a reversing
+  runner, and there is neither here, so it would be a second `down` that never
+  executed and could drift from the one that does.
 
   ## The grant a row *holds*, not the grant that issued it
 
@@ -188,32 +201,26 @@ defmodule HospitalityComs.Repo.Migrations.CreateEngagements do
     create unique_index(:invitations, [:claim_code_digest])
     create index(:invitations, [:venue_id])
 
-    execute(
-      """
-      ALTER TABLE invitations
-        ADD CONSTRAINT #{@invitation_issuer_fkey}
-        FOREIGN KEY (issued_by_grant_id, venue_id)
-        REFERENCES employer_grants (id, venue_id)
-        MATCH FULL
-        ON DELETE RESTRICT
-      """,
-      "ALTER TABLE invitations DROP CONSTRAINT #{@invitation_issuer_fkey}"
-    )
+    execute("""
+    ALTER TABLE invitations
+      ADD CONSTRAINT #{@invitation_issuer_fkey}
+      FOREIGN KEY (issued_by_grant_id, venue_id)
+      REFERENCES employer_grants (id, venue_id)
+      MATCH FULL
+      ON DELETE RESTRICT
+    """)
 
     # MATCH SIMPLE, and it is one of the two exceptions the moduledoc names:
     # most invitations confer no administrative authority, so `grant_id` is
     # null while `venue_id` never is.
-    execute(
-      """
-      ALTER TABLE invitations
-        ADD CONSTRAINT #{@invitation_grant_fkey}
-        FOREIGN KEY (grant_id, venue_id)
-        REFERENCES employer_grants (id, venue_id)
-        MATCH SIMPLE
-        ON DELETE RESTRICT
-      """,
-      "ALTER TABLE invitations DROP CONSTRAINT #{@invitation_grant_fkey}"
-    )
+    execute("""
+    ALTER TABLE invitations
+      ADD CONSTRAINT #{@invitation_grant_fkey}
+      FOREIGN KEY (grant_id, venue_id)
+      REFERENCES employer_grants (id, venue_id)
+      MATCH SIMPLE
+      ON DELETE RESTRICT
+    """)
 
     create constraint(:invitations, :invitations_role_label_present,
              check: "length(btrim(role_label)) > 0"
@@ -314,53 +321,41 @@ defmodule HospitalityComs.Repo.Migrations.CreateEngagements do
     # row-level security predicate also leans on.
     create index(:engagements, [:ends_at, :id])
 
-    execute(
-      """
-      ALTER TABLE engagements
-        ADD COLUMN period tstzrange
-        GENERATED ALWAYS AS (
-          tstzrange(starts_at AT TIME ZONE 'UTC', ends_at AT TIME ZONE 'UTC', '[)')
-        ) STORED
-      """,
-      "ALTER TABLE engagements DROP COLUMN period"
-    )
+    execute("""
+    ALTER TABLE engagements
+      ADD COLUMN period tstzrange
+      GENERATED ALWAYS AS (
+        tstzrange(starts_at AT TIME ZONE 'UTC', ends_at AT TIME ZONE 'UTC', '[)')
+      ) STORED
+    """)
 
-    execute(
-      """
-      ALTER TABLE engagements
-        ADD CONSTRAINT #{@engagement_invitation_fkey}
-        FOREIGN KEY (invitation_id, venue_id)
-        REFERENCES invitations (id, venue_id)
-        MATCH FULL
-        ON DELETE RESTRICT
-      """,
-      "ALTER TABLE engagements DROP CONSTRAINT #{@engagement_invitation_fkey}"
-    )
+    execute("""
+    ALTER TABLE engagements
+      ADD CONSTRAINT #{@engagement_invitation_fkey}
+      FOREIGN KEY (invitation_id, venue_id)
+      REFERENCES invitations (id, venue_id)
+      MATCH FULL
+      ON DELETE RESTRICT
+    """)
 
     # The second MATCH SIMPLE, for the same reason as the first.
-    execute(
-      """
-      ALTER TABLE engagements
-        ADD CONSTRAINT #{@engagement_grant_fkey}
-        FOREIGN KEY (grant_id, venue_id)
-        REFERENCES employer_grants (id, venue_id)
-        MATCH SIMPLE
-        ON DELETE RESTRICT
-      """,
-      "ALTER TABLE engagements DROP CONSTRAINT #{@engagement_grant_fkey}"
-    )
+    execute("""
+    ALTER TABLE engagements
+      ADD CONSTRAINT #{@engagement_grant_fkey}
+      FOREIGN KEY (grant_id, venue_id)
+      REFERENCES employer_grants (id, venue_id)
+      MATCH SIMPLE
+      ON DELETE RESTRICT
+    """)
 
     # R3, in the database rather than in a `SELECT ... WHERE NOT EXISTS` that
     # two concurrent claims would both pass. Named, so the violation arrives as
     # a changeset error rather than as a raised `Postgrex.Error`.
-    execute(
-      """
-      ALTER TABLE engagements
-        ADD CONSTRAINT #{@overlap_constraint}
-        EXCLUDE USING gist (person_id WITH =, venue_id WITH =, period WITH &&)
-      """,
-      "ALTER TABLE engagements DROP CONSTRAINT #{@overlap_constraint}"
-    )
+    execute("""
+    ALTER TABLE engagements
+      ADD CONSTRAINT #{@overlap_constraint}
+      EXCLUDE USING gist (person_id WITH =, venue_id WITH =, period WITH &&)
+    """)
 
     # `>=` rather than `>`, and the difference is one reachable state.
     #
@@ -408,16 +403,13 @@ defmodule HospitalityComs.Repo.Migrations.CreateEngagements do
     create unique_index(:attested_entries, [:engagement_id])
     create index(:attested_entries, [:venue_id])
 
-    execute(
-      """
-      ALTER TABLE attested_entries
-        ADD CONSTRAINT #{@attested_entry_engagement_fkey}
-        FOREIGN KEY (engagement_id, venue_id)
-        REFERENCES engagements (id, venue_id)
-        MATCH FULL
-        ON DELETE RESTRICT
-      """,
-      "ALTER TABLE attested_entries DROP CONSTRAINT #{@attested_entry_engagement_fkey}"
-    )
+    execute("""
+    ALTER TABLE attested_entries
+      ADD CONSTRAINT #{@attested_entry_engagement_fkey}
+      FOREIGN KEY (engagement_id, venue_id)
+      REFERENCES engagements (id, venue_id)
+      MATCH FULL
+      ON DELETE RESTRICT
+    """)
   end
 end

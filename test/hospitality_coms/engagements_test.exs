@@ -481,6 +481,42 @@ defmodule HospitalityComs.EngagementsTest do
       assert DateTime.compare(second.starts_at, first.ends_at) == :eq
     end
 
+    test "refuses a reversed term through the generated range, before any CHECK sees it" do
+      # `engagements_term_not_reversed` is on the table and can never fire.
+      # `period` is `GENERATED ALWAYS AS tstzrange(starts_at, ends_at, '[)')`,
+      # generated expressions are evaluated while the tuple is formed, and
+      # `tstzrange/3` raises on a reversed pair before constraint checking
+      # begins. `Engagement` therefore declares no `check_constraint/3` against
+      # it, and this is what says the declaration would have been a lie.
+      {employer, _creation} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      engagement = engagement_fixture(employer, scope, %{starts_at: @now, ends_at: @in_a_month})
+
+      error =
+        assert_raise Postgrex.Error, fn ->
+          Repo.query!(
+            "UPDATE engagements SET ends_at = starts_at - interval '1 day' WHERE id = $1",
+            [Ecto.UUID.dump!(engagement.id)]
+          )
+        end
+
+      # SQLSTATE 22000, raised by `tstzrange/3` itself. Not 23514, which is
+      # what a CHECK violation would be, and no constraint is named at all.
+      assert error.postgres.code == :data_exception
+      assert error.postgres.message =~ "range lower bound must be less than or equal"
+      refute Map.has_key?(error.postgres, :constraint)
+
+      # The control: the same statement moving the bound the other way is
+      # accepted, so the refusal is about the ordering rather than about the
+      # column being generated at all.
+      assert {:ok, _result} =
+               Repo.query(
+                 "UPDATE engagements SET ends_at = starts_at + interval '1 day' WHERE id = $1",
+                 [Ecto.UUID.dump!(engagement.id)]
+               )
+    end
+
     test "does not stop one person holding terms at two venues at once" do
       # The key is `(person_id, venue_id, period)`, so concurrent engagements
       # at different employers are ordinary — and they are what U9's

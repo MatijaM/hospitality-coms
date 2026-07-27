@@ -58,6 +58,7 @@ defmodule HospitalityComs.BoundaryTest do
   @compile {:no_warn_undefined,
             HospitalityComs.Repo.Migrations.EnableEmployerZoneRowLevelSecurity}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreateVenues}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.EnableBtreeGist}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreateEngagements}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantEngagementZone}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.EnableEngagementRowLevelSecurity}
@@ -76,6 +77,7 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Repo
   alias HospitalityComs.Repo.Migrations.CreateEngagements
   alias HospitalityComs.Repo.Migrations.CreateVenues
+  alias HospitalityComs.Repo.Migrations.EnableBtreeGist
   alias HospitalityComs.Repo.Migrations.EnableEmployerZoneRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.EnableEngagementRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
@@ -94,6 +96,7 @@ defmodule HospitalityComs.BoundaryTest do
   @employer_zone_migration "grant_employer_zone"
   @row_security_migration "enable_employer_zone_row_level_security"
   @employer_tables_migration "create_venues"
+  @btree_gist_migration "enable_btree_gist"
   @engagement_tables_migration "create_engagements"
   @engagement_zone_migration "grant_engagement_zone"
   @engagement_row_security_migration "enable_engagement_row_level_security"
@@ -139,6 +142,7 @@ defmodule HospitalityComs.BoundaryTest do
     )
 
     load_migration(@employer_tables_migration, Code.ensure_loaded?(CreateVenues))
+    load_migration(@btree_gist_migration, Code.ensure_loaded?(EnableBtreeGist))
     load_migration(@engagement_tables_migration, Code.ensure_loaded?(CreateEngagements))
     load_migration(@engagement_zone_migration, Code.ensure_loaded?(GrantEngagementZone))
 
@@ -824,6 +828,71 @@ defmodule HospitalityComs.BoundaryTest do
       # would report every table as compliant.
       assert "employer_grants" in tables_with_composite_key()
       assert "shift_types" in tables_with_composite_key()
+    end
+
+    test "keys every composite foreign key MATCH FULL unless a column of it can be null" do
+      # KTD2 asks for MATCH FULL: a composite key into the employer zone is
+      # either wholly null or wholly present, so a row cannot half-reference a
+      # grant at some other venue. `MATCH SIMPLE` skips the check the moment
+      # *any* column is null, which is what a nullable id needs — `venue_id` is
+      # `NOT NULL` everywhere, so MATCH FULL on a key whose id is optional would
+      # reject every row that legitimately references nothing.
+      #
+      # Asserted as the derived rule rather than against a list, because a list
+      # is a thing somebody has to remember to extend. Nothing pinned either
+      # before this.
+      wrong =
+        Enum.reject(composite_foreign_keys(), fn key ->
+          key.match_type == expected_match_type(key.nullable?)
+        end)
+
+      assert wrong == [],
+             """
+             These composite foreign keys do not match the rule: #{inspect(wrong)}
+
+             A composite key with no nullable column must be MATCH FULL (`f`), \
+             so a row cannot reference an id at one venue while naming another. \
+             One with a nullable column must be MATCH SIMPLE (`s`), because \
+             MATCH FULL would reject every row that references nothing at all.
+             """
+    end
+
+    test "has exactly these composite foreign keys, and exactly these are nullable" do
+      # The inventory the rule above is derived over, so a new key is noticed
+      # rather than absorbed. It is also the control: a rule quantified over an
+      # empty set holds for any rule at all.
+      assert Map.new(composite_foreign_keys(), &{&1.name, {&1.match_type, &1.nullable?}}) == %{
+               "attested_entries_engagement_fkey" => {"f", false},
+               "employer_grants_granted_by_fkey" => {"s", true},
+               "employer_grants_revoked_by_fkey" => {"s", true},
+               "engagements_grant_fkey" => {"s", true},
+               "engagements_invitation_fkey" => {"f", false},
+               "invitations_grant_fkey" => {"s", true},
+               "invitations_issued_by_grant_fkey" => {"f", false}
+             }
+    end
+  end
+
+  describe "the btree_gist extension" do
+    test "cannot be rolled back under the exclusion constraint that needs it" do
+      # The claim its moduledoc makes and nothing asserted: `DROP EXTENSION`
+      # plain rather than CASCADE, so an out-of-order rollback stops instead of
+      # silently taking `engagements_no_overlap` — and with it R3 — away. Ecto
+      # rolls back in reverse, so the ordinary path drops the constraint first;
+      # this is the path that does not. `grant_zones` has the parallel test and
+      # this one did not.
+      assert_raise Postgrex.Error, ~r/dependent_objects_still_exist/, fn ->
+        migrate_btree_gist(:down)
+      end
+    end
+
+    test "drops only an extension it created, and says which case a database is in" do
+      # `up` is `IF NOT EXISTS`, so on a database that already had `btree_gist`
+      # it does nothing — and a `down` that dropped unconditionally would then
+      # remove an extension somebody else installed. `up` records provenance in
+      # the extension's comment and `down` reads it back.
+      assert extension_comment("btree_gist") ==
+               "created by hospitality_coms; see priv/repo/migrations/*_enable_btree_gist.exs"
     end
   end
 
@@ -1560,6 +1629,15 @@ defmodule HospitalityComs.BoundaryTest do
     apply(Ecto.Migrator, direction, [Repo, migration_version(name), module, @migrator_opts])
   end
 
+  defp migrate_btree_gist(direction) do
+    apply(Ecto.Migrator, direction, [
+      Repo,
+      migration_version(@btree_gist_migration),
+      EnableBtreeGist,
+      @migrator_opts
+    ])
+  end
+
   # U5's migrations rolled off and put back, around `between`.
   #
   # `engagements` references `venues`, `employer_grants` and `people`, and its
@@ -1834,6 +1912,45 @@ defmodule HospitalityComs.BoundaryTest do
       )
 
     %{nullable: nullable, on_delete: on_delete}
+  end
+
+  # Every foreign key in this schema whose key is more than one column, with the
+  # `MATCH` type Postgres recorded and whether any of its columns can be null.
+  defp composite_foreign_keys do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT c.conname,
+               c.confmatchtype,
+               bool_or(NOT a.attnotnull)
+        FROM pg_constraint c
+        JOIN pg_namespace n ON n.oid = c.connamespace
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+        WHERE c.contype = 'f'
+          AND n.nspname = 'public'
+          AND array_length(c.conkey, 1) > 1
+        GROUP BY c.conname, c.confmatchtype
+        ORDER BY 1
+        """,
+        []
+      )
+
+    Enum.map(rows, fn [name, match_type, nullable?] ->
+      %{name: name, match_type: match_type, nullable?: nullable?}
+    end)
+  end
+
+  defp expected_match_type(true), do: "s"
+  defp expected_match_type(false), do: "f"
+
+  defp extension_comment(name) do
+    %{rows: [[comment]]} =
+      Repo.query!(
+        "SELECT obj_description(oid, 'pg_extension') FROM pg_extension WHERE extname = $1",
+        [name]
+      )
+
+    comment
   end
 
   defp exclusion_constraints(table) do
