@@ -1,7 +1,15 @@
 defmodule HospitalityComs.PubSub do
   @moduledoc """
-  Every topic this application publishes on, and the one door that subscribes to
-  them.
+  Every topic this application publishes on, and the door that scope-checks a
+  subscription to one.
+
+  **It is not the only way a process becomes a subscriber, and saying so
+  mattered enough to correct.** `Phoenix.Channel.Server` subscribes every
+  joined channel to its own topic, from inside the framework, without passing
+  through `subscribe/2` — which is exactly how a room channel comes to receive
+  the messages `broadcast!/3` sends. What this module governs is the
+  subscriptions the *application* makes on purpose: the peer topic, the
+  employer topic, and an engagement's revocation.
 
   ## Why subscription needs a boundary of its own
 
@@ -33,12 +41,29 @@ defmodule HospitalityComs.PubSub do
       person cannot subscribe to another person's peer topic, and the refusal is
       a function clause rather than a comparison somebody has to write.
 
-  Two targets cannot be pinned structurally, and they are not a hole. A room
-  topic and an engagement topic are authorized by the join that resolved them —
-  `HospitalityComsWeb.VenueRoomChannel` and `ShiftRoomChannel` derive membership
-  from the database before they subscribe, and it is that derivation, not this
-  module, that decides who may listen. What this module refuses is the *kind* of
-  caller.
+  ## Three targets are not gated here at all, and that is worth stating plainly
+
+  `{:venue_room, _}`, `{:shift_room, _}` and `{:engagement, _}` accept **any**
+  id from any person scope. There is nothing on a person scope to pin them
+  against, and no query is issued, so this module cannot and does not decide
+  who may listen to them.
+
+  **The caller authorizes them, not this module.** `HospitalityComsWeb
+  .VenueRoomChannel` and `ShiftRoomChannel` derive membership from the database
+  and subscribe to the engagement the read returned; that derivation is the
+  authorization, and a second caller that subscribed to an id it got from a
+  payload would be authorized by nothing. Read these three clauses as a
+  *type* check — is this the right kind of scope — and never as an access
+  check.
+
+  Nothing in the grant tier would notice if that changed. `subscribe` issues no
+  query, so no privilege, no `EmployerRepo` backstop and no row-level security
+  policy is in a position to have an opinion; the whole database-tier defence is
+  blind here. That is the reason this paragraph is not a footnote.
+
+  What this module *does* refuse, in both directions, is the kind of caller: an
+  employer scope handed any of the three, and a person scope handed the
+  employer's.
 
   ## The module and the server share a name
 
@@ -110,6 +135,10 @@ defmodule HospitalityComs.PubSub do
   names a venue other than its own, and when the scope is anonymous — an
   anonymous caller holds no engagements and belongs to no room, so there is
   nothing for it to be subscribed to.
+
+  It raises for **no** id handed to `{:venue_room, _}`, `{:shift_room, _}` or
+  `{:engagement, _}` by a person scope. Those three are authorized by the caller
+  that resolved the id and by nothing here; see the moduledoc.
 
   `{:error, {:already_registered, pid}}` is `Registry.register/3`'s only failure
   and it cannot happen here: `Phoenix.PubSub`'s registry is `keys: :duplicate`

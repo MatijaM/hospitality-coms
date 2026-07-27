@@ -99,11 +99,18 @@ defmodule HospitalityComs.PubSubTest do
       assert delivered?(target)
     end
 
-    test "can subscribe to a room topic and to an engagement's revocation" do
-      # The two targets that cannot be pinned structurally. What authorizes them
-      # is the join that resolved them — see the moduledoc of
-      # `HospitalityComs.PubSub` — and what this module refuses is the kind of
-      # caller.
+    test "can subscribe to any venue room, shift room or engagement id at all" do
+      # **Three targets, and this module gates none of them.** The ids below name
+      # nothing — they are freshly generated — and every subscription succeeds,
+      # which is the honest statement of what these clauses check: the *kind* of
+      # scope, never the access.
+      #
+      # What authorizes them is the caller that resolved the id, which today is
+      # a `join/3` that read membership from the database first. Asserting the
+      # permissiveness rather than leaving it implied is what stops the next
+      # reader taking these clauses for a gate — and `subscribe` issues no
+      # query, so no privilege and no row-level security policy would notice if
+      # they did.
       scope = person_scope()
 
       for target <- [
