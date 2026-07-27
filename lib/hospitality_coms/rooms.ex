@@ -297,6 +297,29 @@ defmodule HospitalityComs.Rooms do
   end
 
   @doc """
+  This person's membership of a venue room at their scope's instant, as the
+  engagement behind it.
+
+  The same question `venue_room_member?/2` answers, returning the row rather
+  than a boolean, because two callers need what the row carries.
+  `HospitalityComsWeb.VenueRoomChannel` is one: a channel has to name the
+  engagement to subscribe to its revocation (`HospitalityComs.Engagements
+  .topic/1` is per engagement, by KTD7's reasoning) and to key its presence
+  entry on something that is not a person id (KTD15b). The context's own
+  message and history reads are the other, through the private
+  `fetch_membership/2` this delegates to.
+
+  `:not_a_member` covers an ended engagement, a suspension in force, and a
+  venue that does not exist, identically — so a caller supplying an arbitrary
+  venue id learns nothing from the refusal (AE1).
+  """
+  @spec fetch_venue_room_membership(PersonScope.t(), Ecto.UUID.t()) ::
+          {:ok, Engagement.t()} | {:error, :not_a_member}
+  def fetch_venue_room_membership(%PersonScope{} = scope, venue_id) when is_binary(venue_id) do
+    fetch_membership(scope, venue_id)
+  end
+
+  @doc """
   Whether this person is in the venue's room at their scope's instant.
   """
   @spec venue_room_member?(PersonScope.t(), Ecto.UUID.t()) :: boolean()
@@ -550,6 +573,39 @@ defmodule HospitalityComs.Rooms do
       when is_binary(shift_room_id) do
     match?({:ok, _engagement}, fetch_shift_room_member(scope, shift_room_id))
   end
+
+  @doc """
+  The engagement this person may read a shift room under, at their scope's
+  instant.
+
+  `shift_room_readable?/2` with the row instead of the boolean, and for the
+  reason `fetch_venue_room_membership/2` exists: a channel has to name the
+  engagement to subscribe to its revocation and to key presence on it.
+
+  Both compose the same `reader_engagement/3`, so "may read this room" is
+  written once. At most one row can come back — the exclusion constraint
+  `engagements_no_overlap` forbids one person holding two overlapping terms at
+  one venue, so a person has at most one engagement active at any instant there.
+
+  `:not_found` covers a room that does not exist and a room this person was
+  never rostered on alike, exactly as `list_shift_room_messages/2` does.
+  """
+  @spec fetch_shift_room_reader(PersonScope.t(), Ecto.UUID.t()) ::
+          {:ok, Engagement.t()} | {:error, :not_found}
+  def fetch_shift_room_reader(
+        %PersonScope{person: %Person{id: person_id}, now: now},
+        shift_room_id
+      )
+      when is_binary(person_id) and is_binary(shift_room_id) do
+    shift_room_id
+    |> reader_engagement(person_id, now)
+    |> Repo.one()
+    |> reader_or_refuse()
+  end
+
+  @spec reader_or_refuse(Engagement.t() | nil) :: {:ok, Engagement.t()} | {:error, :not_found}
+  defp reader_or_refuse(nil), do: {:error, :not_found}
+  defp reader_or_refuse(%Engagement{} = engagement), do: {:ok, engagement}
 
   @doc """
   Whether this person may read a shift room at their scope's instant.

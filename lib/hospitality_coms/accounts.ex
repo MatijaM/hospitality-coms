@@ -298,6 +298,22 @@ defmodule HospitalityComs.Accounts do
   end
 
   @doc """
+  The value a session token is stored under.
+
+  The SHA-256 digest of the bytes the holder carries — the same one every
+  lookup here hashes on its way to the column, exposed because a caller
+  sometimes needs to *identify* a session without holding a credential for it.
+  `HospitalityComsWeb.PersonSocket` is the caller: KTD7 makes a socket's id the
+  session it belongs to, and a socket id is a PubSub topic that crosses
+  distributed Erlang on every broadcast. Naming it after the digest rather than
+  the token is what keeps a working session out of telemetry.
+
+  One direction only. Nothing recovers the token from this.
+  """
+  @spec session_token_digest(binary()) :: binary()
+  def session_token_digest(token) when is_binary(token), do: PersonToken.hash_token(token)
+
+  @doc """
   Gets the person the given session token belongs to, as of `now`.
 
   Returns `{person, token_inserted_at}` when the token is live, and nil when it

@@ -190,6 +190,26 @@ defmodule HospitalityComs.Engagements.Records do
   end
 
   @doc """
+  Engagements holding an authority the venue has not revoked by `instant`.
+
+  The same "holds an authority" `decision_set/4` spells inside its own `where`,
+  composable on its own, because a second caller needs it:
+  `HospitalityComs.Engagements.fetch_grant_holding_engagement/2` is what turns
+  an authenticated person into an employer session, and it must mean exactly
+  what ending the venue's last holder means. A grant revoked a second ago is not
+  an authority in one place and an authority in the other.
+
+  A subquery in `where` for the reason `decision_set/4` gives: it adds no
+  relation for a `FOR UPDATE` to lock.
+  """
+  @spec holding_live_grant(Ecto.Queryable.t(), Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  def holding_live_grant(queryable, venue_id, %DateTime{} = instant) when is_binary(venue_id) do
+    live_grants = live_grant_ids(venue_id, instant)
+
+    from engagement in queryable, where: engagement.grant_id in subquery(live_grants)
+  end
+
+  @doc """
   Oldest term first, with `id` breaking ties.
 
   Ordering by `id` alone is random on a `binary_id` schema, so "oldest first"

@@ -50,6 +50,31 @@ defmodule HospitalityComsWeb.ErrorEnvelope do
   end
 
   @doc """
+  Builds the envelope for a changeset, with its errors interpolated.
+
+  The traversal lives here rather than at each call site because there are now
+  three of them — `HospitalityComsWeb.SessionController`,
+  `HospitalityComsWeb.VenueRoomChannel` and `ShiftRoomChannel` — and the
+  interpolation of Ecto's `%{count}` placeholders is exactly the kind of detail
+  that drifts when it is written out more than once. The moduledoc's claim that
+  every error body is built here is otherwise not true.
+  """
+  @spec for_changeset(atom(), String.t(), Ecto.Changeset.t()) :: with_fields()
+  def for_changeset(code, message, %Ecto.Changeset{} = changeset)
+      when is_atom(code) and is_binary(message) do
+    new(code, message, changeset_errors(changeset))
+  end
+
+  @spec changeset_errors(Ecto.Changeset.t()) :: fields()
+  defp changeset_errors(changeset) do
+    Ecto.Changeset.traverse_errors(changeset, fn {message, opts} ->
+      Regex.replace(~r"%{(\w+)}", message, fn _whole, key ->
+        opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
+      end)
+    end)
+  end
+
+  @doc """
   Builds the envelope for a status nobody wrote a message for.
 
   The code and the message both come from the status itself, which is what

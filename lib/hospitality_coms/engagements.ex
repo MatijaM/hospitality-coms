@@ -494,6 +494,51 @@ defmodule HospitalityComs.Engagements do
   end
 
   @doc """
+  This person's engagement at `venue_id`, if it is active at their scope's
+  instant *and* holds an authority the venue has not revoked.
+
+  What turns an authenticated person into an employer session. There is no
+  separate employer credential in this application and there should not be one:
+  a manager's authority derives from a grant, and `engagements.grant_id` is the
+  column that records they hold it — so the question "may this human act for
+  this venue" is a question about the bridge, and this is where it is asked.
+
+  Person-scoped and run through `HospitalityComs.Repo`, because it reads a
+  person's own engagement by `person_id` and then asks `employer_grants`
+  whether the authority it names is live. No employer session may ask the first
+  half; no person session holds the privilege for the second. It is the same
+  reason `claim_invitation/2` runs as the application's own role.
+
+  Re-derived on every call and cached nowhere.
+  `HospitalityComsWeb.EmployerVenueChannel` asks it again at every join, which
+  is KTD8 applied to the employer's side: a grant revoked a second ago produces
+  a refused join with no job having run.
+
+  `:no_grant` covers an ended engagement, an engagement holding nothing, an
+  engagement whose grant was revoked, and a venue that does not exist —
+  identically, so the refusal enumerates nothing.
+  """
+  @spec fetch_grant_holding_engagement(PersonScope.t(), Ecto.UUID.t()) ::
+          {:ok, Engagement.t()} | {:error, :no_grant}
+  def fetch_grant_holding_engagement(
+        %PersonScope{person: %Person{id: person_id}, now: now},
+        venue_id
+      )
+      when is_binary(person_id) and is_binary(venue_id) do
+    Engagement
+    |> Records.of_person(person_id)
+    |> Records.of_venue(venue_id)
+    |> Records.active_at(now)
+    |> Records.holding_live_grant(venue_id, now)
+    |> Repo.one()
+    |> holder_or_refuse()
+  end
+
+  @spec holder_or_refuse(Engagement.t() | nil) :: {:ok, Engagement.t()} | {:error, :no_grant}
+  defp holder_or_refuse(nil), do: {:error, :no_grant}
+  defp holder_or_refuse(%Engagement{} = engagement), do: {:ok, engagement}
+
+  @doc """
   Every engagement this person has ever held, active or not.
 
   The portable record's spine: KTD16 gives engagements and attested entries no
