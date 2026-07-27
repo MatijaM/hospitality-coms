@@ -149,11 +149,17 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
   end
 
   @doc """
-  Tracks the joiner's presence, and stops the channel when its engagement ends.
+  Tracks the joiner's presence, and stops the channel when its access ends.
+
+  Two ways it ends, and they are told apart on the wire because they mean
+  opposite things to whoever is reading the client: `"access_revoked"` is the
+  employer closing a term, `"access_suspended"` is this person opting out of
+  this room (KTD18) — possibly from another device, which is why the channel
+  hears about it at all.
   """
   @impl true
   @spec handle_info(term(), Socket.t()) ::
-          {:noreply, Socket.t()} | {:stop, {:shutdown, :revoked}, Socket.t()}
+          {:noreply, Socket.t()} | {:stop, {:shutdown, :revoked | :suspended}, Socket.t()}
   def handle_info(:after_join, socket), do: RoomChannel.joined(socket)
 
   def handle_info({:engagement_revoked, %{engagement_id: engagement_id} = revocation}, socket) do
@@ -165,6 +171,15 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
     )
   end
 
+  def handle_info({:venue_room_suspended, %{engagement_id: engagement_id} = notice}, socket) do
+    RoomChannel.closed(
+      engagement_id == socket.assigns.engagement.id,
+      suspension_closure(socket),
+      notice,
+      socket
+    )
+  end
+
   def handle_info(_message, socket), do: RoomChannel.ignored(socket)
 
   @spec revocation_closure(Socket.t()) :: RoomChannel.closure()
@@ -172,6 +187,15 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
     %{
       event: "access_revoked",
       reason: :revoked,
+      room: %{venue_id: socket.assigns.venue_id}
+    }
+  end
+
+  @spec suspension_closure(Socket.t()) :: RoomChannel.closure()
+  defp suspension_closure(socket) do
+    %{
+      event: "access_suspended",
+      reason: :suspended,
       room: %{venue_id: socket.assigns.venue_id}
     }
   end

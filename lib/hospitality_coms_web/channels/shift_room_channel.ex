@@ -159,6 +159,14 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
     )
   end
 
+  # KTD18 confines suspension to the venue room, so a shift room this person is
+  # rostered on is untouched by one. The nudge arrives here regardless, because
+  # the topic is per engagement and one engagement opens both kinds of channel —
+  # so ignoring it is written down as a decision rather than left to the
+  # catch-all below, where it would read as an oversight the day somebody
+  # widened what suspension means.
+  def handle_info({:venue_room_suspended, _notice}, socket), do: {:noreply, socket}
+
   def handle_info(_message, socket), do: RoomChannel.ignored(socket)
 
   @spec revocation_closure(Socket.t()) :: RoomChannel.closure()

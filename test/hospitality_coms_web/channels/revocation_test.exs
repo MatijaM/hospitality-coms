@@ -38,6 +38,7 @@ defmodule HospitalityComsWeb.RevocationTest do
   use HospitalityComsWeb.ChannelCase
 
   alias HospitalityComs.Engagements
+  alias HospitalityComs.Rooms
   alias HospitalityComsWeb.PersonSocket
 
   @now HospitalityComs.EngagementsFixtures.fixed_instant()
@@ -227,6 +228,119 @@ defmodule HospitalityComsWeb.RevocationTest do
     end
   end
 
+  describe "suspending a venue room" do
+    test "pushes a terminal event and stops that venue's room channel" do
+      # KTD18's opt-out reaching a channel that is already open. Without it the
+      # person keeps receiving the room's messages and keeps appearing in
+      # presence until they happen to rejoin — which contradicts
+      # `Rooms.suspend_venue_room/2`'s own doc, and which matters most when the
+      # session that opted out is a different device from the one still joined.
+      Process.flag(:trap_exit, true)
+      world = two_venues()
+      %{venue: venue, engagement: engagement} = world.a
+
+      {:ok, _reply, channel} = subscribe_and_join(world.socket, venue_topic(venue), %{})
+      channel_pid = channel.channel_pid
+
+      assert {:ok, _suspension} = Rooms.suspend_venue_room(world.person, venue.id)
+
+      assert_push "access_suspended", suspended
+      assert suspended.venue_id == venue.id
+      assert suspended.engagement_id == engagement.id
+      assert_receive {:EXIT, ^channel_pid, {:shutdown, :suspended}}
+    end
+
+    test "leaves that venue's shift room channel alone" do
+      # KTD18 confines suspension to the venue room. The nudge arrives on the
+      # shift room's channel too, because the topic is per engagement, and
+      # ignoring it there is the decision rather than the fall-through: a person
+      # who opts out of the standing conversation is still on the roster.
+      Process.flag(:trap_exit, true)
+      world = two_venues()
+      %{venue: venue, employer: employer, engagement: engagement} = world.a
+      room = shift_room(employer, engagement)
+
+      {:ok, _venue_reply, venue_channel} =
+        subscribe_and_join(world.socket, venue_topic(venue), %{})
+
+      {:ok, _shift_reply, shift_channel} =
+        subscribe_and_join(world.socket, shift_topic(room), %{})
+
+      venue_pid = venue_channel.channel_pid
+      shift_pid = shift_channel.channel_pid
+
+      assert {:ok, _suspension} = Rooms.suspend_venue_room(world.person, venue.id)
+
+      assert_receive {:EXIT, ^venue_pid, {:shutdown, :suspended}}
+      refute_receive {:EXIT, ^shift_pid, _reason}
+      assert Process.alive?(shift_pid)
+
+      assert {:ok, _rejoined, _channel} = join(world.socket, shift_topic(room), %{})
+    end
+
+    test "leaves the other venue's room channel joined" do
+      # The suspension is per engagement, so it says nothing about the venue the
+      # person did not opt out of. Without this, a nudge broadcast per person
+      # would pass the test above.
+      Process.flag(:trap_exit, true)
+      world = two_venues()
+
+      {:ok, _a_reply, a_channel} =
+        subscribe_and_join(world.socket, venue_topic(world.a.venue), %{})
+
+      {:ok, _b_reply, b_channel} =
+        subscribe_and_join(world.socket, venue_topic(world.b.venue), %{})
+
+      a_pid = a_channel.channel_pid
+      b_pid = b_channel.channel_pid
+
+      assert {:ok, _suspension} = Rooms.suspend_venue_room(world.person, world.b.venue.id)
+
+      assert_receive {:EXIT, ^b_pid, {:shutdown, :suspended}}
+      refute_receive {:EXIT, ^a_pid, _reason}
+      assert Process.alive?(a_pid)
+    end
+
+    test "refuses the rejoin that follows, and admits it again after a resume" do
+      # The guarantee behind the nudge, and its control. `join/3` re-derives
+      # membership, which is U6's predicate minus a suspension — so the refusal
+      # holds whether or not any broadcast arrived, and lifting the suspension
+      # lifts it.
+      Process.flag(:trap_exit, true)
+      world = two_venues()
+      %{venue: venue} = world.a
+
+      {:ok, _reply, channel} = subscribe_and_join(world.socket, venue_topic(venue), %{})
+      channel_pid = channel.channel_pid
+
+      assert {:ok, _suspension} = Rooms.suspend_venue_room(world.person, venue.id)
+      assert_receive {:EXIT, ^channel_pid, {:shutdown, :suspended}}
+
+      assert {:error, refusal} = join(world.socket, venue_topic(venue), %{})
+      assert refusal.error == @refused
+
+      assert {:ok, _resumed} = Rooms.resume_venue_room(world.person, venue.id)
+      assert {:ok, _rejoined, _rejoined_channel} = join(world.socket, venue_topic(venue), %{})
+    end
+
+    test "a suspension that writes nothing announces nothing" do
+      # The after-commit ordering `Engagements.announce/1` already has, applied
+      # here: a nudge for a write that did not happen would close a channel
+      # whose access never ended. The first suspension broadcasting is asserted
+      # above, so this is not "the topic is silent" passing for want of a
+      # working broadcast.
+      world = two_venues()
+      %{venue: venue, engagement: engagement} = world.a
+
+      assert {:ok, _suspension} = Rooms.suspend_venue_room(world.person, venue.id)
+
+      :ok = Engagements.subscribe(engagement.id)
+
+      assert {:error, :already_suspended} = Rooms.suspend_venue_room(world.person, venue.id)
+      refute_receive {:venue_room_suspended, _notice}
+    end
+  end
+
   describe "an unmatched message on the engagement topic" do
     test "leaves every channel joined under that engagement alive" do
       # The engagement topic is shared by every channel that engagement opened,
@@ -321,6 +435,7 @@ defmodule HospitalityComsWeb.RevocationTest do
     %{
       a: venue_with_engagement(person),
       b: venue_with_engagement(person),
+      person: person,
       socket: person_socket(person)
     }
   end

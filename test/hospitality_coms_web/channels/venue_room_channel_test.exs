@@ -173,14 +173,28 @@ defmodule HospitalityComsWeb.VenueRoomChannelTest do
       assert refusal.error == @refused
     end
 
-    test "is refused once the person suspends the room, on a channel already joined" do
+    test "is unreachable once the person suspends the room: the channel is gone" do
+      # This test used to push after suspending and assert a refused reply. U7's
+      # review closed the hole that made that reachable — suspension broadcast
+      # nothing, so the channel stayed open and the person kept *receiving* the
+      # room until they happened to rejoin. The channel now stops, so there is
+      # no send to refuse.
+      #
+      # The refusal itself is not lost and is not asserted here, because the
+      # broadcast that stops the channel is best effort: what has to hold when
+      # it goes missing is `Rooms.send_venue_room_message/3` refusing a
+      # suspended sender at the instant of the send, and that is asserted in
+      # `HospitalityComs.RoomsTest` where no nudge can reach it.
+      Process.flag(:trap_exit, true)
       %{venue: venue, person: person, socket: socket} = engaged()
       {:ok, _reply, channel} = subscribe_and_join(socket, topic(venue), %{})
+      channel_pid = channel.channel_pid
 
       assert {:ok, _suspension} = Rooms.suspend_venue_room(person, venue.id)
 
-      ref = push(channel, "send", %{"body" => "opted out a second ago"})
-      assert_reply ref, :error, _refusal
+      assert_push "access_suspended", suspended
+      assert suspended.venue_id == venue.id
+      assert_receive {:EXIT, ^channel_pid, {:shutdown, :suspended}}
     end
 
     test "refuses a payload with no body" do

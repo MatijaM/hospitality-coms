@@ -102,10 +102,13 @@ defmodule HospitalityComs.Rooms do
 
   import Ecto.Query
 
+  require Logger
+
   alias HospitalityComs.Accounts.EmployerScope
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.EmployerRepo
+  alias HospitalityComs.Engagements
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms.Records
@@ -426,6 +429,25 @@ defmodule HospitalityComs.Rooms do
   look like having no engagement. `:already_suspended` is the honest answer, and
   the exclusion constraint underneath is what makes it safe when two of the
   person's own sessions ask at once.
+
+  ## The nudge, and why it is needed at all
+
+  A suspension is derived like everything else here, so the *next* join is
+  refused whether or not anything was announced. What that does not do is close
+  a channel the person already has open — and until it does, the sentence above
+  about not being able to read the room is false for as long as that channel
+  lives, which can be hours. It matters most in the case the opt-out is for: the
+  person taps it on their phone while their laptop is still in the room.
+
+  So the write is followed by a broadcast on the engagement's own topic — U5's,
+  through `HospitalityComs.Engagements.topic/1`, not a second mechanism — after
+  the write and only if it happened, for the reason KTD8 gives. Per engagement
+  rather than per person, so opting out of Venue B says nothing about Venue A.
+
+  **Best effort, and logged rather than propagated**, exactly as
+  `HospitalityComs.Engagements`' revocation announcement is: failing somebody's
+  opt-out in order to report that a socket was not told would be the wrong
+  trade, and the refused rejoin is the guarantee in any case.
   """
   @spec suspend_venue_room(PersonScope.t(), Ecto.UUID.t()) ::
           {:ok, VenueRoomSuspension.t()}
@@ -437,7 +459,52 @@ defmodule HospitalityComs.Rooms do
       engagement.id
       |> VenueRoomSuspension.open_changeset(scope.now)
       |> Repo.insert()
+      |> announce_suspension(engagement)
     end
+  end
+
+  # Only on `{:ok, _}`. A nudge for a write that did not happen would close a
+  # channel whose access never ended (KTD8's ordering, from the person's side).
+  @spec announce_suspension(
+          {:ok, VenueRoomSuspension.t()} | {:error, Ecto.Changeset.t(VenueRoomSuspension.t())},
+          Engagement.t()
+        ) ::
+          {:ok, VenueRoomSuspension.t()} | {:error, Ecto.Changeset.t(VenueRoomSuspension.t())}
+  defp announce_suspension({:ok, %VenueRoomSuspension{} = suspension} = result, engagement) do
+    broadcast_suspension(engagement, suspension.suspended_at)
+    result
+  end
+
+  defp announce_suspension(result, _engagement), do: result
+
+  # `{:error, :no_such_group}` is the one failure the `:pg` adapter can name,
+  # and on OTP's `:pg` it is unreachable — `:pg.get_members/2` answers `[]` for
+  # a group nobody has joined. The clause is here because the library's
+  # contract allows it, and the log line is what makes it visible if the
+  # adapter ever changes. No `person_id` in the line: KTD2's rule about naming
+  # humans does not stop at the schemas the application owns.
+  @spec broadcast_suspension(Engagement.t(), DateTime.t()) :: :ok
+  defp broadcast_suspension(%Engagement{} = engagement, %DateTime{} = instant) do
+    HospitalityComs.PubSub
+    |> Phoenix.PubSub.broadcast(
+      Engagements.topic(engagement.id),
+      {:venue_room_suspended,
+       %{engagement_id: engagement.id, venue_id: engagement.venue_id, at: instant}}
+    )
+    |> announced(engagement)
+  end
+
+  @spec announced(:ok | {:error, term()}, Engagement.t()) :: :ok
+  defp announced(:ok, _engagement), do: :ok
+
+  defp announced({:error, reason}, %Engagement{} = engagement) do
+    Logger.warning(
+      "venue room suspension was not announced " <>
+        "engagement_id=#{engagement.id} venue_id=#{engagement.venue_id} " <>
+        "reason_code=#{inspect(reason)}"
+    )
+
+    :ok
   end
 
   @spec unsuspended(Engagement.t(), DateTime.t()) :: :ok | {:error, :already_suspended}
