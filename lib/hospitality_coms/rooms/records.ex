@@ -78,14 +78,21 @@ defmodule HospitalityComs.Rooms.Records do
   scope through `HospitalityComs.EmployerRepo` and under a person scope through
   `HospitalityComs.Repo` alike.
 
-  Venue-room membership is not. It subtracts `venue_room_suspensions`, which is
-  a **person-zone** table (KTD18), so any employer-scoped query reaching
-  `unsuspended/2` raises `HospitalityComs.EmployerRepo.ZoneViolationError`
-  before Postgres is asked, and Postgres would refuse it for want of privilege
-  if the backstop were removed. There is deliberately no employer-side venue-room
-  membership function: an employer that could ask who is in the room could learn
-  who has opted out by noticing an absence, which is exactly the retaliation
-  surface KTD18 exists to close.
+  Anything reaching `unsuspended/2` is not. It subtracts
+  `venue_room_suspensions`, which is a **person-zone** table (KTD18), so an
+  employer-scoped query composing it raises
+  `HospitalityComs.EmployerRepo.ZoneViolationError` before Postgres is asked,
+  and Postgres would refuse it for want of privilege if the backstop were
+  removed. Two queries reach it and both are about one named person:
+  `venue_room_membership/3` and `venues_of_person/2`.
+
+  `venue_room_members/2` deliberately does **not**, and its docstring is where
+  that argument is written down. A roll that subtracted suspensions would differ
+  from `HospitalityComs.Engagements.list_engagements/1` by exactly the set of
+  people who had opted out — and a manager holds both scopes, so the difference
+  is one subtraction away from anybody the guarantee is aimed at. The grant tier
+  keeps the *rows* out of employer reach; keeping the two lists identical is
+  what keeps the fact out of reach.
   """
 
   import Ecto.Query
@@ -366,20 +373,45 @@ defmodule HospitalityComs.Rooms.Records do
   end
 
   @doc """
-  The venue room's membership at `instant`: active engagements, minus
-  suspensions.
+  The venue room's roll at `instant`: the venue's active engagements.
 
   R9 in one query, and nothing stores it. Advancing the clock past an
-  engagement's upper bound removes that person with no job having run, and a
-  suspension opened a second ago removes them on the next call for the same
-  reason.
+  engagement's upper bound removes that person with no job having run.
+
+  **It does not subtract suspensions, and that is KTD18 rather than an
+  omission.** This set is exactly what `HospitalityComs.Engagements
+  .list_engagements/1` already returns to an employer session, and it has to
+  stay exactly that. A manager is a worker too — they hold an engagement like
+  anybody else — so one caller can hold an employer scope and a person scope at
+  the same venue and read both lists in the same breath. Subtract suspensions
+  here and the difference between the two lists *is* the set of people who have
+  opted out, recovered by arithmetic from inside the room, with the grant tier
+  and the query backstop both intact and both bypassed.
+
+  Suspension is therefore not a departure from the room. It closes the
+  suspended person's own access and nothing else: `venue_room_membership/3`
+  keeps `unsuspended/2`, so they cannot read the room, cannot send to it, and do
+  not see it in their own list of rooms. Nobody else's answer changes, which is
+  what makes the opt-out unobservable rather than merely unlogged.
+
+  Nothing is lost by the roll being wider than the set that can read the room
+  *right now*: the venue room carries full history (R14, KTD14), so a suspended
+  person reads everything said while they were away the moment they resume. The
+  roll was never a list of who is looking.
+
+  **Returns whole `HospitalityComs.Engagements.Engagement` structs, and one of
+  their fields is `person_id`.** U8/U9 render this to every member of the room;
+  they should project a field list rather than the struct, and attribute on
+  `id` — the `author_engagement_id` a message already carries (KTD15b), which is
+  venue-local by construction — rather than on `person_id`. The same note sits
+  on `HospitalityComs.Engagements.Records.outstanding_invitations/2` for the
+  same reason.
   """
   @spec venue_room_members(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
   def venue_room_members(venue_id, %DateTime{} = instant) when is_binary(venue_id) do
     Engagement
     |> EngagementRecords.of_venue(venue_id)
     |> EngagementRecords.active_at(instant)
-    |> unsuspended(instant)
     |> EngagementRecords.oldest_first()
   end
 

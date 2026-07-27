@@ -7,9 +7,10 @@ defmodule HospitalityComs.Rooms do
   Stored: a shift room's term and the grace it was created with, a roster
   entry's period, a message, and a person's own suspension period. That is all.
 
-  Not stored, and never: who is in a room. Venue-room membership is
-  `active engagement at this instant, minus a suspension containing it`.
-  Shift-room membership is `roster period containing this instant, in a room
+  Not stored, and never: who is in a room. The venue room's roll is
+  `active engagement at this instant`; whether *this* person may reach it is
+  that, minus a suspension containing the instant. Shift-room membership is
+  `roster period containing this instant, in a room
   open at it, holding an engagement active at it`. Shift-room *readability* is
   `roster period overlapping the room's open window, holding an engagement
   active now`. Every one of them is a query, and the same call at a later
@@ -63,23 +64,40 @@ defmodule HospitalityComs.Rooms do
   nothing at all on `room_messages`, so the send could not run as the employer
   even if a caller wanted it to.
 
-  There is deliberately **no employer-side venue-room membership function.** An
-  employer that could ask who is in the room could learn who has opted out by
-  noticing an absence, which is exactly the retaliation surface KTD18 exists to
-  close. Shift-room membership has no such problem — the employer wrote the
-  roster — so it is answerable from both sides.
+  There is deliberately **no employer-side venue-room membership function**, and
+  it would be redundant rather than dangerous: the venue room's roll is the
+  venue's active engagements, which is exactly what
+  `HospitalityComs.Engagements.list_engagements/1` already answers. Keeping the
+  two sets identical is the point — see below. Shift-room membership is
+  answerable from both sides for a different reason: the employer wrote the
+  roster, so nothing in the answer is theirs to learn.
 
   ## Suspension
 
   KTD18: the venue room only, reversible at will, invisible to the employer. It
-  is a period rather than a flag, in a person-zone table, so the invisibility is
-  a property of the Postgres grants rather than of a `select` list. See
+  is a period rather than a flag, in a person-zone table, so no employer session
+  can read the row — `employer_role` holds no privilege on
+  `venue_room_suspensions` and `HospitalityComs.EmployerRepo`'s query backstop
+  refuses any query that reaches it. See
   `HospitalityComs.Rooms.VenueRoomSuspension`.
 
-  A suspended person is out of the venue room: not in its membership, unable to
-  send, unable to read while they are out. On resuming they see the room's full
-  history, including everything sent while they were away, because history is
-  not filtered by who was in the room when it was written.
+  **Suspension closes the suspended person's own access and nothing else.** They
+  cannot read the venue room, cannot send to it, and do not see it in
+  `list_venue_rooms/1`. What it deliberately does *not* do is take them off the
+  room's roll: `list_venue_room_members/2` answers with the venue's active
+  engagements, unfiltered, which is the same set the employer can already list.
+
+  That is the guarantee rather than a hole in it. A grant tier that hides the
+  suspension rows still leaks the fact if some other list is visibly one person
+  short — and a manager is a worker too, holding an employer scope and a person
+  scope at the same venue, so "read both lists and subtract" is one caller away.
+  The roll and `list_engagements/1` returning the same ids is what closes that,
+  and `HospitalityComs.RoomsTest` pins it.
+
+  Nothing is lost by the roll being wider than the set that can read the room at
+  this instant. The venue room carries full history, so on resuming a person
+  sees everything sent while they were away — the roll was never a list of who
+  is looking, and no venue-room message goes unread because of a suspension.
   """
 
   import Ecto.Query
@@ -288,12 +306,20 @@ defmodule HospitalityComs.Rooms do
   end
 
   @doc """
-  The venue room's membership at the scope's instant.
+  The venue room's roll at the scope's instant: the venue's active engagements.
 
   Person-scoped, and only reachable by somebody who is in the room themselves —
-  a room's membership is visible to the room. The set is engagements rather than
+  a room's roll is visible to the room. The set is engagements rather than
   people, because an engagement is what a message is attributed to and what
   carries the role label a client renders (KTD15b).
+
+  Suspensions are **not** subtracted, so this is the same set
+  `HospitalityComs.Engagements.list_engagements/1` returns to an employer
+  session. That equality is KTD18: see the moduledoc and
+  `HospitalityComs.Rooms.Records.venue_room_members/2`.
+
+  A suspended *caller* still gets `{:error, :not_a_member}` — the refusal is
+  about their own access, which is the one thing suspension governs.
   """
   @spec list_venue_room_members(PersonScope.t(), Ecto.UUID.t()) ::
           {:ok, [Engagement.t()]} | {:error, :not_a_member}

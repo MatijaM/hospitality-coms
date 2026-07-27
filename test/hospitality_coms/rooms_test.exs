@@ -225,6 +225,44 @@ defmodule HospitalityComs.RoomsTest do
       assert Enum.map(messages, & &1.body) == ["before", "while out"]
     end
 
+    test "leaves the room's roll identical to the engagements an employer can already list" do
+      # KTD18 as a set difference rather than as a `select` list, which is the
+      # form the guarantee actually has to survive. A manager is a worker too:
+      # one caller holds an employer scope and a person scope at the same venue,
+      # so they can read `Engagements.list_engagements/1` and
+      # `Rooms.list_venue_room_members/2` in the same breath. If the second
+      # subtracted suspensions, the difference between the two lists would be
+      # exactly the set of people who had opted out — and the invisibility the
+      # person zone buys would be recoverable by subtraction from inside the
+      # room, which is the retaliation surface KTD18 exists to close.
+      %{employer: employer, person: person} = engaged()
+      %{person: colleague} = engaged_at(employer)
+      %{person: opted_out} = engaged_at(employer)
+
+      {:ok, _suspension} = Rooms.suspend_venue_room(opted_out, employer.venue_id)
+
+      assert {:ok, engagements} = Engagements.list_engagements(employer)
+      assert length(engagements) == 3
+
+      assert ids(members(person, employer.venue_id)) == ids(engagements)
+      assert ids(members(colleague, employer.venue_id)) == ids(engagements)
+    end
+
+    test "still governs what the suspended person themselves may reach" do
+      # The control for the roll being unfiltered. Suspension is not a no-op
+      # dressed up as one: it is the person's own access that closes, and the
+      # room's roll is not where that is recorded.
+      %{employer: employer, person: person} = engaged()
+
+      {:ok, _suspension} = Rooms.suspend_venue_room(person, employer.venue_id)
+
+      refute Rooms.venue_room_member?(person, employer.venue_id)
+      assert Rooms.list_venue_rooms(person) == []
+      assert {:error, :not_a_member} = Rooms.list_venue_room_members(person, employer.venue_id)
+      assert {:error, :not_a_member} = Rooms.list_venue_room_messages(person, employer.venue_id)
+      assert {:error, :not_a_member} = Rooms.fetch_venue_room(person, employer.venue_id)
+    end
+
     test "is invisible to an employer scope: the query is refused before Postgres is asked" do
       # The backstop names the table. The privilege sweep in
       # `HospitalityComs.BoundaryTest` is the tier underneath it.
@@ -851,6 +889,8 @@ defmodule HospitalityComs.RoomsTest do
     {:ok, members} = Rooms.list_venue_room_members(person, venue_id)
     members
   end
+
+  defp ids(engagements), do: Enum.map(engagements, & &1.id)
 
   defp anonymous_person_scope, do: PersonScope.for_person(nil, @now)
 
