@@ -428,6 +428,32 @@ defmodule HospitalityComs.VenuesTest do
                :eq
     end
 
+    test "records the grant that closed it" do
+      # There is no `revoked_by_person_id` and there will not be one. A grant
+      # is the only author the employer zone can name, and a revocation with
+      # no author is an administrative act nobody can account for.
+      {scope, %{grant: founding}} = scoped_venue_fixture(%{}, @now)
+      {:ok, second} = Venues.issue_grant(scope)
+
+      assert {:ok, %EmployerGrant{revoked_by_grant_id: closed_by}} =
+               Venues.revoke_grant(scope, second.id)
+
+      assert closed_by == founding.id
+      assert reload_grant(scope, second.id).revoked_by_grant_id == founding.id
+    end
+
+    test "records the grant itself when a holder stands down" do
+      # The self-reference the lineage key forbids and this one has to allow.
+      {scope, _creation} = scoped_venue_fixture(%{}, @now)
+      {:ok, child} = Venues.issue_grant(scope)
+      child_scope = EmployerScope.for_grant(scope.venue_id, child.id, @now)
+
+      assert {:ok, %EmployerGrant{id: id, revoked_by_grant_id: closed_by}} =
+               Venues.revoke_grant(child_scope, child.id)
+
+      assert closed_by == id
+    end
+
     test "closes the grant half-open: the revocation instant is already outside it" do
       {scope, _creation} = scoped_venue_fixture(%{}, @now)
       {:ok, second} = Venues.issue_grant(scope)
@@ -665,10 +691,68 @@ defmodule HospitalityComs.VenuesTest do
 
     test "reject a grant revoked before it was issued" do
       venue_id = raw_venue()
+      id = Ecto.UUID.generate()
 
+      # Attributed to itself, so that the row is well formed in every respect
+      # but the one under test and the constraint that fires is the one named.
       assert_raise Postgrex.Error, ~r/employer_grants_revoked_after_granted/, fn ->
-        raw_grant(venue_id, granted_at: @later, revoked_at: @now)
+        raw_grant(venue_id,
+          id: id,
+          revoked_by_grant_id: id,
+          granted_at: @later,
+          revoked_at: @now
+        )
       end
+    end
+
+    test "reject a revocation with no revoking grant" do
+      venue_id = raw_venue()
+
+      assert_raise Postgrex.Error, ~r/employer_grants_revocation_attributed/, fn ->
+        raw_grant(venue_id, revoked_at: @later)
+      end
+    end
+
+    test "reject a revoking grant on a grant that is not revoked" do
+      # The other half of the equality. Held in opposition rather than as one
+      # implication, so neither column can be written without the other.
+      venue_id = raw_venue()
+      parent_id = Ecto.UUID.generate()
+
+      raw_grant(venue_id, id: parent_id)
+
+      assert_raise Postgrex.Error, ~r/employer_grants_revocation_attributed/, fn ->
+        raw_grant(venue_id, granted_by_grant_id: parent_id, revoked_by_grant_id: parent_id)
+      end
+    end
+
+    test "reject a revocation attributed to another venue's grant" do
+      # The second composite foreign key doing the job the first one does for
+      # lineage: a revocation at venue A cannot name a grant at venue B.
+      venue_id = raw_venue()
+      other_venue_id = raw_venue()
+      other_grant_id = Ecto.UUID.generate()
+
+      raw_grant(other_venue_id, id: other_grant_id)
+
+      assert_raise Postgrex.Error, ~r/employer_grants_revoked_by_fkey/, fn ->
+        raw_grant(venue_id, revoked_at: @later, revoked_by_grant_id: other_grant_id)
+      end
+    end
+
+    test "accept a revocation attributed to the grant's own venue" do
+      # The control for the three above.
+      venue_id = raw_venue()
+      parent_id = Ecto.UUID.generate()
+
+      raw_grant(venue_id, id: parent_id)
+
+      assert %{num_rows: 1} =
+               raw_grant(venue_id,
+                 granted_by_grant_id: parent_id,
+                 revoked_at: @later,
+                 revoked_by_grant_id: parent_id
+               )
     end
 
     test "reject a grant that issued itself" do
@@ -852,13 +936,15 @@ defmodule HospitalityComs.VenuesTest do
     Repo.query!(
       """
       INSERT INTO employer_grants
-        (id, venue_id, granted_by_grant_id, granted_at, revoked_at, inserted_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, now(), now())
+        (id, venue_id, granted_by_grant_id, revoked_by_grant_id,
+         granted_at, revoked_at, inserted_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, now(), now())
       """,
       [
         opts |> Keyword.get(:id, Ecto.UUID.generate()) |> raw_uuid(),
         raw_uuid(venue_id),
         opts |> Keyword.get(:granted_by_grant_id) |> raw_uuid(),
+        opts |> Keyword.get(:revoked_by_grant_id) |> raw_uuid(),
         Keyword.get(opts, :granted_at, @now),
         Keyword.get(opts, :revoked_at)
       ]

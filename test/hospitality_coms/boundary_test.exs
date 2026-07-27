@@ -304,15 +304,19 @@ defmodule HospitalityComs.BoundaryTest do
       refute "MAINTAIN" in privileges
     end
 
-    test "give UPDATE on two columns of employer_grants rather than on the table" do
-      # Revocation writes `revoked_at` and `updated_at`. A table-level UPDATE
-      # would also let a session move a grant to another venue, which is a
-      # cross-tenant write wearing an administrative hat — so the grant is
-      # column-scoped, and this is what says so rather than the migration's
-      # own comment.
+    test "give UPDATE on three columns of employer_grants rather than on the table" do
+      # Revocation writes `revoked_at`, `revoked_by_grant_id` and
+      # `updated_at`. A table-level UPDATE would also let a session move a
+      # grant to another venue or rewrite its lineage, which are cross-tenant
+      # writes wearing an administrative hat — so the grant is column-scoped,
+      # and this is what says so rather than the migration's own comment.
       refute table_privilege?("employer_grants", "UPDATE")
 
-      assert updatable_columns("employer_grants") == ["revoked_at", "updated_at"]
+      assert updatable_columns("employer_grants") == [
+               "revoked_at",
+               "revoked_by_grant_id",
+               "updated_at"
+             ]
     end
 
     test "are the only thing the employer role depends on in this database" do

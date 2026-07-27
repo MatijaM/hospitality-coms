@@ -26,10 +26,11 @@ defmodule HospitalityComs.Repo.Migrations.GrantEmployerZone do
     * `venues` — SELECT and INSERT. A venue is created by a person who has one
       yet to exist, so the insert is the bootstrap; nothing updates a venue in
       this unit.
-    * `employer_grants` — SELECT and INSERT, plus UPDATE on `revoked_at` and
-      `updated_at` alone. Revocation writes those two columns and nothing else,
-      and a table-level UPDATE would also let a session move a grant to another
-      venue, which is a cross-tenant write dressed as an administrative one.
+    * `employer_grants` — SELECT and INSERT, plus UPDATE on `revoked_at`,
+      `revoked_by_grant_id` and `updated_at` alone. Revocation writes those
+      three columns and nothing else, and a table-level UPDATE would also let a
+      session move a grant to another venue or rewrite its lineage, which are
+      cross-tenant writes dressed as administrative ones.
     * `shift_types` — SELECT and INSERT.
 
   No DELETE anywhere. Deletion is confined to the lifecycle context (KTD21),
@@ -65,7 +66,8 @@ defmodule HospitalityComs.Repo.Migrations.GrantEmployerZone do
   # as `{privilege, columns}` and expand to `GRANT priv (col, ...)`.
   @grants [
     {"venues", ["SELECT", "INSERT"]},
-    {"employer_grants", ["SELECT", "INSERT", {"UPDATE", ["revoked_at", "updated_at"]}]},
+    {"employer_grants",
+     ["SELECT", "INSERT", {"UPDATE", ["revoked_at", "revoked_by_grant_id", "updated_at"]}]},
     {"shift_types", ["SELECT", "INSERT"]}
   ]
 

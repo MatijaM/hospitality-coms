@@ -17,6 +17,10 @@ defmodule HospitalityComs.Venues.EmployerGrant do
   this table can exist before the bridge does: it points at nothing that has
   not been built.
 
+  A revocation carries the same shape: `revoked_by_grant_id` names the grant
+  that closed this one, not the person who decided to. See
+  `revocation_changeset/3`.
+
   ## Lineage instead of a holder
 
   `granted_by_grant_id` names the grant that issued this one, through a
@@ -51,6 +55,7 @@ defmodule HospitalityComs.Venues.EmployerGrant do
 
     belongs_to :venue, Venue
     belongs_to :granted_by, __MODULE__, foreign_key: :granted_by_grant_id
+    belongs_to :revoked_by, __MODULE__, foreign_key: :revoked_by_grant_id
 
     timestamps(type: :utc_datetime)
   end
@@ -62,6 +67,8 @@ defmodule HospitalityComs.Venues.EmployerGrant do
           venue: Venue.t() | Ecto.Association.NotLoaded.t() | nil,
           granted_by_grant_id: Ecto.UUID.t() | nil,
           granted_by: t() | Ecto.Association.NotLoaded.t() | nil,
+          revoked_by_grant_id: Ecto.UUID.t() | nil,
+          revoked_by: t() | Ecto.Association.NotLoaded.t() | nil,
           granted_at: DateTime.t() | nil,
           revoked_at: DateTime.t() | nil,
           inserted_at: DateTime.t() | nil,
@@ -98,21 +105,38 @@ defmodule HospitalityComs.Venues.EmployerGrant do
   end
 
   @doc """
-  Closes a grant at `now`.
+  Closes a grant at `now`, under the authority of `revoked_by_grant_id`.
 
   The instant is the unit of work's, so a grant revoked and a membership query
   run in the same request agree on which side of the boundary the work fell.
+
+  The revoking grant is recorded because a revocation nobody can attribute is
+  an administrative act with no author, and the only attribution this zone can
+  hold is a grant: naming the human would be a person key in the employer zone.
+  It may be the closed grant's own id — a holder standing down — and it is null
+  on every grant that is still live, held in opposition to `revoked_at` by a
+  check constraint.
   """
-  @spec revocation_changeset(t(), DateTime.t()) :: Ecto.Changeset.t(t())
-  def revocation_changeset(%__MODULE__{} = grant, %DateTime{} = now) do
+  @spec revocation_changeset(t(), Ecto.UUID.t(), DateTime.t()) :: Ecto.Changeset.t(t())
+  def revocation_changeset(%__MODULE__{} = grant, revoked_by_grant_id, %DateTime{} = now)
+      when is_binary(revoked_by_grant_id) do
     stamped_at = DateTime.truncate(now, :second)
 
     grant
-    |> change(revoked_at: stamped_at, updated_at: stamped_at)
+    |> change(
+      revoked_at: stamped_at,
+      revoked_by_grant_id: revoked_by_grant_id,
+      updated_at: stamped_at
+    )
     |> check_constraint(:revoked_at,
       name: :employer_grants_revoked_after_granted,
       message: "cannot precede the grant"
     )
+    |> check_constraint(:revoked_by_grant_id,
+      name: :employer_grants_revocation_attributed,
+      message: "must be set exactly when the grant is revoked"
+    )
+    |> foreign_key_constraint(:revoked_by_grant_id, name: :employer_grants_revoked_by_fkey)
   end
 
   @spec issued_at(Ecto.Changeset.t(t()), DateTime.t()) :: Ecto.Changeset.t(t())

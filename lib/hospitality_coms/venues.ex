@@ -307,9 +307,11 @@ defmodule HospitalityComs.Venues do
   A grant that already carries a revocation is `{:error, :not_found}` whichever
   instant asks, rather than a second write moving `revoked_at` backwards.
 
-  Revocation writes `revoked_at` and derives nothing — the grant stops being
-  live because the instant has passed its upper bound, not because a flag was
-  flipped.
+  Revocation writes `revoked_at` and `revoked_by_grant_id` and derives nothing
+  — the grant stops being live because the instant has passed its upper bound,
+  not because a flag was flipped. The acting grant is recorded because a
+  revocation nobody can attribute is an administrative act with no author, and
+  a grant is the only attribution this zone can hold.
   """
   @spec revoke_grant(EmployerScope.t(), Ecto.UUID.t()) ::
           {:ok, EmployerGrant.t()}
@@ -338,10 +340,10 @@ defmodule HospitalityComs.Venues do
   defp close_grant(scope, grant_id) do
     live = locked_live_grants(scope)
 
-    with {:ok, _authority} <- acting_grant(scope, live) do
+    with {:ok, authority} <- acting_grant(scope, live) do
       live
       |> Enum.split_with(&(&1.id == grant_id))
-      |> close(scope, grant_id)
+      |> close(scope, grant_id, authority)
     end
   end
 
@@ -365,35 +367,54 @@ defmodule HospitalityComs.Venues do
     live |> Enum.find(&(&1.id == grant_id)) |> held()
   end
 
-  @spec close({[EmployerGrant.t()], [EmployerGrant.t()]}, EmployerScope.t(), Ecto.UUID.t()) ::
+  @spec close(
+          {[EmployerGrant.t()], [EmployerGrant.t()]},
+          EmployerScope.t(),
+          Ecto.UUID.t(),
+          EmployerGrant.t()
+        ) ::
           {:ok, EmployerGrant.t()}
           | {:error, :not_found | :last_grant_holder | Ecto.Changeset.t(EmployerGrant.t())}
-  defp close({[%EmployerGrant{revoked_at: %DateTime{}}], _survivors}, _scope, _grant_id) do
+  defp close(
+         {[%EmployerGrant{revoked_at: %DateTime{}}], _survivors},
+         _scope,
+         _grant_id,
+         _authority
+       ) do
     {:error, :not_found}
   end
 
-  defp close({[target], survivors}, scope, grant_id) do
-    scope |> revocable?(grant_id) |> within_reach(target, survivors, scope.now)
+  defp close({[target], survivors}, scope, grant_id, authority) do
+    scope
+    |> revocable?(grant_id)
+    |> within_reach(target, survivors, authority, scope.now)
   end
 
-  defp close({[], _survivors}, _scope, _grant_id), do: {:error, :not_found}
+  defp close({[], _survivors}, _scope, _grant_id, _authority), do: {:error, :not_found}
 
-  @spec within_reach(boolean(), EmployerGrant.t(), [EmployerGrant.t()], DateTime.t()) ::
+  @spec within_reach(
+          boolean(),
+          EmployerGrant.t(),
+          [EmployerGrant.t()],
+          EmployerGrant.t(),
+          DateTime.t()
+        ) ::
           {:ok, EmployerGrant.t()}
           | {:error, :not_found | :last_grant_holder | Ecto.Changeset.t(EmployerGrant.t())}
-  defp within_reach(false, _target, _survivors, _now), do: {:error, :not_found}
+  defp within_reach(false, _target, _survivors, _authority, _now), do: {:error, :not_found}
 
-  defp within_reach(true, target, survivors, now) do
-    survivors |> Enum.any?(&is_nil(&1.revoked_at)) |> revoke(target, now)
+  defp within_reach(true, target, survivors, authority, now) do
+    survivors |> Enum.any?(&is_nil(&1.revoked_at)) |> revoke(target, authority, now)
   end
 
-  @spec revoke(boolean(), EmployerGrant.t(), DateTime.t()) ::
-          {:ok, EmployerGrant.t()} | {:error, Ecto.Changeset.t(EmployerGrant.t())}
-  defp revoke(true, target, now) do
-    target |> EmployerGrant.revocation_changeset(now) |> EmployerRepo.update()
+  @spec revoke(boolean(), EmployerGrant.t(), EmployerGrant.t(), DateTime.t()) ::
+          {:ok, EmployerGrant.t()}
+          | {:error, :last_grant_holder | Ecto.Changeset.t(EmployerGrant.t())}
+  defp revoke(true, target, authority, now) do
+    target |> EmployerGrant.revocation_changeset(authority.id, now) |> EmployerRepo.update()
   end
 
-  defp revoke(false, _target, _now), do: {:error, :last_grant_holder}
+  defp revoke(false, _target, _authority, _now), do: {:error, :last_grant_holder}
 
   # Whether `grant_id` is the acting grant or descends from it.
   #

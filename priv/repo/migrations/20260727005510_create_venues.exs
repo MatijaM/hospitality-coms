@@ -61,6 +61,7 @@ defmodule HospitalityComs.Repo.Migrations.CreateVenues do
   @max_grace_minutes 120
 
   @grant_lineage_constraint "employer_grants_granted_by_fkey"
+  @grant_revoked_by_constraint "employer_grants_revoked_by_fkey"
 
   def up do
     create table(:venues, primary_key: false) do
@@ -83,6 +84,13 @@ defmodule HospitalityComs.Repo.Migrations.CreateVenues do
       # creation, which is the only one with nobody above it — that is what
       # makes the founding grant identifiable without naming its holder.
       add :granted_by_grant_id, :binary_id
+
+      # The grant that closed this one, null exactly when `revoked_at` is —
+      # held in opposition by a check constraint below. A revocation nobody
+      # can attribute is an administrative act with no author, and the venue's
+      # own records are the only place the attribution can live: naming the
+      # human would be a person key in the employer zone.
+      add :revoked_by_grant_id, :binary_id
 
       add :granted_at, :utc_datetime, null: false
       add :revoked_at, :utc_datetime
@@ -119,8 +127,34 @@ defmodule HospitalityComs.Repo.Migrations.CreateVenues do
       "ALTER TABLE employer_grants DROP CONSTRAINT #{@grant_lineage_constraint}"
     )
 
+    # The same composite shape for the same reason: a revocation at venue A
+    # cannot be attributed to a grant belonging to venue B. MATCH SIMPLE
+    # again, because the column is null on every grant that is still live.
+    execute(
+      """
+      ALTER TABLE employer_grants
+        ADD CONSTRAINT #{@grant_revoked_by_constraint}
+        FOREIGN KEY (revoked_by_grant_id, venue_id)
+        REFERENCES employer_grants (id, venue_id)
+        MATCH SIMPLE
+        ON DELETE RESTRICT
+      """,
+      "ALTER TABLE employer_grants DROP CONSTRAINT #{@grant_revoked_by_constraint}"
+    )
+
     create constraint(:employer_grants, :employer_grants_revoked_after_granted,
              check: "revoked_at IS NULL OR revoked_at >= granted_at"
+           )
+
+    # Written as an equality of null-ness rather than as two implications, so
+    # neither half can be added without the other: a `revoked_at` with no
+    # author and an author with no `revoked_at` are both half-written
+    # revocations.
+    #
+    # Unlike the lineage key this one may point at the row's own id. A grant
+    # closing itself is a holder standing down, which is an ordinary act.
+    create constraint(:employer_grants, :employer_grants_revocation_attributed,
+             check: "(revoked_at IS NULL) = (revoked_by_grant_id IS NULL)"
            )
 
     # A grant cannot have issued itself. The composite foreign key above is
@@ -154,6 +188,7 @@ defmodule HospitalityComs.Repo.Migrations.CreateVenues do
   def down do
     drop table(:shift_types)
 
+    execute("ALTER TABLE employer_grants DROP CONSTRAINT #{@grant_revoked_by_constraint}")
     execute("ALTER TABLE employer_grants DROP CONSTRAINT #{@grant_lineage_constraint}")
 
     drop table(:employer_grants)
