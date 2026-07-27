@@ -81,8 +81,28 @@ defmodule HospitalityComsWeb.PersonAuth do
   @spec encode_token(binary()) :: String.t()
   def encode_token(token) when is_binary(token), do: Base.url_encode64(token, padding: false)
 
+  @doc """
+  The topic one session's transports are addressed on, from its *stored* token.
+
+  KTD7's socket id, and there is one spelling of it because there have to be
+  two callers that agree. `disconnect_sessions/1` broadcasts `"disconnect"`
+  here; `HospitalityComsWeb.PersonSocket.id/1` and `EmployerSocket.id/1` return
+  it, which is what makes Phoenix disconnect the transports belonging to the
+  session that ended. Two spellings that drifted would make log-out a no-op
+  against an open socket, silently.
+
+  Per *session*, not per person. A worker holding engagements at two venues has
+  two sessions and ending one must not take the other down — origin R7 and AE1,
+  and the reason the documented Phoenix example's per-user id is wrong here.
+
+  The argument is a digest, so the value being turned into a topic is never a
+  usable credential: `HospitalityComs.Accounts.session_token_digest/1` is how a
+  holder of the raw token gets one.
+  """
   @spec session_topic(binary()) :: String.t()
-  defp session_topic(stored_token), do: "session:#{encode_token(stored_token)}"
+  def session_topic(digest) when is_binary(digest) do
+    "session:#{encode_token(digest)}"
+  end
 
   @spec authenticate(binary() | nil, DateTime.t()) :: Person.t() | nil
   defp authenticate(nil, _now), do: nil

@@ -101,10 +101,10 @@ defmodule HospitalityComsWeb.SessionController do
     conn
     |> put_status(:unprocessable_entity)
     |> json(
-      ErrorEnvelope.new(
+      ErrorEnvelope.for_changeset(
         :unprocessable_entity,
         "the address was not accepted",
-        changeset_errors(changeset)
+        changeset
       )
     )
   end
@@ -139,15 +139,6 @@ defmodule HospitalityComsWeb.SessionController do
   @spec render_person(Person.t()) :: %{id: Ecto.UUID.t(), email: String.t() | nil}
   defp render_person(%Person{} = person) do
     %{id: person.id, email: person.email}
-  end
-
-  @spec changeset_errors(Ecto.Changeset.t(Person.t())) :: %{optional(atom()) => [String.t()]}
-  defp changeset_errors(changeset) do
-    Ecto.Changeset.traverse_errors(changeset, fn {message, opts} ->
-      Regex.replace(~r"%{(\w+)}", message, fn _whole, key ->
-        opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
-      end)
-    end)
   end
 
   # The link is followed by a human in a mail client, so it points at whatever

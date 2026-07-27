@@ -1,0 +1,125 @@
+defmodule HospitalityComsWeb.EmployerVenueChannel do
+  @moduledoc """
+  One venue's employer surface: the only topic
+  `HospitalityComsWeb.EmployerSocket` routes.
+
+  ## Join is where the authority is checked (KTD8, from the employer's side)
+
+  `connect/3` authenticates the human. This is where it is decided whether that
+  human may act *for this venue*, and the decision is
+  `HospitalityComs.Engagements.fetch_grant_holding_engagement/2`: an engagement
+  of theirs at this venue, active at this instant, naming a grant the venue has
+  not revoked. Every one of those three is derived and none is stored, so a
+  grant revoked a second ago produces a refused join with no job having run —
+  the same property the worker's side gets from an engagement's period.
+
+  Re-derived per join, cached nowhere. A session that joined an hour ago and
+  rejoins now is asked again.
+
+  ## What it carries, and what it will never carry
+
+  The join reply is the venue and the grant the session is acting under. No
+  person id: `HospitalityComs.Accounts.EmployerScope` has no `person` field for
+  the reason KTD2 gives, and putting one on the wire here would be the same
+  crossing by another route.
+
+  There is no presence on this topic and no room event, because
+  `EmployerSocket` routes no room. See that module for why each absence is a
+  decision rather than an omission.
+
+  ## A note for U9, which used to say the opposite
+
+  U9 hangs the per-employer view off this channel. **It must build its scope by
+  calling `HospitalityComsWeb.ChannelAuth.employer_scope/2` again, on every
+  inbound event, and must not read `socket.assigns.grant_id`.**
+
+  This paragraph used to say U9 "needs nothing from here but the scope the join
+  already resolved", which invited exactly the cached authority the rest of this
+  file argues against. The assigns are a convenience for naming the venue back
+  to the client, not a capability: they were written once, at join, and nothing
+  refreshes them. An event authorised against them would be authorised against a
+  grant that may have been revoked hours ago — which is the failure the per-join
+  re-derivation exists to prevent, reintroduced one layer in.
+
+  ## What this channel does not do, and what that costs today
+
+  It subscribes to nothing. A manager whose grant is revoked while connected
+  keeps an open channel until they rejoin — there is no employer-side analogue
+  of the engagement topic that would stop it.
+
+  That is inert while the channel carries no events: an open channel that can do
+  nothing is not access. It stops being inert the moment U9 adds the first
+  event, which is the other half of the note above — re-deriving per event makes
+  the missing subscription a latency problem rather than an authority one, and
+  reading the assigns would make it an authority one.
+  """
+
+  use HospitalityComsWeb, :channel
+
+  alias HospitalityComs.Accounts.EmployerScope
+  alias HospitalityComsWeb.ChannelAuth
+  alias HospitalityComsWeb.ErrorEnvelope
+  alias Phoenix.Socket
+
+  # One sentence for a venue that does not exist, an engagement that ended, an
+  # engagement holding nothing, and a grant that was revoked. Telling them apart
+  # would enumerate the venues this session does not manage.
+  @refusal "this session holds no live grant at that venue"
+
+  @unknown_event "this channel does not handle that event"
+
+  @doc """
+  Joins a venue's employer surface, if this session holds a live grant there.
+  """
+  @impl true
+  @spec join(String.t(), map(), Socket.t()) ::
+          {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
+  def join("employer_venue:" <> suffix, _payload, socket) do
+    suffix |> ChannelAuth.topic_id() |> resolve(socket)
+  end
+
+  # A suffix that is not a uuid answers exactly what an unknown venue answers.
+  # It used to crash two ways: the id reached Ecto's query builder and raised
+  # `Ecto.Query.CastError`, and `EmployerScope.for_grant/3` raises
+  # `ArgumentError` on anything that is not a canonical uuid.
+  @spec resolve({:ok, Ecto.UUID.t()} | :error, Socket.t()) ::
+          {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
+  defp resolve(:error, _socket), do: refuse()
+
+  defp resolve({:ok, venue_id}, socket) do
+    socket
+    |> ChannelAuth.employer_scope(venue_id)
+    |> admit(socket)
+  end
+
+  # `:no_session` is a token deleted or expired since `connect/3` — the session
+  # is derived again at every join, so a socket cannot outlive its credential —
+  # and it gets the same sentence the missing grant does, for the reason above.
+  @spec admit({:ok, EmployerScope.t()} | {:error, :no_grant | :no_session}, Socket.t()) ::
+          {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
+  defp admit({:ok, %EmployerScope{} = scope}, socket) do
+    {:ok, %{venue_id: scope.venue_id, grant_id: scope.grant_id},
+     assign(socket, venue_id: scope.venue_id, grant_id: scope.grant_id)}
+  end
+
+  defp admit({:error, refusal}, _socket) when refusal in [:no_grant, :no_session], do: refuse()
+
+  @spec refuse() :: {:error, ErrorEnvelope.t()}
+  defp refuse, do: {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
+
+  @doc """
+  Answers an event this channel does not carry.
+
+  The only clause today, and the one U9 adds the per-employer view's events in
+  front of. `Phoenix.Channel.Server` dispatches to `handle_in/3` unconditionally
+  — a channel exporting none raises `UndefinedFunctionError` on every event it
+  receives — so this is what stops an employer session crashing its own channel
+  by sending a word nobody implemented.
+  """
+  @impl true
+  @spec handle_in(String.t(), map(), Socket.t()) ::
+          {:reply, {:error, ErrorEnvelope.t()}, Socket.t()}
+  def handle_in(_event, _payload, socket) do
+    {:reply, {:error, ErrorEnvelope.new(:bad_request, @unknown_event)}, socket}
+  end
+end

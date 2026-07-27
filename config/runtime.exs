@@ -75,12 +75,53 @@ if config_env() == :prod do
 
   config :hospitality_coms, :magic_link_base_url, magic_link_base_url
 
+  # Which origins may open a websocket. U7 put two sockets on this endpoint and
+  # they are the first thing `:check_origin` has ever applied to here.
+  #
+  # Phoenix's default is `true`, which checks the request's `Origin` against the
+  # endpoint's own `:url` host — set just below from `PHX_HOST`. A browser
+  # client served from any other origin therefore has its upgrade refused
+  # *before* `connect/3` runs, by the transport, with no application code
+  # involved and nothing in this application's logs to say why. That is the same
+  # class of failure as the magic link's default and it is required here for the
+  # same reason: it fails silently, on somebody else's side, and looks like the
+  # client being broken.
+  #
+  # A list rather than a boolean, so the answer is written down. An empty list
+  # refuses everything, which is the identical failure by another route, so a
+  # variable that names no origin is refused rather than accepted.
+  websocket_origins =
+    System.get_env("WEBSOCKET_ORIGINS") ||
+      raise """
+      environment variable WEBSOCKET_ORIGINS is missing.
+      It is the comma-separated list of origins allowed to open a websocket
+      against /socket/person and /socket/employer, and it must name at least
+      one. An origin is scheme, host and port with no path.
+      For example: https://app.example.com,https://staging.app.example.com
+      """
+
+  check_origin =
+    websocket_origins
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+
+  if check_origin == [] do
+    raise """
+    environment variable WEBSOCKET_ORIGINS names no origin.
+    It was #{inspect(websocket_origins)}. An empty allowlist refuses every
+    websocket upgrade, which is the failure this variable exists to prevent
+    rather than a way to switch the sockets off.
+    """
+  end
+
   host = System.get_env("PHX_HOST") || "example.com"
 
   config :hospitality_coms, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
   config :hospitality_coms, HospitalityComsWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
+    check_origin: check_origin,
     http: [
       # Enable IPv6 and bind on all interfaces.
       # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.

@@ -17,7 +17,7 @@ defmodule HospitalityComsWeb do
 
   The `:html`, `:live_view`, and `:live_component` entrypoints the generator
   produced are gone with the HTML layer. This application answers JSON and,
-  from U7, a socket.
+  from U7, two sockets.
   """
 
   def router do

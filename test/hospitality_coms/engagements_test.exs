@@ -1127,6 +1127,189 @@ defmodule HospitalityComs.EngagementsTest do
     end
   end
 
+  describe "fetch_grant_holding_engagement/2" do
+    @describetag :grant_holder
+
+    test "answers the engagement at that venue holding a live grant" do
+      # The control for every refusal below, and the function that turns an
+      # authenticated person into an employer session — there is no separate
+      # employer credential, so this is the whole of the question "may this
+      # human act for this venue".
+      {employer, creation} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      engagement =
+        engagement_fixture(employer, scope, %{
+          starts_at: @now,
+          ends_at: @in_a_month,
+          grant_id: creation.grant.id
+        })
+
+      assert {:ok, %Engagement{id: id, grant_id: grant_id}} =
+               Engagements.fetch_grant_holding_engagement(scope, creation.venue.id)
+
+      assert id == engagement.id
+      assert grant_id == creation.grant.id
+    end
+
+    test "refuses an engagement that holds no grant" do
+      # The moduledoc's first collapse: an ordinary worker is engaged and is not
+      # a manager. `Records.holding_live_grant/3`'s subquery is what excludes
+      # them, and a `grant_id` of nil is in no subquery result.
+      {employer, creation} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      engagement_fixture(employer, scope, %{starts_at: @now, ends_at: @in_a_month})
+
+      assert {:error, :no_grant} =
+               Engagements.fetch_grant_holding_engagement(scope, creation.venue.id)
+    end
+
+    test "refuses an engagement whose grant the venue has revoked" do
+      # The second collapse, and the one with a moving part: the grant is still
+      # named by the row and is no longer live, so what changed is
+      # `employer_grants` rather than `engagements`. A second grant is issued
+      # first because `revoke_grant/2` refuses a venue's last live one.
+      {employer, creation} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      {:ok, held} = Venues.issue_grant(employer)
+
+      engagement =
+        engagement_fixture(employer, scope, %{
+          starts_at: @now,
+          ends_at: @in_a_month,
+          grant_id: held.id
+        })
+
+      assert {:ok, _holder} = Engagements.fetch_grant_holding_engagement(scope, creation.venue.id)
+
+      assert {:ok, _revoked} = Venues.revoke_grant(employer, held.id)
+
+      assert {:error, :no_grant} =
+               Engagements.fetch_grant_holding_engagement(scope, creation.venue.id)
+
+      # The bridge row is untouched: it still names the grant, and it is the
+      # grant's liveness that answers.
+      assert Repo.get!(Engagement, engagement.id).grant_id == held.id
+    end
+
+    test "refuses once the term's upper bound passes, with no write at all" do
+      # The third collapse, derived: the same call at a later instant answers
+      # differently because the instant moved. Nothing ran.
+      {employer, creation} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      engagement_fixture(employer, scope, %{
+        starts_at: @now,
+        ends_at: @in_a_week,
+        grant_id: creation.grant.id
+      })
+
+      assert {:ok, _holder} = Engagements.fetch_grant_holding_engagement(scope, creation.venue.id)
+
+      later = PersonScope.for_person(scope.person, DateTime.add(@in_a_week, 1, :second))
+
+      assert {:error, :no_grant} =
+               Engagements.fetch_grant_holding_engagement(later, creation.venue.id)
+    end
+
+    test "refuses before the term opens, which acceptance does not bring forward" do
+      # KTD13: claiming is not starting. A manager who has accepted an offer
+      # beginning next week cannot act this week.
+      {employer, creation} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      engagement_fixture(employer, scope, %{
+        starts_at: @in_a_week,
+        ends_at: @in_a_month,
+        grant_id: creation.grant.id
+      })
+
+      assert {:error, :no_grant} =
+               Engagements.fetch_grant_holding_engagement(scope, creation.venue.id)
+
+      next_week = PersonScope.for_person(scope.person, @in_a_week)
+
+      assert {:ok, _holder} =
+               Engagements.fetch_grant_holding_engagement(next_week, creation.venue.id)
+    end
+
+    test "refuses a venue that does not exist, identically" do
+      # The fourth collapse. The caller supplies the venue id, so a refusal that
+      # told an unknown venue apart from one they manage nothing at would
+      # enumerate the application's venues one call at a time (AE1).
+      {employer, creation} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      engagement_fixture(employer, scope, %{
+        starts_at: @now,
+        ends_at: @in_a_month,
+        grant_id: creation.grant.id
+      })
+
+      assert {:error, :no_grant} =
+               Engagements.fetch_grant_holding_engagement(scope, Ecto.UUID.generate())
+    end
+
+    test "is per venue: a grant held at one venue answers nothing at another" do
+      # The venue comes from the caller and the grant is resolved against *that*
+      # venue. Without the venue filter on the subquery, a manager anywhere
+      # would be a manager everywhere.
+      {first_employer, first} = scoped_venue_fixture(@now)
+      {_second_employer, second} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      engagement_fixture(first_employer, scope, %{
+        starts_at: @now,
+        ends_at: @in_a_month,
+        grant_id: first.grant.id
+      })
+
+      assert {:ok, _holder} = Engagements.fetch_grant_holding_engagement(scope, first.venue.id)
+
+      assert {:error, :no_grant} =
+               Engagements.fetch_grant_holding_engagement(scope, second.venue.id)
+    end
+
+    test "is per person: another person's grant answers nothing for this one" do
+      {employer, creation} = scoped_venue_fixture(@now)
+      manager = person_scope_fixture(@now)
+      bystander = person_scope_fixture(@now)
+
+      engagement_fixture(employer, manager, %{
+        starts_at: @now,
+        ends_at: @in_a_month,
+        grant_id: creation.grant.id
+      })
+
+      engagement_fixture(employer, bystander, %{starts_at: @now, ends_at: @in_a_month})
+
+      assert {:ok, _holder} =
+               Engagements.fetch_grant_holding_engagement(manager, creation.venue.id)
+
+      assert {:error, :no_grant} =
+               Engagements.fetch_grant_holding_engagement(bystander, creation.venue.id)
+    end
+
+    test "refuses an employer scope and an anonymous person scope by function clause" do
+      {employer, creation} = scoped_venue_fixture(@now)
+
+      assert_raise FunctionClauseError, fn ->
+        Engagements.fetch_grant_holding_engagement(
+          scope_of(:employer, employer),
+          creation.venue.id
+        )
+      end
+
+      anonymous = PersonScope.for_person(nil, @now)
+
+      assert_raise FunctionClauseError, fn ->
+        Engagements.fetch_grant_holding_engagement(anonymous, creation.venue.id)
+      end
+    end
+  end
+
   describe "the bridge's row-level security" do
     # `HospitalityComs.BoundaryTest` asserts the policy exists and is not
     # `FORCE`d; what it cannot assert is the behaviour, because populating the

@@ -27,3 +27,6 @@ npm-debug.log
 
 # Dialyzer PLT cache.
 /priv/plts/
+
+# Agent worktrees, created by parallel subagent dispatch.
+.claude/worktrees/

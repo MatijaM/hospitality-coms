@@ -261,6 +261,13 @@ defmodule HospitalityComs.RoomsTest do
       assert {:error, :not_a_member} = Rooms.list_venue_room_members(person, employer.venue_id)
       assert {:error, :not_a_member} = Rooms.list_venue_room_messages(person, employer.venue_id)
       assert {:error, :not_a_member} = Rooms.fetch_venue_room(person, employer.venue_id)
+
+      # The send too, and it carries more weight than the reads: U7 gives
+      # suspension a broadcast that stops the person's open channels, and that
+      # broadcast is best effort. This is the refusal that holds when it is
+      # lost — derived at the instant of the send, with no job and no nudge.
+      assert {:error, :not_a_member} =
+               Rooms.send_venue_room_message(person, employer.venue_id, "still here?")
     end
 
     test "is invisible to an employer scope: the query is refused before Postgres is asked" do
