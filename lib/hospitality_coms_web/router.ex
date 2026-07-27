@@ -3,9 +3,9 @@ defmodule HospitalityComsWeb.Router do
 
   import HospitalityComsWeb.PersonAuth
 
-  # There is no browser pipeline. This application serves JSON and, from U7, a
-  # socket; the HTML layer existed only because `mix phx.gen.auth` refuses to
-  # run without it.
+  # There is no browser pipeline. This application serves JSON and, from U7, two
+  # sockets declared on `HospitalityComsWeb.Endpoint`; the HTML layer existed
+  # only because `mix phx.gen.auth` refuses to run without it.
   pipeline :api do
     plug :accepts, ["json"]
     plug :fetch_person_scope

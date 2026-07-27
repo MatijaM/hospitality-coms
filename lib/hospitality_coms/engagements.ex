@@ -676,7 +676,7 @@ defmodule HospitalityComs.Engagements do
   Broadcasts the revocation after the transaction commits and only if it did
   (KTD8). A broadcast inside the transaction would disconnect clients for a
   change that might roll back, and the broadcast is a nudge in any case: the
-  revocation is the rejoin that `join/3` refuses, which U7 builds.
+  revocation is the rejoin that `join/3` refuses, which U7 built.
   """
   @spec end_engagement(EmployerScope.t(), Ecto.UUID.t()) ::
           {:ok, Engagement.t()}

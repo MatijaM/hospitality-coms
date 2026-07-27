@@ -38,7 +38,7 @@ defmodule HospitalityComs.Venues do
       grant is an authority nobody is yet recorded as holding.
     * There is no path here that derives an employer session from a person's
       login, because deriving one means reading the bridge. The caller supplies
-      the scope; the transport that will mint it is U7's.
+      the scope; the transport that mints it is U7's `ChannelAuth`.
 
   ## Everything else runs under a grant
 
