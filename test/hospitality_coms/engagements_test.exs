@@ -305,6 +305,34 @@ defmodule HospitalityComs.EngagementsTest do
       end
     end
 
+    test "refuses to mint an engagement holding an authority revoked since issue" do
+      # `issue_invitation/2` checks the conferred grant is live when the offer
+      # is written, and an offer is good for as long as its code is. Without
+      # this the claim mints a manager whose authority was revoked in between —
+      # an engagement that counts as a holder and can do nothing, which is the
+      # same unadministrable venue from the other side.
+      {employer, _creation} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      {:ok, conferred} = Venues.issue_grant(employer)
+      %{claim_code: code} = invitation_fixture(employer, %{grant_id: conferred.id})
+
+      {:ok, _closed} = Venues.revoke_grant(employer, conferred.id)
+
+      assert {:error, :conferrable, :grant_not_live, _changes} =
+               Engagements.claim_invitation(scope, code)
+    end
+
+    test "mints one holding an authority that is still live, which is the control" do
+      {employer, %{grant: founding}} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      %{claim_code: code} = invitation_fixture(employer, %{grant_id: founding.id})
+
+      assert {:ok, %{engagement: engagement}} = Engagements.claim_invitation(scope, code)
+      assert engagement.grant_id == founding.id
+    end
+
     test "schedules the expiry announcement at the term's upper bound" do
       {employer, _creation} = scoped_venue_fixture(@now)
       scope = person_scope_fixture(@now)
@@ -626,19 +654,69 @@ defmodule HospitalityComs.EngagementsTest do
       assert Engagements.end_engagement(employer, engagement.id) == {:error, :not_found}
     end
 
-    test "reports an engagement that has not started as not found" do
-      # Deliberate, and documented in the context: closing its term would
-      # produce an empty period, which the schema refuses, and removing the row
-      # is a delete — and deletion is confined to U10's lifecycle context
-      # (KTD21). The refusal is the same one every other unreachable engagement
-      # gets, so it discloses nothing.
+    test "closes an engagement that has not started at the instant its term opens" do
+      # A claim made in error is claimed *before* the term opens more often than
+      # after, and the engagement it produced occupies the exclusion constraint
+      # for its whole term whether or not it is active — so while this was
+      # `:not_found`, a corrected engagement over the same dates was refused and
+      # the person's dates were reserved by a mistake nobody could take back.
+      #
+      # Closing it at `starts_at` rather than at the caller's instant is what
+      # keeps the write representable: `ends_at >= starts_at`, producing the
+      # empty range the schema already permits.
+      {employer, %{venue: venue, grant: grant}} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      engagement =
+        engagement_fixture(employer, scope, %{starts_at: @in_a_week, ends_at: @in_a_month})
+
+      assert {:ok, ended} = Engagements.end_engagement(employer, engagement.id)
+      assert ended.id == engagement.id
+      assert DateTime.compare(ended.ends_at, engagement.starts_at) == :eq
+
+      # Active at no instant, at either edge of the term it used to have.
+      assert active_ids_at(venue, grant, @in_a_week) == []
+      assert active_ids_at(venue, grant, @now) == []
+
+      # And the dates are free again, which is the point.
+      assert %Engagement{} =
+               engagement_fixture(employer, scope, %{
+                 starts_at: @in_a_week,
+                 ends_at: @in_a_month
+               })
+    end
+
+    test "still reports an engagement whose term has already closed as not found" do
+      # The bound on the widening above. "Active or not yet started" is one
+      # state wider than "active"; it is not "any engagement at all", and an
+      # ended one stays `:not_found` so a second ending cannot move a closed
+      # term.
+      {employer, _creation} = scoped_venue_fixture(@now)
+      scope = person_scope_fixture(@now)
+
+      engagement =
+        engagement_fixture(employer, scope, %{starts_at: @now, ends_at: @in_a_week})
+
+      later = employer_scope_at_venue(employer, DateTime.add(@in_a_week, 1, :day))
+
+      assert Engagements.end_engagement(later, engagement.id) == {:error, :not_found}
+    end
+
+    test "leaves a not-yet-started engagement out of every read, as it always was" do
+      # The widening is on the ending path alone. `list_engagements/1` and
+      # `fetch_engagement/2` still answer at the scope's instant, and renewal
+      # still reaches only what is active.
       {employer, _creation} = scoped_venue_fixture(@now)
       scope = person_scope_fixture(@now)
 
       engagement =
         engagement_fixture(employer, scope, %{starts_at: @in_a_week, ends_at: @in_a_month})
 
-      assert Engagements.end_engagement(employer, engagement.id) == {:error, :not_found}
+      assert {:ok, []} = Engagements.list_engagements(employer)
+      assert Engagements.fetch_engagement(employer, engagement.id) == {:error, :not_found}
+
+      assert Engagements.renew_engagement(employer, engagement.id, @in_two_months) ==
+               {:error, :not_found}
     end
 
     test "reports another venue's engagement as not found" do
@@ -729,6 +807,48 @@ defmodule HospitalityComs.EngagementsTest do
 
       # And the venue is back to one holder, so that one cannot go either.
       assert length(active_ids_at(venue, founding, @now)) == 1
+    end
+
+    test "counts holders whose grant is live, not holders whose grant column is set" do
+      # The security half. `grant_id` being non-null says an engagement was
+      # *given* an authority, not that it still holds one: the grant behind it
+      # may have been revoked yesterday. Counting it leaves the venue with one
+      # apparent manager who can do nothing, the real one ended, and no way back
+      # in — an unadministrable venue, which is the exact state R22 exists to
+      # prevent.
+      {employer, %{grant: founding}} = scoped_venue_fixture(@now)
+      first = person_scope_fixture(@now)
+      second = person_scope_fixture(@now)
+
+      {:ok, revoked} = Venues.issue_grant(employer)
+
+      _powerless = engagement_fixture(employer, second, %{grant_id: revoked.id})
+      real = engagement_fixture(employer, first, %{grant_id: founding.id})
+
+      {:ok, _closed} = Venues.revoke_grant(employer, revoked.id)
+
+      assert Engagements.end_engagement(employer, real.id) == {:error, :last_grant_holder}
+    end
+
+    test "is not what an engagement holding a revoked grant is" do
+      # The liveness half of the same mistake, and it points the other way: an
+      # engagement whose grant was revoked counted as authority it did not hold,
+      # so it could never be ended either. The venue was stuck with a row it
+      # could not remove and a person it could not release.
+      # Nobody holds the founding grant, so the engagement below is the venue's
+      # only grant-*holding* one — and its grant is revoked, so it holds no
+      # authority at all.
+      {employer, %{venue: venue, grant: founding}} = scoped_venue_fixture(@now)
+      departing = person_scope_fixture(@now)
+
+      {:ok, revoked} = Venues.issue_grant(employer)
+      powerless = engagement_fixture(employer, departing, %{grant_id: revoked.id})
+
+      {:ok, _closed} = Venues.revoke_grant(employer, revoked.id)
+
+      assert {:ok, ended} = Engagements.end_engagement(employer, powerless.id)
+      assert ended.id == powerless.id
+      assert active_ids_at(venue, founding, @now) == []
     end
 
     test "counts holders that are active, not holders that have a row" do
@@ -975,6 +1095,10 @@ defmodule HospitalityComs.EngagementsTest do
 
   defp employer_scope_at(venue, grant, instant) do
     EmployerScope.for_grant(venue.id, grant.id, instant)
+  end
+
+  defp employer_scope_at_venue(%EmployerScope{} = scope, instant) do
+    EmployerScope.for_grant(scope.venue_id, scope.grant_id, instant)
   end
 
   # Membership, asked through the context so that what is asserted is the

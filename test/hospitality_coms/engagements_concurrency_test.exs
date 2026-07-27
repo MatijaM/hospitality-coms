@@ -58,12 +58,14 @@ defmodule HospitalityComs.EngagementsConcurrencyTest do
   import HospitalityComs.EngagementsFixtures
 
   alias Ecto.Adapters.SQL.Sandbox
+  alias HospitalityComs.Accounts.EmployerScope
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.EmployerRepo
   alias HospitalityComs.Engagements
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Engagements.Invitation
   alias HospitalityComs.Repo
+  alias HospitalityComs.Venues
 
   @now ~U[2026-03-01 12:00:00.000000Z]
   @in_a_month DateTime.add(@now, 30, :day)
@@ -207,7 +209,95 @@ defmodule HospitalityComs.EngagementsConcurrencyTest do
     end
   end
 
+  describe "two concurrent endings" do
+    test "do not together leave the venue with an authority nobody holds" do
+      # The race `locked_decision_set/2`'s `FOR UPDATE` exists for, and the one
+      # `HospitalityComs.VenuesConcurrencyTest` proves the other half of. Two
+      # managers each ending the other's engagement both read *two* holders,
+      # both correctly conclude they are not removing the last, and together
+      # leave the venue with an authority nobody holds — which is R22 defeated
+      # by two calls that were individually right.
+      {employer, creation} = scoped_venue_fixture(@now)
+      pairs = two_managers(employer, creation)
+
+      results = race_endings(creation.venue, pairs)
+
+      assert Enum.count(results, &match?({:ok, %Engagement{}}, &1)) == 1
+      assert Enum.count(results, &(&1 == {:error, :last_grant_holder})) == 1
+    end
+
+    test "leave the venue with exactly one engagement holding an authority" do
+      # The property rather than the error tuple. Counting the tuples would pass
+      # on a refusal that came from somewhere else entirely.
+      {employer, creation} = scoped_venue_fixture(@now)
+      pairs = two_managers(employer, creation)
+
+      race_endings(creation.venue, pairs)
+
+      assert length(active_holder_ids(creation.venue.id)) == 1
+    end
+
+    test "are a real race, not two calls that happened to be sequential" do
+      # The control. Run one after the other, the second correctly sees one
+      # holder and refuses — so every assertion above passes on an
+      # implementation with no lock at all.
+      {employer, creation} = scoped_venue_fixture(@now)
+      [{first_grant, first}, {second_grant, second}] = two_managers(employer, creation)
+
+      holder = hold_row("engagements", Enum.min([first.id, second.id]))
+
+      tasks = [
+        ender(creation.venue, first_grant, first.id),
+        ender(creation.venue, second_grant, second.id)
+      ]
+
+      try do
+        await_blocked(backend_pids(2))
+
+        # Both are inside the locked count and neither has closed anything.
+        assert length(active_holder_ids(creation.venue.id)) == 2
+      after
+        release(holder)
+      end
+
+      results = Task.await_many(tasks, @barrier_timeout)
+
+      assert Enum.count(results, &(&1 == {:error, :last_grant_holder})) == 1
+    end
+  end
+
   ## Racing
+
+  # Two engagements at one venue, each holding a live grant of its own, so that
+  # neither is the last holder until the other one goes.
+  defp two_managers(employer, %{grant: founding}) do
+    {:ok, second} = Venues.issue_grant(employer)
+
+    [
+      {founding, engagement_fixture(employer, person_scope_fixture(@now), holding(founding))},
+      {second, engagement_fixture(employer, person_scope_fixture(@now), holding(second))}
+    ]
+  end
+
+  defp holding(grant), do: Map.put(term(), :grant_id, grant.id)
+
+  # The barrier goes on the row that sorts first under `(starts_at, id)`, which
+  # is the order `locked_decision_set/2` acquires in — so neither racer holds a
+  # lock the other is waiting on and both park on the same row.
+  defp race_endings(venue, pairs) do
+    barrier_id = pairs |> Enum.map(fn {_grant, engagement} -> engagement.id end) |> Enum.min()
+
+    race(barrier_id, "engagements", fn ->
+      Enum.map(pairs, fn {grant, engagement} -> ender(venue, grant, engagement.id) end)
+    end)
+  end
+
+  # Ending runs as `employer_role`, so the backend to watch is `EmployerRepo`'s.
+  defp ender(venue, grant, engagement_id) do
+    scope = EmployerScope.for_grant(venue.id, grant.id, @now)
+
+    detached(EmployerRepo, fn -> Engagements.end_engagement(scope, engagement_id) end)
+  end
 
   defp race_claims(invitation_id, code, scopes \\ nil) do
     race(invitation_id, "invitations", fn ->
@@ -384,5 +474,19 @@ defmodule HospitalityComs.EngagementsConcurrencyTest do
 
   defp engagement_person_ids(venue_id) do
     Repo.all(from(e in Engagement, where: e.venue_id == ^venue_id, select: e.person_id))
+  end
+
+  # The venue's engagements that are active at `@now` and hold a grant. Read
+  # through `Repo` rather than through the context, because what is being
+  # counted is the state the database is in rather than the answer an employer
+  # session would get.
+  defp active_holder_ids(venue_id) do
+    Repo.all(
+      from engagement in Engagement,
+        where: engagement.venue_id == ^venue_id,
+        where: not is_nil(engagement.grant_id),
+        where: engagement.starts_at <= ^@now and engagement.ends_at > ^@now,
+        select: engagement.id
+    )
   end
 end

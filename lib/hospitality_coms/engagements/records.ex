@@ -48,6 +48,7 @@ defmodule HospitalityComs.Engagements.Records do
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Engagements.Invitation
   alias HospitalityComs.Profiles.AttestedEntry
+  alias HospitalityComs.Venues.EmployerGrant
 
   ## Engagements
 
@@ -132,16 +133,54 @@ defmodule HospitalityComs.Engagements.Records do
   end
 
   @doc """
-  Engagements that hold one of the venue's administrative authorities.
+  The rows `HospitalityComs.Engagements.end_engagement/2` locks and decides on:
+  every engagement of the venue holding a *live* authority at `instant`, plus
+  the one it has been asked to close.
 
-  `grant_id` is null on an ordinary worker. Combined with `active_at/2`, this is
-  the set `HospitalityComs.Engagements.end_engagement/2` counts before it agrees
-  to close one (R22, KTD17): a venue whose last grant-holding engagement ends is
-  a venue nobody can administer.
+  Both halves in one `where`, because the decision is one question — is this
+  venue's last authority-holding engagement the one being closed — and asking it
+  in two queries is asking it twice about a set that can move in between.
+
+  "Holds an authority" is `grant_id` naming a grant that is live at `instant`,
+  not `grant_id` being set, and the difference runs in both directions. An
+  engagement whose grant was revoked yesterday is not a holder: counting it lets
+  the venue's real manager be ended and leaves nobody able to administer it, and
+  it also means the powerless engagement can never itself be ended, because it
+  counts as authority it does not hold. `EmployerGrant.live_at/2` is the
+  predicate `HospitalityComs.Venues` already treats as canonical, and this is
+  the same one.
+
+  It is a subquery rather than a join on purpose. `FOR UPDATE` over a join locks
+  every relation in it, so a join would take row locks on `employer_grants` as
+  well, in an order this function does not control and
+  `HospitalityComs.Venues.revoke_grant/2` does not share. A subquery in `where`
+  adds no locked relation.
+
+  `starts_at <= instant` is applied to the survivors and not to the target: an
+  engagement that has not started holds no authority *yet*, so it cannot be the
+  last holder, but it can still be closed. The caller supplies the upper bound.
   """
-  @spec holding_authority(Ecto.Queryable.t()) :: Ecto.Query.t()
-  def holding_authority(queryable) do
-    from engagement in queryable, where: not is_nil(engagement.grant_id)
+  @spec decision_set(Ecto.Queryable.t(), Ecto.UUID.t(), DateTime.t(), Ecto.UUID.t()) ::
+          Ecto.Query.t()
+  def decision_set(queryable, venue_id, %DateTime{} = instant, engagement_id)
+      when is_binary(venue_id) and is_binary(engagement_id) do
+    live_grants = live_grant_ids(venue_id, instant)
+
+    from engagement in queryable,
+      where:
+        (engagement.starts_at <= ^instant and engagement.grant_id in subquery(live_grants)) or
+          engagement.id == ^engagement_id
+  end
+
+  @doc """
+  The ids of a venue's grants that are live at `instant`.
+
+  A projection of `HospitalityComs.Venues.EmployerGrant.live_at/2` rather than a
+  second spelling of it, so that "live" cannot come to mean two things.
+  """
+  @spec live_grant_ids(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  def live_grant_ids(venue_id, %DateTime{} = instant) when is_binary(venue_id) do
+    venue_id |> EmployerGrant.live_at(instant) |> select([grant], grant.id)
   end
 
   @doc """

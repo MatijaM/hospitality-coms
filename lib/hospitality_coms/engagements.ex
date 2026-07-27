@@ -102,13 +102,17 @@ defmodule HospitalityComs.Engagements do
   ## What this context deliberately cannot do
 
   It cannot delete anything. Deletion is confined to the lifecycle context
-  (KTD21), so there is no way here to cancel an engagement that has not started
-  — closing its term would produce an empty period, which the schema refuses,
-  and removing the row is a delete. `end_engagement/2` therefore answers
-  `:not_found` for one, along with every other engagement that is not active at
-  the caller's instant: an already-ended one, one belonging to another venue,
-  and an id that names nothing all get the same answer, so the refusal
-  enumerates nothing.
+  (KTD21), so an engagement claimed in error is *closed* rather than removed:
+  `end_engagement/2` takes it to `ends_at == starts_at`, which is the empty
+  range — active at no instant, and overlapping nothing, so the person's dates
+  are free again. That widening is on the ending path alone. Every read still
+  answers on `active_at/2`, so a not-yet-started engagement is invisible to
+  `list_engagements/1`, to `fetch_engagement/2` and to `renew_engagement/3`
+  exactly as it was.
+
+  Everything whose term has already closed stays `:not_found`, along with an
+  engagement belonging to another venue and an id that names nothing, so the
+  refusal still enumerates nothing.
   """
 
   import Ecto.Query
@@ -141,6 +145,7 @@ defmodule HospitalityComs.Engagements do
   """
   @type claim() :: %{
           consume: Invitation.t(),
+          conferrable: :confers_nothing | :confers_a_live_grant,
           engagement: Engagement.t(),
           attested_entry: AttestedEntry.t(),
           expiry_job: Oban.Job.t()
@@ -157,6 +162,7 @@ defmodule HospitalityComs.Engagements do
   """
   @type claim_failure() ::
           {:error, :consume, :unknown_code | :already_claimed | :code_expired, map()}
+          | {:error, :conferrable, :grant_not_live, map()}
           | {:error, :engagement, Ecto.Changeset.t(Engagement.t()), map()}
           | {:error, :attested_entry, Ecto.Changeset.t(AttestedEntry.t()), map()}
           | {:error, :expiry_job, Ecto.Changeset.t(Oban.Job.t()), map()}
@@ -262,6 +268,12 @@ defmodule HospitalityComs.Engagements do
        one affected row. First, so that two claimants racing the same code
        resolve here rather than three statements later where nothing would
        notice. The loser gets `{:error, :consume, :already_claimed, _}`.
+    1a. `:conferrable` — the authority the invitation confers, if any, asked
+       again. `issue_invitation/2` checked it when the offer was written and an
+       offer is good for as long as its code is; without this a claim can mint a
+       manager whose grant was revoked in between, which is a holder that holds
+       nothing and the unadministrable venue R22 refuses. A refusal rolls the
+       consume back with it, so the code is not spent.
     2. `:engagement` — the bridge row, built entirely from the invitation and
        the claimant. Nothing is cast from the caller: accepting an offer is
        accepting *the* offer, and a claim that could move its own start date
@@ -289,6 +301,7 @@ defmodule HospitalityComs.Engagements do
 
     Multi.new()
     |> Multi.run(:consume, fn repo, _changes -> consume(repo, digest, now) end)
+    |> Multi.run(:conferrable, fn repo, changes -> still_conferrable(repo, changes, now) end)
     |> Multi.insert(:engagement, &claimed_engagement(&1, person_id, now))
     |> Multi.insert(:attested_entry, &attestation(&1, now))
     |> Oban.insert(:expiry_job, &expiry_job/1)
@@ -340,6 +353,33 @@ defmodule HospitalityComs.Engagements do
   defp diagnose(nil, _now), do: {:error, :unknown_code}
   defp diagnose(%Invitation{claimed_at: %DateTime{}}, _now), do: {:error, :already_claimed}
   defp diagnose(%Invitation{}, _now), do: {:error, :code_expired}
+
+  # `issue_invitation/2` checks the conferred authority is live when the offer
+  # is written, and an offer is good for as long as its code is. Asking again
+  # here is what stops a claim minting a manager whose grant was revoked in
+  # between: an engagement that counts as a holder and can do nothing, which is
+  # the unadministrable venue R22 refuses, arrived at from the claim's side.
+  #
+  # A refusal rolls the consume back with it, so the code stays claimable. That
+  # is deliberate: the offer is not spent, and re-issuing the grant makes it
+  # good again.
+  @spec still_conferrable(Ecto.Repo.t(), map(), DateTime.t()) ::
+          {:ok, :confers_nothing | :confers_a_live_grant} | {:error, :grant_not_live}
+  defp still_conferrable(_repo, %{consume: %Invitation{grant_id: nil}}, _now) do
+    {:ok, :confers_nothing}
+  end
+
+  defp still_conferrable(repo, %{consume: %Invitation{} = invitation}, now) do
+    invitation.venue_id
+    |> Records.live_grant_ids(now)
+    |> where([grant], grant.id == ^invitation.grant_id)
+    |> repo.exists?()
+    |> still_live()
+  end
+
+  @spec still_live(boolean()) :: {:ok, :confers_a_live_grant} | {:error, :grant_not_live}
+  defp still_live(true), do: {:ok, :confers_a_live_grant}
+  defp still_live(false), do: {:error, :grant_not_live}
 
   @spec claimed_engagement(map(), Ecto.UUID.t(), DateTime.t()) ::
           Ecto.Changeset.t(Engagement.t())
@@ -536,18 +576,29 @@ defmodule HospitalityComs.Engagements do
   than per person.
 
   Refuses the venue's last active grant-holding engagement with
-  `:last_grant_holder` (R22, KTD17). The count is taken under `FOR UPDATE` on
-  the venue's active grant-holding engagements, so the count and the write are
-  one decision: two managers each ending the other would otherwise each read two
+  `:last_grant_holder` (R22, KTD17). "Holding" means `grant_id` naming a grant
+  that is *live* at this instant, not `grant_id` being set — an engagement whose
+  grant was revoked holds nothing, so it is neither a survivor that lets the
+  real manager be ended nor a target that can never be ended itself. The count
+  is taken under `FOR UPDATE` on that set, so the count and the write are one
+  decision: two managers each ending the other would otherwise each read two
   holders, each correctly conclude they were not removing the last, and together
   leave the venue with an authority nobody holds. The target is resolved out of
   that same locked set rather than by a separate read in front of it.
 
-  Everything that is not active at this instant is `:not_found` — an engagement
-  at another venue, one already ended, one that has not started, and an id that
-  names nothing all get the same answer, so the refusal discloses nothing about
-  which engagements exist. See the moduledoc for why a not-yet-started
-  engagement has no other answer available.
+  The target set is every engagement of the venue whose term has not closed —
+  one state wider than active, so an engagement claimed before its start date
+  can be closed too. It closes at the later of the caller's instant and its own
+  `starts_at`, which for an active engagement is the instant and for a
+  not-yet-started one is its opening: `ends_at == starts_at`, the empty range,
+  active at no instant and overlapping nothing. Without that, a claim made in
+  error reserved the person's dates against the exclusion constraint for its
+  whole term and nobody could take it back. A not-yet-started engagement holds
+  no authority *yet*, so it can never be the last grant holder.
+
+  Everything whose term has already closed is `:not_found`, along with an
+  engagement at another venue and an id that names nothing, so the refusal
+  discloses nothing about which engagements exist.
 
   Broadcasts the revocation after the transaction commits and only if it did
   (KTD8). A broadcast inside the transaction would disconnect clients for a
@@ -587,14 +638,20 @@ defmodule HospitalityComs.Engagements do
   end
 
   # `FOR UPDATE` over exactly the rows the decision depends on: every active
-  # engagement of the venue that holds an authority, plus the target itself.
+  # engagement of the venue holding a live authority, plus the target itself.
   # A total order — `(starts_at, id)` — makes the lock acquisition
   # deterministic, so two sessions block rather than deadlock.
+  #
+  # Every row that comes back other than the target therefore holds a live
+  # grant by construction, which is what lets `orphans_venue?/3` decide on the
+  # emptiness of the survivor list rather than re-testing each one.
   @spec locked_decision_set(EmployerScope.t(), Ecto.UUID.t()) :: [Engagement.t()]
-  defp locked_decision_set(scope, engagement_id) do
-    scope
-    |> active_engagements()
-    |> where([engagement], not is_nil(engagement.grant_id) or engagement.id == ^engagement_id)
+  defp locked_decision_set(%EmployerScope{venue_id: venue_id, now: now}, engagement_id) do
+    Engagement
+    |> Records.of_venue(venue_id)
+    |> Records.not_ended_by(now)
+    |> Records.decision_set(venue_id, now, engagement_id)
+    |> Records.oldest_first()
     |> lock("FOR UPDATE")
     |> EmployerRepo.all()
   end
@@ -606,18 +663,43 @@ defmodule HospitalityComs.Engagements do
 
   defp close_target({[target], survivors}, scope) do
     target
-    |> orphans_venue?(survivors)
-    |> close_or_refuse(target, scope.now)
+    |> orphans_venue?(survivors, scope)
+    |> close_or_refuse(target, closing_instant(target, scope.now))
   end
 
-  # Only a grant-holding engagement can orphan a venue, and only if no other
-  # active engagement holds one. An ordinary worker leaving is never refused.
-  @spec orphans_venue?(Engagement.t(), [Engagement.t()]) :: boolean()
-  defp orphans_venue?(%Engagement{grant_id: nil}, _survivors), do: false
+  # Only an engagement that holds a *live* authority right now can orphan a
+  # venue, and only if no other active engagement holds one. An ordinary
+  # worker leaving is never refused, and neither is a manager whose grant was
+  # revoked out from under them — they hold nothing to be the last of.
+  @spec orphans_venue?(Engagement.t(), [Engagement.t()], EmployerScope.t()) :: boolean()
+  defp orphans_venue?(%Engagement{grant_id: nil}, _survivors, _scope), do: false
 
-  defp orphans_venue?(%Engagement{}, survivors) do
-    not Enum.any?(survivors, &(not is_nil(&1.grant_id)))
+  defp orphans_venue?(%Engagement{} = target, survivors, scope) do
+    survivors == [] and active?(target, scope.now) and holds_live_grant?(target, scope)
   end
+
+  @spec holds_live_grant?(Engagement.t(), EmployerScope.t()) :: boolean()
+  defp holds_live_grant?(%Engagement{grant_id: grant_id}, %EmployerScope{} = scope) do
+    scope.venue_id
+    |> Records.live_grant_ids(scope.now)
+    |> where([grant], grant.id == ^grant_id)
+    |> EmployerRepo.exists?()
+  end
+
+  # An active engagement closes at the caller's instant; one that has not
+  # started closes at its own opening, which is the earliest instant its term
+  # can name. `ends_at < starts_at` is unrepresentable — the generated range
+  # raises on it — and `ends_at == starts_at` is the empty range the schema
+  # already permits: active at no instant, and overlapping nothing, so the
+  # person's dates are free again.
+  @spec closing_instant(Engagement.t(), DateTime.t()) :: DateTime.t()
+  defp closing_instant(%Engagement{starts_at: starts_at}, now) do
+    starts_at |> DateTime.compare(now) |> later_of(starts_at, now)
+  end
+
+  @spec later_of(:lt | :eq | :gt, DateTime.t(), DateTime.t()) :: DateTime.t()
+  defp later_of(:gt, starts_at, _now), do: starts_at
+  defp later_of(_order, _starts_at, now), do: now
 
   @spec close_or_refuse(boolean(), Engagement.t(), DateTime.t()) ::
           {:ok, Engagement.t()}
