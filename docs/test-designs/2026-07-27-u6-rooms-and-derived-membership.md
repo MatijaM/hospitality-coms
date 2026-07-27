@@ -157,6 +157,7 @@ case, including the empty and unbounded ones.
 | 29 | `employer_role` holds nothing on `room_messages` | boundary_test | boundary | the ungranted list |
 | 30 | The employer-zone privilege inventory is exactly what U6's code exercises | boundary_test | boundary | the grant migration |
 | 31 | The U6 migrations round-trip: down leaves no table, up restores privileges and policies | boundary_test | boundary | reversible `down` |
+| 32 | A send naming another venue's room is `:not_found`, open or shut | rooms_test | boundary | the sender's-venues confinement |
 
 Controls carried alongside, so no assertion can pass for the wrong reason:
 
@@ -194,12 +195,79 @@ Controls carried alongside, so no assertion can pass for the wrong reason:
 - Person-side and employer-side reads run through different repos, so the tests that span
   them are non-sandboxed and purge by name prefix, following `EngagementsFixtures`.
 
+## Revisions made during implementation
+
+Recorded rather than silently applied, because the gate exists to be departed from
+explicitly.
+
+1. **There is no `venue_rooms` table, and no `shifts` table.** The brief assumed both
+   from the plan's file list. A venue room is one per venue and has nothing to store
+   that `venues` and `engagements` do not already hold, so it is a derived struct —
+   `Rooms.VenueRoom` — and a venue-room message is a `room_messages` row whose
+   `shift_room_id` is null. A shift room *is* the shift; the plan's diagram listed
+   `shifts` next to `membership_snapshots`, KTD6b deleted the second, and the first
+   never had a field the room did not. Materialising either would have been the same
+   mistake KTD6b rejects at full size, in miniature.
+
+2. **U6 builds messages, which the plan's file list does not name.** Four of the unit's
+   own test scenarios are assertions about messages — the post-grace send, the
+   already-sent messages a removal leaves intact, the venue-room history a new hire
+   reads. `room_messages` is one table for both room kinds, because the two differ in
+   who may read them and in nothing else. No retention column: KTD16's stamped deadlines
+   are U10's `*_add_retention_columns.exs`, and a deadline written before the sweeper
+   that reads it exists is a column nobody could have tested.
+
+3. **The grace is stamped on the room, not joined to its shift type.** The brief said
+   "copied"; this records why it is load-bearing rather than tidy. A shift type edited on
+   Tuesday would otherwise reopen Monday's closed room, and for every room of that type
+   at once. Scenario 24 covers it.
+
+4. **`employer_role` holds nothing at all on `room_messages`.** Not in the brief's
+   inventory. Room conversation is worker-facing — R11's readers are the people who
+   worked the shift, a manager among them, reading through their own engagement from the
+   person's side. An employer *session* that can read a venue's conversation in bulk has
+   no reason to exist, so no grant creates one. The same shape `attested_entries` has
+   under KTD3, for a different reason.
+
+5. **U3's `grant_zones` migration was not edited, and the assertion around it grew
+   instead.** `boundary_test.exs` asserted `GrantZones.person_zone_tables() ==
+   Zones.person_zone_tables()`; U6 adds the first person-zone table since U2 and U1–U5's
+   migrations are off-limits. The comparison is now a union over every migration that
+   revokes, which is the shape `granted ++ @ungranted_tables == employer_zone ++ shared`
+   already had. A person-zone table covered by no migration still fails it.
+
+6. **`privilege_snapshot/0` in `boundary_test.exs` now sweeps `GrantZones`'s own list
+   rather than the whole classification.** It is taken while the later units' migrations
+   are rolled off, and `Zones.privileges/2` raises on a missing table on purpose. The
+   helper's own comment already said "everything the migration is responsible for"; this
+   makes it true. Coverage is unchanged — `Zones.employer_privileges(Repo) == []` over
+   the whole person zone is still asserted separately, and revision 5 ties the two lists
+   together.
+
+7. **An enumeration leak found in review, after the tests were green.**
+   `send_shift_room_message/3` looked a room up by id alone, so `:room_closed` and
+   `:not_rostered` — both statements that the named room exists — enumerated every
+   venue's shifts one probe at a time. That is AE1's not-found-rather-than-forbidden rule
+   lost at the one place a caller supplies the id. The lookup is now confined to the
+   sender's own venues. Scenario 32 was added with its own control.
+
+8. **`Rosters` is a context of its own and `Rooms` reads its consequences.** Rostering is
+   an administrative act under an employer scope; "who is in this room" and "who may read
+   it" are questions about rooms, and one of them subtracts a person-zone table no
+   employer scope may reach.
+
+9. **`EngagementsFixtures.purge/0` grew.** Every U6 table hangs off `engagements` or
+   `venues` through `ON DELETE RESTRICT`, so U5's purge had to remove them first —
+   `shift_types` included, which U5 never created and therefore never purged.
+
 ## Quality scores (self-assessed)
 
-- Coverage of stated scenarios: 14/14 named in the plan and the issue, plus 17 added.
+- Coverage of stated scenarios: 14/14 named in the plan and the issue, plus 18 added.
 - Assertion strength: every scenario asserts a state or a set, not a return value alone.
-- Control coverage: 8 controls for the 8 assertions that could pass vacuously.
+- Control coverage: 9 controls for the 9 assertions that could pass vacuously.
 - Isolation: tests that touch both repos are non-sandboxed and purged before and after;
   everything else is sandboxed.
+- Suite: 517 tests, green over three seeded runs; `mix quality` and
+  `mix format --check-formatted` clean; strict compile clean in `:dev` and `:prod`.
 </content>
 </invoke>
