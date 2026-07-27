@@ -368,8 +368,11 @@ defmodule HospitalityComs.VenuesTest do
       {:ok, _revoked} = Venues.revoke_grant(scope, middle.id)
 
       later = EmployerScope.for_grant(scope.venue_id, founding.id, @later)
+
+      # As a set: all three were granted at the same instant, so their order
+      # is their id order, which is random. `list_grants/1` has its own test.
       assert {:ok, grants} = Venues.list_grants(later)
-      assert Enum.map(grants, & &1.id) == [founding.id, leaf.id]
+      assert Enum.sort(Enum.map(grants, & &1.id)) == Enum.sort([founding.id, leaf.id])
     end
 
     test "leaves an ancestor's reach over the orphaned descendant intact" do
@@ -779,6 +782,20 @@ defmodule HospitalityComs.VenuesTest do
       end
     end
 
+    test "reject a second founding grant at one venue" do
+      # "Exactly one founding grant per venue" was claimed in three docstrings
+      # and held by nothing: two null-lineage rows for one venue both went in,
+      # and the property that makes the founding grant identifiable without
+      # naming its holder identified two grants or none.
+      venue_id = raw_venue()
+
+      raw_grant(venue_id)
+
+      assert_raise Postgrex.Error, ~r/employer_grants_one_founding_grant/, fn ->
+        raw_grant(venue_id)
+      end
+    end
+
     test "accept a lineage inside one venue" do
       # The control for the one above.
       venue_id = raw_venue()
@@ -932,7 +949,7 @@ defmodule HospitalityComs.VenuesTest do
     )
   end
 
-  defp raw_grant(venue_id, opts) do
+  defp raw_grant(venue_id, opts \\ []) do
     Repo.query!(
       """
       INSERT INTO employer_grants

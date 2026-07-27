@@ -31,8 +31,18 @@ defmodule HospitalityComs.Repo.Migrations.CreateVenues do
   row at venue A point at a grant belonging to venue B, which is precisely the
   cross-tenant edge the zone partition exists to make unrepresentable.
 
-  `employer_grants.granted_by_grant_id` uses one already, so the pattern is
-  exercised inside this unit rather than only promised to later ones.
+  `employer_grants.granted_by_grant_id` and `employer_grants.revoked_by_grant_id`
+  both use one already, so the pattern is exercised inside this unit rather
+  than only promised to later ones.
+
+  ## Exactly one founding grant per venue, held by a partial index
+
+  A grant's null `granted_by_grant_id` is what identifies the founding grant
+  without naming its holder, and that identification is only worth anything if
+  there is exactly one. `employer_grants_one_founding_grant` is a unique index
+  on `venue_id` partial on `granted_by_grant_id IS NULL`, which is the shape
+  that says so: a check constraint sees one row and this rule is about the
+  table.
 
   `venues` gets none: a venue's own `id` *is* the venue key, so a plain
   reference to `venues (id)` already carries the whole of the tenancy.
@@ -102,6 +112,16 @@ defmodule HospitalityComs.Repo.Migrations.CreateVenues do
     # this migration's own included. See the moduledoc.
     create unique_index(:employer_grants, [:id, :venue_id])
     create index(:employer_grants, [:venue_id])
+
+    # Exactly one founding grant per venue. A partial unique index rather than
+    # a check constraint, because the rule is about the table and not about a
+    # row: a null lineage is what makes the founding grant identifiable
+    # without naming its holder, and two null lineages at one venue make it
+    # identifiable as neither.
+    create unique_index(:employer_grants, [:venue_id],
+             where: "granted_by_grant_id IS NULL",
+             name: :employer_grants_one_founding_grant
+           )
 
     # Added after the unique index rather than inline in `create table`,
     # because a foreign key needs the constraint it references to exist first.
