@@ -33,6 +33,11 @@ defmodule HospitalityComs.Rosters do
   for the same reason: `joined_at` is not movable by any statement an employer
   session can issue.
 
+  The close is one statement with `left_at IS NULL` in its own `WHERE`, so two
+  managers removing the same person at two instants cannot both succeed and
+  leave the upper bound wherever the slower transaction put it. See
+  `close_open_period/2`; `HospitalityComs.RoomsConcurrencyTest` measures it.
+
   It follows that a roster entry is never deleted here, and not only because
   deletion is confined to the lifecycle context (KTD21). A rostering made in
   error is *closed*, which for an entry that has not begun means closing it at
@@ -149,26 +154,69 @@ defmodule HospitalityComs.Rosters do
   that was closed a moment ago: closing it twice would move the upper bound
   forward and *shorten* nothing, but it would rewrite a record of when somebody
   left, and there is no reason to allow that.
+
+  It is the same answer a caller gets when somebody else closed the period
+  while this call was resolving it — see `close_open_period/2`.
   """
   @spec remove_from_roster(EmployerScope.t(), Ecto.UUID.t(), Ecto.UUID.t()) ::
-          {:ok, RosterEntry.t()}
-          | {:error, refusal() | Ecto.Changeset.t(RosterEntry.t())}
+          {:ok, RosterEntry.t()} | {:error, :no_grant | :not_rostered}
   def remove_from_roster(%EmployerScope{grant_id: grant_id} = scope, shift_room_id, engagement_id)
       when is_binary(grant_id) and is_binary(shift_room_id) and is_binary(engagement_id) do
     EmployerRepo.scoped_transaction(scope, &close_entry(&1, shift_room_id, engagement_id))
   end
 
   @spec close_entry(EmployerScope.t(), Ecto.UUID.t(), Ecto.UUID.t()) ::
-          {:ok, RosterEntry.t()}
-          | {:error, refusal() | Ecto.Changeset.t(RosterEntry.t())}
+          {:ok, RosterEntry.t()} | {:error, :no_grant | :not_rostered}
   defp close_entry(scope, shift_room_id, engagement_id) do
     with {:ok, _grant} <- Venues.fetch_acting_grant(scope),
          {:ok, entry} <- fetch_open_entry(scope, shift_room_id, engagement_id) do
-      entry
-      |> RosterEntry.leave_changeset(scope.now)
-      |> EmployerRepo.update()
+      entry |> close_open_period(scope.now) |> closed_or_lost()
     end
   end
+
+  # The whole of the concurrency story is `is_nil(candidate.left_at)` repeated
+  # inside the write.
+  #
+  # Reading the open entry and then updating it by primary key let two managers
+  # removing the same person at two instants both read the same row and both
+  # write. The later *commit* won, which is neither the earlier removal nor the
+  # later one — it is whichever transaction the scheduler finished second — so a
+  # period's upper bound moved backwards while both callers were told the
+  # removal had happened.
+  #
+  # One `UPDATE … WHERE left_at IS NULL` that both aim at answers it: Postgres
+  # serialises them on the row and re-evaluates the predicate for the second,
+  # which then matches nothing. That is the manoeuvre
+  # `HospitalityComs.Engagements.claim_invitation/2` makes with `claimed_at IS
+  # NULL`, and it fits better here than the `optimistic_lock/2` U5 put on
+  # `engagements`: a renewal is a repeatable mutation where "somebody else
+  # changed this" is the only honest answer, while closing a period happens once
+  # and the honest answer to closing one somebody else has already closed is
+  # `:not_rostered` — the answer this function already gives for a period closed
+  # a moment ago, which is the same event seen a little later.
+  #
+  # No constraint can fire. `closing_instant/2` never returns an instant before
+  # `joined_at`, and narrowing a period cannot create an overlap that widening
+  # it would — so there is no changeset in this path and none in the spec.
+  @spec close_open_period(RosterEntry.t(), DateTime.t()) ::
+          {non_neg_integer(), [RosterEntry.t()] | nil}
+  defp close_open_period(entry, now) do
+    RosterEntry
+    |> where([candidate], candidate.id == ^entry.id)
+    |> where([candidate], is_nil(candidate.left_at))
+    |> select([candidate], candidate)
+    |> EmployerRepo.update_all(
+      set: [
+        left_at: RosterEntry.closing_instant(entry, now),
+        updated_at: DateTime.truncate(now, :second)
+      ]
+    )
+  end
+
+  @spec closed_or_lost({non_neg_integer(), [RosterEntry.t()] | nil}) ::
+          {:ok, RosterEntry.t()} | {:error, :not_rostered}
+  defp closed_or_lost({1, [%RosterEntry{} = entry]}), do: {:ok, entry}
+  defp closed_or_lost({0, _rows}), do: {:error, :not_rostered}
 
   @doc """
   The shift room's roster at the scope's instant, earliest joined first.

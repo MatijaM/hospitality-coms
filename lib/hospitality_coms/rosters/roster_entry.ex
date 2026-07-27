@@ -154,30 +154,19 @@ defmodule HospitalityComs.Rosters.RosterEntry do
   end
 
   @doc """
-  Closes an open entry at `now`.
+  The instant an open entry closes at: `now`, widened to the entry's own
+  `joined_at` where that is later.
 
-  The one mutation a roster entry has, and it moves the upper bound only. It
-  closes at `closing_instant/2` — `now` exactly, or the entry's own `joined_at`
-  where that is later, which for an entry rostered in the future is its opening
-  and therefore `[a, a)`, the empty range, overlapping nothing.
-  `ends_at < starts_at` is unrepresentable and this is the same widening
-  `HospitalityComs.Engagements.end_engagement/2` makes for the same reason: a
-  rostering made in error must be undoable without leaving a period nobody can
-  free.
-  """
-  @spec leave_changeset(t(), DateTime.t()) :: Ecto.Changeset.t(t())
-  def leave_changeset(%__MODULE__{} = entry, %DateTime{} = now) do
-    entry
-    |> change(
-      left_at: closing_instant(entry, now),
-      updated_at: DateTime.truncate(now, :second)
-    )
-    |> declare_constraints()
-  end
+  The one mutation a roster entry has moves the upper bound and nothing else,
+  and there is no changeset for it — `HospitalityComs.Rosters.remove_from_roster/3`
+  writes it as one conditional `UPDATE` so that two concurrent removals cannot
+  both succeed, and this is the value it writes.
 
-  @doc """
-  The instant an open entry closes at: `now`, widened to `joined_at` where the
-  entry has not begun.
+  For an entry rostered in the future the widening gives `[a, a)`, the empty
+  range, which overlaps nothing: `ends_at < starts_at` is unrepresentable, and
+  this is the same widening `HospitalityComs.Engagements.end_engagement/2` makes
+  for the same reason — a rostering made in error must be undoable without
+  leaving a period nobody can free.
 
   Not truncated. A floored upper bound closes the period before the removal
   happened, and the part of a period that has already elapsed is the one thing
