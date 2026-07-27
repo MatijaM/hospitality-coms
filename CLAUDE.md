@@ -165,7 +165,7 @@ What a grant may revoke is itself and its transitive descendants through `grante
 
 **`Rosters.add_to_roster/3` refuses an engagement that has not started yet**, with `{:error, :not_found}`, so a hire whose term opens next Monday cannot go on next Tuesday's shift today and the operator cannot learn why. Recorded in the moduledoc as a limitation rather than fixed: nothing depends on it, because membership and readability already intersect with an engagement active at the instant asked about.
 
-**Two more test files are not sandboxed:** `rooms_test.exs`, `rosters_test.exs` and `rooms_concurrency_test.exs`, all through `EngagementsFixtures.real_connections/0`, for the reason U5's three are.
+**Three more test files are not sandboxed:** `rooms_test.exs`, `rosters_test.exs` and `rooms_concurrency_test.exs`, all through `EngagementsFixtures.real_connections/0`, for the reason U5's three are.
 
 ## Two disclosures on the record
 

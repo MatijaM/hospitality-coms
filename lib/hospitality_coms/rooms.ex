@@ -435,16 +435,41 @@ defmodule HospitalityComs.Rooms do
   The suspension row is kept and closed. On resuming, the room's full history is
   readable — including everything sent while the person was away, because
   history is not filtered by who was in the room when it was written.
+
+  Closing is a conditional update on `resumed_at IS NULL`, the same manoeuvre
+  `Rosters.remove_from_roster/3` uses on `left_at`. A plain `Repo.update/1`
+  here would let two concurrent resumes both write: the later commit's
+  `resumed_at` would win and the earlier caller would be handed a struct whose
+  `resumed_at` no longer matched the row. Closing a period happens once, so
+  losing the race is `{:error, :not_suspended}` — the same answer this function
+  already gives for a suspension somebody closed a moment ago.
   """
   @spec resume_venue_room(PersonScope.t(), Ecto.UUID.t()) ::
-          {:ok, VenueRoomSuspension.t()}
-          | {:error, :no_engagement | :not_suspended | Ecto.Changeset.t(VenueRoomSuspension.t())}
+          {:ok, VenueRoomSuspension.t()} | {:error, :no_engagement | :not_suspended}
   def resume_venue_room(%PersonScope{} = scope, venue_id) when is_binary(venue_id) do
     with {:ok, engagement} <- fetch_engagement(scope, venue_id),
          {:ok, suspension} <- fetch_open_suspension(engagement, scope.now) do
-      suspension
-      |> VenueRoomSuspension.close_changeset(scope.now)
-      |> Repo.update()
+      close_open_suspension(suspension, scope.now)
+    end
+  end
+
+  @spec close_open_suspension(VenueRoomSuspension.t(), DateTime.t()) ::
+          {:ok, VenueRoomSuspension.t()} | {:error, :not_suspended}
+  defp close_open_suspension(%VenueRoomSuspension{id: id}, %DateTime{} = now) do
+    # Truncated for the same reason `close_changeset/2` truncates it: both
+    # columns are `:utc_datetime`, so a sub-second instant would be rounded by
+    # Postgres rather than floored, and a resume at 12:00:01.8 would land at
+    # 12:00:02 — after the call that made it.
+    stamped_at = DateTime.truncate(now, :second)
+
+    query =
+      from suspension in VenueRoomSuspension,
+        where: suspension.id == ^id and is_nil(suspension.resumed_at),
+        select: suspension
+
+    case Repo.update_all(query, set: [resumed_at: stamped_at, updated_at: stamped_at]) do
+      {1, [%VenueRoomSuspension{} = resumed]} -> {:ok, resumed}
+      {0, _none} -> {:error, :not_suspended}
     end
   end
 

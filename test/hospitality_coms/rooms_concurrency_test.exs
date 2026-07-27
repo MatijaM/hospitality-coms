@@ -236,6 +236,44 @@ defmodule HospitalityComs.RoomsConcurrencyTest do
     end
   end
 
+  describe "two concurrent resumes of one suspension" do
+    test "close the period once and refuse the second" do
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+      {:ok, suspension} = Rooms.suspend_venue_room(person, employer.venue_id)
+
+      results = race_resumes(person, employer.venue_id, suspension)
+
+      assert Enum.count(results, &match?({:ok, %VenueRoomSuspension{}}, &1)) == 1
+      assert Enum.count(results, &(&1 == {:error, :not_suspended})) == 1
+      assert suspension_count(engagement.id) == 1
+    end
+
+    test "hand back a struct the row agrees with" do
+      # The failure this names, and the reason `resume_venue_room/2` closes
+      # conditionally rather than with `Repo.update/1`: both resumes used to
+      # succeed, the later commit's `resumed_at` won, and the earlier caller
+      # was handed a struct whose `resumed_at` was not what the row held. The
+      # person ends up resumed either way — the lie is in the answer, not the
+      # state, which is why it survived a suite that only checked the state.
+      %{employer: employer, person: person} = engaged()
+      {:ok, suspension} = Rooms.suspend_venue_room(person, employer.venue_id)
+
+      results = race_resumes(person, employer.venue_id, suspension)
+
+      assert [{:ok, winner}] = Enum.filter(results, &match?({:ok, %VenueRoomSuspension{}}, &1))
+      assert Repo.get!(VenueRoomSuspension, suspension.id).resumed_at == winner.resumed_at
+
+      # Second precision, unlike a roster entry's bounds: `venue_room_suspensions`
+      # stays `:utc_datetime` on purpose, because both its bounds move the
+      # person's own absence in the person's own favour and change nobody
+      # else's answer.
+      assert winner.resumed_at in Enum.map(
+               [@an_hour_on, @two_hours_on],
+               &DateTime.truncate(&1, :second)
+             )
+    end
+  end
+
   ## Racing
 
   # `build` is a function rather than a list for the reason
@@ -263,6 +301,25 @@ defmodule HospitalityComs.RoomsConcurrencyTest do
         remover(employer, @two_hours_on, room, engagement)
       ]
     end)
+  end
+
+  defp race_resumes(person, venue_id, suspension) do
+    barrier = hold_row("venue_room_suspensions", suspension.id)
+
+    race(barrier, fn ->
+      [
+        resumer(person, @an_hour_on, venue_id),
+        resumer(person, @two_hours_on, venue_id)
+      ]
+    end)
+  end
+
+  # Resuming writes a person-zone table, so the backend to watch is `Repo`'s,
+  # the same as `suspender/2`.
+  defp resumer(person, instant, venue_id) do
+    scope = person_at(person, instant)
+
+    detached(Repo, fn -> Rooms.resume_venue_room(scope, venue_id) end)
   end
 
   # Rostering runs as `employer_role`, so the backend to watch is
