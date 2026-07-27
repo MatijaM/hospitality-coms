@@ -73,13 +73,28 @@ defmodule HospitalityComsWeb.Presence do
   because a channel cannot track itself before it has finished joining — the
   tracker would be registering a process that is not yet subscribed to its own
   topic.
+
+  `:not_tracked` is every way `Phoenix.Tracker` can decline, collapsed. The
+  library's reason is unbounded — `{:error, {:already_tracked, pid, topic,
+  key}}` is the documented one and nothing promises it is the last — and
+  `AGENTS.md` names `{:error, term()}` as the thing not to write. It is
+  collapsed in the body rather than only in the spec, the way
+  `HospitalityComs.Accounts.PersonNotifier` collapses `Mailer.deliver!/1`'s
+  reason into `:delivery_failed`, so the promise is kept by the code and not
+  only by the annotation.
   """
   @spec track_engagement(Socket.t(), Engagement.t(), DateTime.t()) ::
-          {:ok, binary()} | {:error, reason :: term()}
+          {:ok, binary()} | {:error, :not_tracked}
   def track_engagement(%Socket{} = socket, %Engagement{} = engagement, %DateTime{} = joined_at) do
-    track(socket, engagement.id, %{
+    socket
+    |> track(engagement.id, %{
       role_label: engagement.role_label,
       joined_at: DateTime.to_iso8601(joined_at)
     })
+    |> tracked()
   end
+
+  @spec tracked({:ok, binary()} | {:error, term()}) :: {:ok, binary()} | {:error, :not_tracked}
+  defp tracked({:ok, ref}) when is_binary(ref), do: {:ok, ref}
+  defp tracked({:error, _reason}), do: {:error, :not_tracked}
 end
