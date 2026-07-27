@@ -22,6 +22,41 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
   predicate, which is U5's `active_at/2` minus a suspension — derived, with no
   job having run.
 
+  ## The window between the read and the subscription, and why it is left open
+
+  `join/3` reads membership and *then* subscribes, because the topic is derived
+  from the engagement the read returns. A revocation committing in between
+  broadcasts to nobody: this channel is admitted and never hears about it. The
+  window is the gap between two adjacent statements.
+
+  It is recorded rather than closed, and the reasons are in this order.
+
+  **A same-instant reread would close nothing.** `end_engagement/2` stamps
+  `ends_at` at the *employer's* instant, and the only way this join saw the
+  engagement as active is that its own instant precedes it. Asking the same
+  question at the same instant gets the same answer. Closing the window needs a
+  second `Clock.now()` inside one join, which is in direct tension with KTD5 —
+  one instant per unit of work is the rule most of this design rests on, and
+  spending it here buys a sub-millisecond window.
+
+  **The residue is bounded at one sweep interval, not for ever.**
+  `HospitalityComs.Workers.EngagementSweeper` finds the closed term inside its
+  24h lookback and enqueues the same announcement; the channel *is* subscribed
+  by then, so the second announcement is the one it hears.
+  `end_engagement/2` rewrites `ends_at`, which is one of
+  `HospitalityComs.Workers.ExpireEngagement`'s uniqueness args, so that insert
+  does not collide with the job scheduled for the original bound.
+  `HospitalityComsWeb.RevocationTest` asserts that chain end to end.
+
+  **And it cannot be tested deterministically.** A fix for a race between two
+  adjacent statements, with no test that fails without it, is one refactor from
+  being removed by somebody who cannot see what it was for.
+
+  The one thing the sweeper does not bound is a suspension nudge lost the same
+  way, because nothing sweeps suspensions. That leaks to the person who opted
+  out and to nobody else, and they can close it themselves by resuming and
+  suspending again.
+
   ## The instant is per event, not per join (KTD5)
 
   A channel process lives for hours. `HospitalityComsWeb.ChannelAuth

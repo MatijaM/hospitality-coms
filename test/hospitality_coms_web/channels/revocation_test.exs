@@ -36,9 +36,12 @@ defmodule HospitalityComsWeb.RevocationTest do
   """
 
   use HospitalityComsWeb.ChannelCase
+  use Oban.Testing, repo: HospitalityComs.Repo
 
   alias HospitalityComs.Engagements
   alias HospitalityComs.Rooms
+  alias HospitalityComs.Workers.EngagementSweeper
+  alias HospitalityComs.Workers.ExpireEngagement
   alias HospitalityComsWeb.PersonSocket
 
   @now HospitalityComs.EngagementsFixtures.fixed_instant()
@@ -338,6 +341,48 @@ defmodule HospitalityComsWeb.RevocationTest do
 
       assert {:error, :already_suspended} = Rooms.suspend_venue_room(world.person, venue.id)
       refute_receive {:venue_room_suspended, _notice}
+    end
+  end
+
+  describe "a subscriber that missed the announcement" do
+    test "is reached by the sweeper's, which is what bounds every lost nudge" do
+      # **The bound**, and the reason U7's review item about `join/3` reading
+      # membership before it subscribes is recorded rather than fixed. A
+      # revocation committing in that window broadcasts to nobody — but the
+      # subscription exists a statement later, so the *next* thing that
+      # announces the same expiry reaches it.
+      #
+      # This models that window at the level it happens: subscribe after the
+      # broadcast, then let the backstop run. `EngagementSweeper` finds the
+      # closed term inside its 24h lookback and inserts the same
+      # `ExpireEngagement` changeset the claim would have — and because
+      # `end_engagement/2` rewrote `ends_at`, which is one of the job's
+      # uniqueness args, that insert does not collide with the job scheduled for
+      # the original bound.
+      #
+      # Every test above already asserts that a channel subscribed to this topic
+      # stops when this message arrives, so the chain is complete: worst case is
+      # one sweep interval, not for ever.
+      world = two_venues()
+      %{venue: venue, employer: employer, engagement: engagement} = world.a
+      engagement_id = engagement.id
+
+      assert {:ok, ended} = Engagements.end_engagement(employer, engagement.id)
+
+      :ok = Engagements.subscribe(engagement.id)
+      refute_receive {:engagement_revoked, _missed}
+
+      assert {:ok, %{swept: swept, enqueued: enqueued}} = perform_job(EngagementSweeper, %{})
+      assert swept >= 1
+      assert enqueued >= 1
+
+      assert perform_job(ExpireEngagement, %{
+               "engagement_id" => engagement.id,
+               "venue_id" => venue.id,
+               "ends_at" => DateTime.to_iso8601(ended.ends_at)
+             }) == {:ok, :revoked}
+
+      assert_receive {:engagement_revoked, %{engagement_id: ^engagement_id}}
     end
   end
 
