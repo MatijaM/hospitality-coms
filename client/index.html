@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      A magic link's token is in the URL while it is being redeemed, and the
+      default referrer policy sends a same-origin URL in full. That puts a
+      single-use credential in the Referer of every request the redeem page
+      makes. There is nothing on this origin that needs a referrer.
+    -->
+    <meta name="referrer" content="no-referrer" />
+    <title>Hospitality Coms</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
