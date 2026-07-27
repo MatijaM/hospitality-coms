@@ -55,6 +55,8 @@ defmodule HospitalityComs.BoundaryTest do
   # cannot see them. `setup_all` is what puts them in memory.
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantZones}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantEmployerZone}
+  @compile {:no_warn_undefined,
+            HospitalityComs.Repo.Migrations.EnableEmployerZoneRowLevelSecurity}
 
   import Ecto.Query
   import ExUnit.CaptureLog
@@ -67,8 +69,11 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.EmployerRepo
   alias HospitalityComs.Repo
+  alias HospitalityComs.Repo.Migrations.EnableEmployerZoneRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
   alias HospitalityComs.Repo.Migrations.GrantZones
+  alias HospitalityComs.Venues
+  alias HospitalityComs.Venues.EmployerGrant
   alias HospitalityComs.Zones
 
   # Association shapes that do not exist in the application yet, declared at the
@@ -78,6 +83,7 @@ defmodule HospitalityComs.BoundaryTest do
 
   @migration_name "grant_zones"
   @employer_zone_migration "grant_employer_zone"
+  @row_security_migration "enable_employer_zone_row_level_security"
 
   @now ~U[2026-03-01 12:00:00.000000Z]
 
@@ -93,6 +99,12 @@ defmodule HospitalityComs.BoundaryTest do
   setup_all do
     load_migration(@migration_name, Code.ensure_loaded?(GrantZones))
     load_migration(@employer_zone_migration, Code.ensure_loaded?(GrantEmployerZone))
+
+    load_migration(
+      @row_security_migration,
+      Code.ensure_loaded?(EnableEmployerZoneRowLevelSecurity)
+    )
+
     :ok
   end
 
@@ -179,28 +191,40 @@ defmodule HospitalityComs.BoundaryTest do
       Repo.query!("GRANT SELECT ON people TO employer_role")
       assert {"people", "SELECT"} in Zones.employer_privileges(Repo)
 
-      migrate(:down)
-      capture_log(fn -> migrate(:up) end)
+      round_trip_grant_zones(fn -> :nothing_in_between end)
 
       assert Zones.employer_privileges(Repo) == []
+    end
+
+    test "cannot be rolled back under a live row-level security policy, and says which" do
+      # The RESTRICT `grant_zones` chose deliberately, meeting its first
+      # dependent object. The employer zone's tenancy policies are written on
+      # `app_current_employer_id()`, so rolling the function out from under
+      # them stops rather than dropping them silently with CASCADE — and a
+      # policy that disappears during a rollback is a tenancy boundary that
+      # disappears with it.
+      #
+      # Ecto rolls migrations back in reverse, so the ordinary path never
+      # reaches this. The path that does is an out-of-order rollback, which is
+      # exactly when a loud failure is worth having.
+      assert_raise Postgrex.Error, ~r/dependent_objects_still_exist/, fn -> migrate(:down) end
     end
 
     test "leaves privileges in the same state when rolled back and forward" do
       before = privilege_snapshot()
 
-      migrate(:down)
+      rolled_back =
+        round_trip_grant_zones(fn ->
+          # The snapshot's `tables` component is `[]` before and `[]` after
+          # unless something puts a privilege in the way of the round trip, so
+          # without this the table half of the comparison was `[] == []` and
+          # only the function half carried any weight — a REVOKE round trip
+          # that never exercised a REVOKE.
+          Repo.query!("GRANT SELECT, INSERT ON people TO employer_role")
+          privilege_snapshot()
+        end)
 
-      # The snapshot's `tables` component is `[]` before and `[]` after unless
-      # something puts a privilege in the way of the round trip, so without
-      # this the table half of the comparison was `[] == []` and only the
-      # function half carried any weight — a REVOKE round trip that never
-      # exercised a REVOKE.
-      Repo.query!("GRANT SELECT, INSERT ON people TO employer_role")
-      rolled_back = privilege_snapshot()
       assert {"people", "SELECT"} in rolled_back.tables
-
-      capture_log(fn -> migrate(:up) end)
-
       assert privilege_snapshot() == before
 
       # And the round trip went somewhere. Comparing two identical nothings
@@ -379,6 +403,98 @@ defmodule HospitalityComs.BoundaryTest do
       )
 
       assert Zones.employer_role() in default_privilege_grantees()
+    end
+  end
+
+  describe "the employer zone's row-level security" do
+    # The tier the employer zone had none of. Venue-to-venue isolation rested
+    # entirely on `HospitalityComs.Venues` pinning `venue_id` on every query,
+    # so a single `EmployerRepo.update_all(EmployerGrant, ...)` with no filter
+    # passed the unscoped guard, passed the zone guard, passed Postgres, and
+    # revoked every grant in the database.
+    #
+    # KTD3 chose a view over RLS for the per-row hidden-entry rule, and that
+    # decision stands: a view has no `FORCE` to forget. This is table-wide
+    # tenancy, which is the case RLS is actually for — one predicate, the same
+    # one already written into every query, moved somewhere a forgotten filter
+    # cannot get past it.
+
+    test "hides another venue's grants from a query with no filter at all" do
+      first = venue_with_grant()
+      second = venue_with_grant()
+
+      assert unfiltered_grant_ids(first) == [first.grant.id]
+      assert unfiltered_grant_ids(second) == [second.grant.id]
+    end
+
+    test "hides another venue's own row, and its shift types" do
+      first = venue_with_grant()
+      second = venue_with_grant()
+
+      assert unfiltered_venue_ids(first) == [first.venue.id]
+      assert unfiltered_venue_ids(second) == [second.venue.id]
+
+      shift_type = shift_type_at(second)
+
+      assert unfiltered_shift_type_ids(first) == []
+      assert unfiltered_shift_type_ids(second) == [shift_type.id]
+    end
+
+    test "bounds an unfiltered update to the venue the transaction is scoped to" do
+      # The exploit stated as itself. Before the policy this call revoked
+      # every grant at every venue in one statement and orphaned all of them.
+      first = venue_with_grant()
+      second = venue_with_grant()
+
+      assert {count, _returned} = revoke_everything(first)
+
+      assert count == 1
+      assert unfiltered_grant_ids(second) == [second.grant.id]
+      assert [%EmployerGrant{revoked_at: nil}] = live_grants_of(second)
+    end
+
+    test "refuses an insert aimed at a venue the transaction is not scoped to" do
+      # `WITH CHECK` rather than `USING`: the row would be invisible after it
+      # landed, which is worse than a refusal. Every insert the context
+      # performs takes `venue_id` from the scope, so this costs it nothing.
+      first = venue_with_grant()
+      second = venue_with_grant()
+
+      assert_raise Postgrex.Error, ~r/row-level security policy/, fn ->
+        EmployerRepo.scoped_transaction(scope_of_venue(first), fn scope ->
+          {:ok,
+           EmployerRepo.insert!(
+             EmployerGrant.issued_changeset(
+               second.venue.id,
+               second.grant.id,
+               scope.now
+             )
+           )}
+        end)
+      end
+    end
+
+    test "is enabled on every employer-zone table, with one tenancy policy each" do
+      flags = row_security_flags()
+
+      assert Enum.sort(Map.keys(flags)) == Enum.sort(Zones.employer_zone_tables())
+      assert Enum.reject(flags, fn {_table, %{enabled: on}} -> on end) == []
+
+      Enum.each(Zones.employer_zone_tables(), fn table ->
+        assert [[_name, qual, with_check]] = policies_on(table)
+        assert qual =~ "app_current_employer_id()"
+        assert with_check =~ "app_current_employer_id()"
+      end)
+    end
+
+    test "is not FORCEd, because the owner is the migrator and the application's own repo" do
+      # Deliberate, and the reason this is safe to add to tables three
+      # migrations already touch. The tables belong to the application's login
+      # role, so `Repo`, every migration and every seed bypass the policies
+      # while `employer_role` — a non-owner — is bound by them. FORCE would
+      # bind the owner too, and a policy keyed on `app_current_employer_id()`
+      # raises wherever that setting is unset, which is all of them.
+      assert Enum.reject(row_security_flags(), fn {_table, %{forced: on}} -> not on end) == []
     end
   end
 
@@ -1036,6 +1152,104 @@ defmodule HospitalityComs.BoundaryTest do
 
   ## Helpers
 
+  ## The employer zone, built through its own context
+
+  # The person is never persisted: no employer-zone table references `people`,
+  # so the employer zone cannot tell the difference — which is the property,
+  # and it keeps this block off the person zone's sandbox connection.
+  defp venue_with_grant do
+    scope = PersonScope.for_person(%Person{id: Ecto.UUID.generate()}, @now)
+    attrs = %{name: "rls-#{System.unique_integer([:positive])}", timezone: "Etc/UTC"}
+
+    {:ok, creation} = Venues.create_venue(scope, attrs)
+    creation
+  end
+
+  defp shift_type_at(%{venue: venue} = creation) do
+    {:ok, shift_type} =
+      Venues.create_shift_type(scope_of_venue(creation), venue.id, %{
+        name: "Open",
+        grace_period_minutes: 0
+      })
+
+    shift_type
+  end
+
+  defp scope_of_venue(%{venue: venue, grant: grant}) do
+    EmployerScope.for_grant(venue.id, grant.id, @now)
+  end
+
+  # Deliberately unfiltered. The whole point is that nothing in the query says
+  # which venue, so what answers is the policy rather than the context.
+  defp unfiltered_grant_ids(creation) do
+    as_employer(creation, fn ->
+      EmployerRepo.all(from(g in "employer_grants", select: type(g.id, Ecto.UUID)))
+    end)
+  end
+
+  defp unfiltered_venue_ids(creation) do
+    as_employer(creation, fn ->
+      EmployerRepo.all(from(v in "venues", select: type(v.id, Ecto.UUID)))
+    end)
+  end
+
+  defp unfiltered_shift_type_ids(creation) do
+    as_employer(creation, fn ->
+      EmployerRepo.all(from(s in "shift_types", select: type(s.id, Ecto.UUID)))
+    end)
+  end
+
+  defp live_grants_of(%{venue: venue} = creation) do
+    as_employer(creation, fn ->
+      EmployerRepo.all(EmployerGrant.live_at(venue.id, @now))
+    end)
+  end
+
+  defp revoke_everything(%{grant: grant} = creation) do
+    as_employer(creation, fn ->
+      EmployerRepo.update_all(EmployerGrant,
+        set: [revoked_at: @now, revoked_by_grant_id: grant.id]
+      )
+    end)
+  end
+
+  defp as_employer(creation, fun) do
+    {:ok, result} =
+      EmployerRepo.scoped_transaction(scope_of_venue(creation), fn _scope -> {:ok, fun.()} end)
+
+    result
+  end
+
+  defp row_security_flags do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relname = ANY($1::text[])
+        """,
+        [Zones.employer_zone_tables()]
+      )
+
+    Map.new(rows, fn [table, enabled, forced] -> {table, %{enabled: enabled, forced: forced}} end)
+  end
+
+  defp policies_on(table) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT policyname, qual, with_check
+        FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = $1
+        ORDER BY 1
+        """,
+        [table]
+      )
+
+    rows
+  end
+
   # The employer the *connection* is scoped to, as the view will read it, which
   # is the only side of the wrapper that can leak.
   defp current_employer_id do
@@ -1088,6 +1302,33 @@ defmodule HospitalityComs.BoundaryTest do
       GrantEmployerZone,
       @migrator_opts
     ])
+  end
+
+  defp migrate_row_security(direction) do
+    apply(Ecto.Migrator, direction, [
+      Repo,
+      migration_version(@row_security_migration),
+      EnableEmployerZoneRowLevelSecurity,
+      @migrator_opts
+    ])
+  end
+
+  # The employer zone's row-level security policies are written on
+  # `app_current_employer_id()`, and `grant_zones` drops that function with
+  # RESTRICT on purpose. Ecto rolls migrations back in reverse, so the real
+  # ordering is this one; a test that rolled `grant_zones` back on its own
+  # would be testing an out-of-order rollback and getting the loud failure
+  # that ordering exists to produce.
+  defp round_trip_grant_zones(between) do
+    migrate_row_security(:down)
+    migrate(:down)
+
+    result = between.()
+
+    capture_log(fn -> migrate(:up) end)
+    capture_log(fn -> migrate_row_security(:up) end)
+
+    result
   end
 
   defp migration_version(migration) do

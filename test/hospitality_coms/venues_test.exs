@@ -202,13 +202,30 @@ defmodule HospitalityComs.VenuesTest do
       # behind when the grant failed, and a grantless venue is the state the
       # whole invariant exists to prevent; the direction that can be forced
       # from outside is the other one.
-      before = employer_count(Venue)
-
-      assert {:error, :venue, _changeset, %{}} =
+      #
+      # Counted at the venue the call minted rather than over the table. An
+      # aggregate over every row couples the assertion to whatever the
+      # database has ever committed — a concurrency test killed mid-run leaves
+      # rows behind and breaks the next run — and the employer zone's
+      # row-level security keys on the transaction's venue, so an unscoped
+      # count under a scope for nobody's venue counts nothing whatever
+      # happened.
+      assert {:error, :venue, changeset, %{}} =
                Venues.create_venue(creator_scope(@now), %{name: "The Anchor"})
 
-      assert employer_count(Venue) == before
-      assert employer_count(EmployerGrant) == 0
+      venue_id = changeset.data.id
+
+      assert venue_count(venue_id) == 0
+      assert grant_count(venue_id) == 0
+    end
+
+    test "is counted by a query that finds the rows a successful creation writes" do
+      # The control for the two zeroes above: without it they pass on a count
+      # that can only ever return nothing.
+      {_scope, %{venue: venue}} = scoped_venue_fixture(%{}, @now)
+
+      assert venue_count(venue.id) == 1
+      assert grant_count(venue.id) == 1
     end
   end
 
@@ -264,7 +281,7 @@ defmodule HospitalityComs.VenuesTest do
 
       later = EmployerScope.for_grant(scope.venue_id, founding.id, @later)
 
-      assert employer_count(EmployerGrant) == 2
+      assert grant_count(scope.venue_id) == 2
       assert Venues.revoke_grant(later, founding.id) == {:error, :last_grant_holder}
     end
 
@@ -890,8 +907,19 @@ defmodule HospitalityComs.VenuesTest do
     end)
   end
 
-  defp employer_count(schema) do
-    employer_work(Ecto.UUID.generate(), fn -> EmployerRepo.aggregate(schema, :count) end)
+  defp venue_count(venue_id) do
+    employer_work(venue_id, fn ->
+      EmployerRepo.aggregate(from(venue in Venue, where: venue.id == ^venue_id), :count)
+    end)
+  end
+
+  defp grant_count(venue_id) do
+    employer_work(venue_id, fn ->
+      EmployerRepo.aggregate(
+        from(grant in EmployerGrant, where: grant.venue_id == ^venue_id),
+        :count
+      )
+    end)
   end
 
   defp reload_grant(scope, id) do

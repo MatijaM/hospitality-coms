@@ -55,6 +55,14 @@ defmodule HospitalityComs.Venues do
   role instead would mean the one table nobody could reach as `employer_role`
   is the one at the root of the zone.
 
+  The `venue_id` filter every query here carries is not the only thing holding
+  one venue out of another's rows. All three tables carry a row-level security
+  policy on the same predicate, keyed on the transaction-local venue the
+  wrapper writes — so a query in this module that forgot the filter would come
+  back empty rather than come back with somebody else's venue. That tier is a
+  backstop for the filters, not a replacement: the filters are what make the
+  queries mean what they say.
+
   ## The last-grant-holder invariant lives here
 
   `revoke_grant/2` refuses to close a venue's last live grant (KTD17, R22). It

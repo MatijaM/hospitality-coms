@@ -75,7 +75,12 @@ defmodule HospitalityComs.EmployerRepo do
   third argument is the whole point: a session-level setting outlives the
   transaction that wrote it and is still there when the connection goes back to
   the pool and is handed to the next request, which is a scope leak between
-  employers rather than a stale variable.
+  venues rather than a stale variable.
+
+  `app.employer_id` is not only read by application code. Every employer-zone
+  table carries a row-level security policy keyed on it, so the wrapper is what
+  makes those tables readable at all — and an employer-zone query issued
+  outside it fails inside Postgres rather than returning another venue's rows.
 
   The instant is taken off the scope and never from `Clock.now/0`. A repo is
   not a unit of work; the instant was captured at the boundary that opened one,
