@@ -48,6 +48,8 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
 
   use HospitalityComsWeb, :channel
 
+  require Logger
+
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.PubSub
@@ -61,6 +63,8 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
   # One sentence for every way a join or a send can be refused about a room the
   # caller named. Saying more would say whether the venue exists.
   @refusal "this session is not in that venue's room"
+
+  @unknown_event "this channel does not handle that event"
 
   @typedoc "What a rendered message looks like on the wire. No person id, ever."
   @type rendered() :: %{
@@ -122,6 +126,14 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
     {:reply, {:error, ErrorEnvelope.new(:bad_request, "body is required")}, socket}
   end
 
+  # `Phoenix.Channel.Server` dispatches to `handle_in/3` unconditionally — there
+  # is no warn-and-ignore fallback for an event, the way there is for a message
+  # — so a channel without this clause crashes on every event it was not
+  # written for, which a client reaches by inventing one word.
+  def handle_in(_event, _payload, socket) do
+    {:reply, {:error, ErrorEnvelope.new(:bad_request, @unknown_event)}, socket}
+  end
+
   @spec sent(
           {:ok, RoomMessage.t()} | {:error, :not_a_member | Ecto.Changeset.t(RoomMessage.t())},
           Socket.t()
@@ -158,6 +170,20 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
 
   def handle_info({:engagement_revoked, %{engagement_id: engagement_id} = revocation}, socket) do
     revoke(engagement_id == socket.assigns.engagement.id, revocation, socket)
+  end
+
+  # **The engagement topic is shared by every channel that engagement opened**,
+  # so a message no clause matches does not crash one channel — it crashes all
+  # of them at once, and takes the venue room down because somebody added a
+  # message type to a shift room. Phoenix falls back to warn-and-ignore only for
+  # a channel that exports no `handle_info/2` at all; exporting one opts out of
+  # that, so this restores it.
+  #
+  # The topic and nothing else. An unmatched message is by definition a term
+  # nobody has audited, and `AGENTS.md`'s redaction list cannot cover one.
+  def handle_info(_message, socket) do
+    Logger.debug("unmatched channel message topic=#{socket.topic}")
+    {:noreply, socket}
   end
 
   # The nudge, not the revocation. No `Presence.untrack/2` call: the tracker

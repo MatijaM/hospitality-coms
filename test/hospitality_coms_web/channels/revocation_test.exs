@@ -227,6 +227,61 @@ defmodule HospitalityComsWeb.RevocationTest do
     end
   end
 
+  describe "an unmatched message on the engagement topic" do
+    test "leaves every channel joined under that engagement alive" do
+      # The engagement topic is shared by every channel that engagement opened,
+      # so a message no clause matches does not crash one channel — it crashes
+      # all of them at once, and `handle_info/2` being exported is what stops
+      # Phoenix falling back to warn-and-ignore. The blast radius is why this is
+      # asserted across two channels rather than one.
+      Process.flag(:trap_exit, true)
+      world = two_venues()
+      %{venue: venue, employer: employer, engagement: engagement} = world.a
+      room = shift_room(employer, engagement)
+
+      {:ok, _venue_reply, venue_channel} =
+        subscribe_and_join(world.socket, venue_topic(venue), %{})
+
+      {:ok, _shift_reply, shift_channel} =
+        subscribe_and_join(world.socket, shift_topic(room), %{})
+
+      venue_pid = venue_channel.channel_pid
+      shift_pid = shift_channel.channel_pid
+
+      :ok =
+        Phoenix.PubSub.broadcast(
+          HospitalityComs.PubSub,
+          Engagements.topic(engagement.id),
+          {:something_a_later_unit_broadcasts, %{engagement_id: engagement.id}}
+        )
+
+      refute_receive {:EXIT, ^venue_pid, _venue_reason}
+      refute_receive {:EXIT, ^shift_pid, _shift_reason}
+      assert Process.alive?(venue_pid)
+      assert Process.alive?(shift_pid)
+    end
+
+    test "leaves them functional, not merely alive" do
+      # The control. A channel that had stopped answering would still be alive
+      # for as long as the assertion above looks at it.
+      Process.flag(:trap_exit, true)
+      world = two_venues()
+      %{venue: venue, engagement: engagement} = world.a
+
+      {:ok, _reply, channel} = subscribe_and_join(world.socket, venue_topic(venue), %{})
+
+      :ok =
+        Phoenix.PubSub.broadcast(
+          HospitalityComs.PubSub,
+          Engagements.topic(engagement.id),
+          :a_bare_atom_nobody_planned_for
+        )
+
+      ref = push(channel, "send", %{"body" => "the channel is still here"})
+      assert_reply ref, :ok, _sent
+    end
+  end
+
   describe "a revocation naming a different engagement" do
     test "does not stop this channel" do
       # It cannot arrive today, because the subscription is per engagement.

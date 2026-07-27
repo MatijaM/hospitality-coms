@@ -43,6 +43,8 @@ defmodule HospitalityComsWeb.EmployerVenueChannel do
   # would enumerate the venues this session does not manage.
   @refusal "this session holds no live grant at that venue"
 
+  @unknown_event "this channel does not handle that event"
+
   @doc """
   Joins a venue's employer surface, if this session holds a live grant there.
   """
@@ -64,5 +66,21 @@ defmodule HospitalityComsWeb.EmployerVenueChannel do
 
   defp admit({:error, :no_grant}, _socket) do
     {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
+  end
+
+  @doc """
+  Answers an event this channel does not carry.
+
+  The only clause today, and the one U9 adds the per-employer view's events in
+  front of. `Phoenix.Channel.Server` dispatches to `handle_in/3` unconditionally
+  — a channel exporting none raises `UndefinedFunctionError` on every event it
+  receives — so this is what stops an employer session crashing its own channel
+  by sending a word nobody implemented.
+  """
+  @impl true
+  @spec handle_in(String.t(), map(), Socket.t()) ::
+          {:reply, {:error, ErrorEnvelope.t()}, Socket.t()}
+  def handle_in(_event, _payload, socket) do
+    {:reply, {:error, ErrorEnvelope.new(:bad_request, @unknown_event)}, socket}
   end
 end

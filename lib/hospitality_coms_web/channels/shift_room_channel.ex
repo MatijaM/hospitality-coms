@@ -37,6 +37,8 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
 
   use HospitalityComsWeb, :channel
 
+  require Logger
+
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.PubSub
@@ -50,6 +52,7 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
   @unreadable "this session cannot read that shift room"
   @closed "that shift room is closed to new messages"
   @not_rostered "this session is not on that shift's roster"
+  @unknown_event "this channel does not handle that event"
 
   @typedoc "What a rendered message looks like on the wire. No person id, ever."
   @type rendered() :: %{
@@ -108,6 +111,13 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
     {:reply, {:error, ErrorEnvelope.new(:bad_request, "body is required")}, socket}
   end
 
+  # See `HospitalityComsWeb.VenueRoomChannel`: `handle_in/3` has no
+  # warn-and-ignore fallback, so without this clause every event the channel was
+  # not written for is a crash a client can reach by inventing one word.
+  def handle_in(_event, _payload, socket) do
+    {:reply, {:error, ErrorEnvelope.new(:bad_request, @unknown_event)}, socket}
+  end
+
   @spec sent(
           {:ok, RoomMessage.t()}
           | {:error, Rooms.refusal() | :not_rostered | Ecto.Changeset.t(RoomMessage.t())},
@@ -155,6 +165,15 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
 
   def handle_info({:engagement_revoked, %{engagement_id: engagement_id} = revocation}, socket) do
     revoke(engagement_id == socket.assigns.engagement.id, revocation, socket)
+  end
+
+  # The engagement topic is shared by every channel that engagement opened — the
+  # venue room and every shift room at once — so an unmatched message here does
+  # not crash one channel, it crashes all of them. See
+  # `HospitalityComsWeb.VenueRoomChannel`.
+  def handle_info(_message, socket) do
+    Logger.debug("unmatched channel message topic=#{socket.topic}")
+    {:noreply, socket}
   end
 
   @spec revoke(boolean(), map(), Socket.t()) ::

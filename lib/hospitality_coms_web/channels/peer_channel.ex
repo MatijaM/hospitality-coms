@@ -38,7 +38,10 @@ defmodule HospitalityComsWeb.PeerChannel do
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.PubSub
   alias HospitalityComsWeb.ChannelAuth
+  alias HospitalityComsWeb.ErrorEnvelope
   alias Phoenix.Socket
+
+  @unknown_event "this channel does not handle that event"
 
   @doc """
   Joins this person's peer surface.
@@ -56,5 +59,21 @@ defmodule HospitalityComsWeb.PeerChannel do
     :ok = PubSub.subscribe(scope, {:peer, person_id})
 
     {:ok, %{person_id: person_id}, socket}
+  end
+
+  @doc """
+  Answers an event this channel does not carry.
+
+  The only clause today, and it is the one U8 adds its conversation events in
+  front of. `Phoenix.Channel.Server` dispatches to `handle_in/3` unconditionally
+  — a channel exporting none at all raises `UndefinedFunctionError` on every
+  event it receives — so a topic that is deliberately still empty needs this
+  clause more than a busy one does, not less.
+  """
+  @impl true
+  @spec handle_in(String.t(), map(), Socket.t()) ::
+          {:reply, {:error, ErrorEnvelope.t()}, Socket.t()}
+  def handle_in(_event, _payload, socket) do
+    {:reply, {:error, ErrorEnvelope.new(:bad_request, @unknown_event)}, socket}
   end
 end

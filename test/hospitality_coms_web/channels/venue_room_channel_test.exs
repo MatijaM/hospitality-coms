@@ -192,6 +192,21 @@ defmodule HospitalityComsWeb.VenueRoomChannelTest do
       assert refusal.error.code == "bad_request"
     end
 
+    test "answers an event it does not handle rather than crashing on it" do
+      # `handle_in/3` is dispatched unconditionally by
+      # `Phoenix.Channel.Server`, so a channel with no terminal clause crashes
+      # on every event it was not written for — which a client reaches by
+      # sending one word.
+      %{venue: venue, socket: socket} = engaged()
+      {:ok, _reply, channel} = subscribe_and_join(socket, topic(venue), %{})
+
+      ref = push(channel, "delete_everything", %{})
+      assert_reply ref, :error, refusal
+      assert refusal.error.code == "bad_request"
+
+      assert Process.alive?(channel.channel_pid)
+    end
+
     test "reports a rejected body as a per-field failure" do
       # The envelope's `fields` key is present only when the failure attaches to
       # an input, which is `HospitalityComsWeb.ErrorEnvelope`'s contract and the

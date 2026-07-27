@@ -19,6 +19,7 @@ defmodule HospitalityComsWeb.ShiftRoomChannelTest do
 
   use HospitalityComsWeb.ChannelCase
 
+  alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComs.Rosters
   alias HospitalityComsWeb.PersonSocket
 
@@ -161,6 +162,50 @@ defmodule HospitalityComsWeb.ShiftRoomChannelTest do
       refused = push(channel, "send", %{"body" => "and now I am not"})
       assert_reply refused, :error, refusal
       assert refusal.error.code == "forbidden"
+    end
+
+    test "answers an event it does not handle rather than crashing on it" do
+      %{room: room, socket: socket} = rostered()
+
+      at(@during)
+      {:ok, _reply, channel} = subscribe_and_join(socket, topic(room), %{})
+
+      ref = push(channel, "delete_everything", %{})
+      assert_reply ref, :error, refusal
+      assert refusal.error.code == "bad_request"
+
+      assert Process.alive?(channel.channel_pid)
+    end
+
+    test "refuses a payload with no body" do
+      # The same shape `HospitalityComsWeb.VenueRoomChannel` answers with, and
+      # it was the untested half of the pair.
+      %{room: room, socket: socket} = rostered()
+
+      at(@during)
+      {:ok, _reply, channel} = subscribe_and_join(socket, topic(room), %{})
+
+      ref = push(channel, "send", %{})
+      assert_reply ref, :error, refusal
+      assert refusal.error.code == "bad_request"
+    end
+
+    test "reports a rejected body as a per-field failure" do
+      # `ErrorEnvelope.for_changeset/3` was extracted for three call sites and
+      # this is the one that had no test through it.
+      %{room: room, socket: socket} = rostered()
+
+      at(@during)
+      {:ok, _reply, channel} = subscribe_and_join(socket, topic(room), %{})
+
+      ref =
+        push(channel, "send", %{
+          "body" => String.duplicate("x", RoomMessage.max_body_length() + 1)
+        })
+
+      assert_reply ref, :error, refusal
+      assert refusal.error.code == "unprocessable_entity"
+      assert [_message] = refusal.error.fields.body
     end
 
     test "is refused before the room opens" do
