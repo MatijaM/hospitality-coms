@@ -382,7 +382,7 @@ defmodule HospitalityComs.EmployerRepo do
   @spec association_source(resolved_binding() | nil, atom()) :: resolved_binding()
   defp association_source({{_table, schema}, _reached}, field)
        when is_atom(schema) and not is_nil(schema) do
-    schema |> apply(:__schema__, [:association, field]) |> related(schema, field)
+    related(schema.__schema__(:association, field), schema, field)
   end
 
   defp association_source(_parent, _field), do: {nil, []}

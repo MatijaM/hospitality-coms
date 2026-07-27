@@ -204,7 +204,7 @@ defmodule HospitalityComs.Zones do
   def tables(schemas), do: Enum.map(schemas, &table_source!/1)
 
   @spec table_source!(module()) :: String.t()
-  defp table_source!(schema), do: schema |> apply(:__schema__, [:source]) |> named!(schema)
+  defp table_source!(schema), do: named!(schema.__schema__(:source), schema)
 
   @spec named!(String.t() | nil, module()) :: String.t()
   defp named!(source, _schema) when is_binary(source), do: source

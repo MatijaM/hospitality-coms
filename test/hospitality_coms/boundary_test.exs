@@ -51,6 +51,10 @@ defmodule HospitalityComs.BoundaryTest do
   # move schema state, so nothing here is async.
   use ExUnit.Case, async: false
 
+  # Migration files are not compiled into the application, so the compiler
+  # cannot see `GrantZones`. `setup_all` is what puts it in memory.
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantZones}
+
   import Ecto.Query
   import ExUnit.CaptureLog
 
@@ -230,11 +234,8 @@ defmodule HospitalityComs.BoundaryTest do
       # Nothing said the two agreed, though, so a person-zone table added to
       # `Zones` without a REVOKE of its own would be caught only by the sweep,
       # and only once somebody granted something. This says it now.
-      # Through `apply/3` because migration files are not compiled into the
-      # application; `setup_all` is what puts this module in memory.
-      revoked = apply(GrantZones, :person_zone_tables, [])
-
-      assert Enum.sort(revoked) == Enum.sort(Zones.person_zone_tables())
+      assert Enum.sort(GrantZones.person_zone_tables()) ==
+               Enum.sort(Zones.person_zone_tables())
     end
 
     test "leaves the employer role droppable" do

@@ -64,12 +64,14 @@ defmodule HospitalityComs.Accounts.EmployerScope do
     employer_id |> Ecto.UUID.cast() |> cast_or_refuse(employer_id)
   end
 
-  defp uuid!(employer_id), do: cast_or_refuse(:error, employer_id)
+  defp uuid!(employer_id), do: refuse(employer_id)
 
   @spec cast_or_refuse({:ok, Ecto.UUID.t()} | :error, String.t()) :: Ecto.UUID.t()
   defp cast_or_refuse({:ok, employer_id}, _given), do: employer_id
+  defp cast_or_refuse(:error, given), do: refuse(given)
 
-  defp cast_or_refuse(:error, given) do
+  @spec refuse(String.t()) :: no_return()
+  defp refuse(given) do
     raise ArgumentError, """
     #{inspect(given)} is not an employer id.
 
