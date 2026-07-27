@@ -823,6 +823,52 @@ defmodule HospitalityComs.RoomsTest do
     end
   end
 
+  ## What holds a message row to one venue
+
+  describe "a message's venue" do
+    test "is held to its shift room's by the composite key, not by a policy" do
+      # `room_messages` carries a row-level security policy that binds nobody:
+      # `employer_role` holds no privilege on the table, and the only role that
+      # reaches it — the application's own, through `HospitalityComs.Repo` —
+      # owns the table and is not bound by a policy that is not `FORCE`d, which
+      # it cannot be. See `*_enable_room_row_level_security.exs`.
+      #
+      # This is the tier that is actually there, asserted by writing the row
+      # Postgres has to refuse. It is also what makes
+      # `Records.shift_room_messages/1` safe without a venue filter.
+      %{employer: employer, engagement: engagement} = engaged()
+      %{employer: other} = engaged()
+      elsewhere = shift_room(other)
+
+      assert_raise Postgrex.Error, ~r/room_messages_shift_room_fkey/, fn ->
+        write_raw_message(employer.venue_id, elsewhere.id, engagement.id)
+      end
+    end
+
+    test "is held to its author's engagement by the composite key too" do
+      # KTD15b's other half. A message at venue A cannot be attributed to an
+      # engagement at venue B, and `MATCH FULL` is what says so — the two
+      # columns are checked together or the row is refused.
+      %{employer: employer} = engaged()
+      %{engagement: elsewhere} = engaged()
+      room = shift_room(employer)
+
+      assert_raise Postgrex.Error, ~r/room_messages_author_fkey/, fn ->
+        write_raw_message(employer.venue_id, room.id, elsewhere.id)
+      end
+    end
+
+    test "accepts the row both keys agree about, which is the control" do
+      # Without this the two refusals above would pass against a table that
+      # refused every insert.
+      %{employer: employer, engagement: engagement} = engaged()
+      room = shift_room(employer)
+
+      assert %Postgrex.Result{num_rows: 1} =
+               write_raw_message(employer.venue_id, room.id, engagement.id)
+    end
+  end
+
   ## The predicate itself
 
   describe "the overlap predicate" do
@@ -977,6 +1023,26 @@ defmodule HospitalityComs.RoomsTest do
     )
 
     id
+  end
+
+  # A message written straight through SQL, so a test can aim `venue_id`,
+  # `shift_room_id` and `author_engagement_id` at three different venues and
+  # find out which tier answers. No context call can build these rows.
+  defp write_raw_message(venue_id, shift_room_id, author_engagement_id) do
+    Repo.query!(
+      """
+      INSERT INTO room_messages
+        (id, venue_id, shift_room_id, author_engagement_id, body, sent_at, inserted_at, updated_at)
+      VALUES ($1, $2, $3, $4, 'raw', $5, $5, $5)
+      """,
+      [
+        uuid(Ecto.UUID.generate()),
+        uuid(venue_id),
+        uuid(shift_room_id),
+        uuid(author_engagement_id),
+        DateTime.truncate(@now, :second)
+      ]
+    )
   end
 
   defp offset_instant(nil), do: nil

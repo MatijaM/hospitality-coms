@@ -320,6 +320,14 @@ defmodule HospitalityComs.Rooms do
 
   A suspended *caller* still gets `{:error, :not_a_member}` — the refusal is
   about their own access, which is the one thing suspension governs.
+
+  **Whole structs, and one of their fields is `person_id`.** This is the one
+  list in the application that hands every member of a room the identity key of
+  every other member, and U8/U9 will render it. They should project a field list
+  rather than the struct, and attribute on the engagement's `id` — which is the
+  `author_engagement_id` a message already carries (KTD15b), venue-local by
+  construction — rather than on `person_id`. The same note sits on
+  `HospitalityComs.Engagements.Records.outstanding_invitations/2`.
   """
   @spec list_venue_room_members(PersonScope.t(), Ecto.UUID.t()) ::
           {:ok, [Engagement.t()]} | {:error, :not_a_member}

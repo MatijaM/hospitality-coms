@@ -542,6 +542,15 @@ defmodule HospitalityComs.Rooms.Records do
   `shift_room_id IS NULL` is what makes a message the venue room's. There is no
   time filter and there will not be one: KTD14 gives the venue room full history
   (R14), so a person engaged today reads what was said before they arrived.
+
+  **The `venue_id` filter is the only thing holding this read to one venue.**
+  `room_messages` carries a row-level security policy that binds nobody —
+  `employer_role` holds no privilege on the table and the only accessor,
+  `HospitalityComs.Repo`, owns it and is not bound by a policy that is not
+  `FORCE`d, which it cannot be. `*_enable_room_row_level_security.exs` sets out
+  why. What the caller cannot do is choose the venue: it comes off the
+  engagement `HospitalityComs.Rooms.fetch_membership/2` resolved for this person
+  at this instant.
   """
   @spec venue_room_messages(Ecto.UUID.t()) :: Ecto.Query.t()
   def venue_room_messages(venue_id) when is_binary(venue_id) do
@@ -557,6 +566,12 @@ defmodule HospitalityComs.Rooms.Records do
   Unfiltered by instant for the same reason: the room stops accepting messages
   at `closes_at` and stops being readable never. Who may run this is
   `shift_room_readers/2`.
+
+  Unfiltered by venue too, and that one is a database guarantee rather than an
+  omission: `room_messages_shift_room_fkey` is a composite key into
+  `shift_rooms (id, venue_id)`, so every row naming a room carries that room's
+  venue and no other's. `HospitalityComs.RoomsTest` asserts it by writing the
+  row Postgres has to refuse.
   """
   @spec shift_room_messages(Ecto.UUID.t()) :: Ecto.Query.t()
   def shift_room_messages(room_id) when is_binary(room_id) do
