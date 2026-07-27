@@ -1080,6 +1080,28 @@ defmodule HospitalityComs.EngagementsTest do
       assert Engagements.fetch_engagement(revoked_scope, engagement.id) == {:error, :no_grant}
     end
 
+    test "reaches a venue's attested entries through the query U9's view will use" do
+      # `Records.attested_entries_of_venue/1` is the sibling of
+      # `holding_authority/1`, which review found dead with a doc that claimed
+      # otherwise. This one's doc is honest — it is here because U5 writes the
+      # rows and U9's owner-privileged view will read them — but it had no
+      # caller and no test either, so nothing said it worked.
+      {employer, %{venue: venue}} = scoped_venue_fixture(@now)
+      {other_employer, %{venue: other_venue}} = scoped_venue_fixture(@now)
+
+      claim = claim_fixture(employer, person_scope_fixture(@now))
+      _elsewhere = engagement_fixture(other_employer, person_scope_fixture(@now))
+
+      entries = venue.id |> Records.attested_entries_of_venue() |> Repo.all()
+
+      assert Enum.map(entries, & &1.id) == [claim.attested_entry.id]
+
+      # The control: the other venue's entry exists and is simply not this
+      # venue's, so the filter is doing the work rather than the table being
+      # empty.
+      assert length(Repo.all(Records.attested_entries_of_venue(other_venue.id))) == 1
+    end
+
     test "lists outstanding invitations and drops them once claimed" do
       {employer, _creation} = scoped_venue_fixture(@now)
       scope = person_scope_fixture(@now)
