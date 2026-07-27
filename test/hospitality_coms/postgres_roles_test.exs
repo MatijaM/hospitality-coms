@@ -45,16 +45,22 @@ defmodule HospitalityComs.PostgresRolesTest do
   alias HospitalityComs.Repo.Migrations.CreatePostgresRoles
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
+  alias HospitalityComs.Repo.Migrations.GrantRoomZone
 
   @roles_migration "create_postgres_roles"
   @employer_grants_migration "grant_employer_zone"
   @engagement_grants_migration "grant_engagement_zone"
+  @room_grants_migration "grant_room_zone"
 
   # In the order Ecto applies them, which is the reverse of the order
-  # `rolled_back_grants/0` unwinds them in.
+  # `rolled_back_grants/0` unwinds them in. Every unit that grants adds an
+  # entry: a grant is a `pg_shdepend` row, roles are cluster-global while
+  # grants are database-local, and one row anywhere makes `DROP ROLE` fail
+  # everywhere.
   @grant_migrations [
     {@employer_grants_migration, GrantEmployerZone},
-    {@engagement_grants_migration, GrantEngagementZone}
+    {@engagement_grants_migration, GrantEngagementZone},
+    {@room_grants_migration, GrantRoomZone}
   ]
 
   @migrations [{@roles_migration, CreatePostgresRoles} | @grant_migrations]

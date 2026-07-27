@@ -62,6 +62,10 @@ defmodule HospitalityComs.BoundaryTest do
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreateEngagements}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantEngagementZone}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.EnableEngagementRowLevelSecurity}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreateRooms}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreateRosterEntries}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantRoomZone}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.EnableRoomRowLevelSecurity}
 
   import Ecto.Query
   import ExUnit.CaptureLog
@@ -76,13 +80,19 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Repo
   alias HospitalityComs.Repo.Migrations.CreateEngagements
+  alias HospitalityComs.Repo.Migrations.CreateRooms
+  alias HospitalityComs.Repo.Migrations.CreateRosterEntries
   alias HospitalityComs.Repo.Migrations.CreateVenues
   alias HospitalityComs.Repo.Migrations.EnableBtreeGist
   alias HospitalityComs.Repo.Migrations.EnableEmployerZoneRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.EnableEngagementRowLevelSecurity
+  alias HospitalityComs.Repo.Migrations.EnableRoomRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
+  alias HospitalityComs.Repo.Migrations.GrantRoomZone
   alias HospitalityComs.Repo.Migrations.GrantZones
+  alias HospitalityComs.Rooms.VenueRoomSuspension
+  alias HospitalityComs.Rosters.RosterEntry
   alias HospitalityComs.Venues
   alias HospitalityComs.Venues.EmployerGrant
   alias HospitalityComs.Zones
@@ -100,12 +110,21 @@ defmodule HospitalityComs.BoundaryTest do
   @engagement_tables_migration "create_engagements"
   @engagement_zone_migration "grant_engagement_zone"
   @engagement_row_security_migration "enable_engagement_row_level_security"
+  @room_tables_migration "create_rooms"
+  @roster_tables_migration "create_roster_entries"
+  @room_zone_migration "grant_room_zone"
+  @room_row_security_migration "enable_room_row_level_security"
 
   # The employer-zone table U5 added that `employer_role` deliberately holds no
   # privilege on. KTD3: hidden attested entries are a per-row rule, which grants
   # cannot express, so the employer reads U9's owner-privileged view and never
   # the base table.
-  @ungranted_tables ["attested_entries"]
+  # U6 adds a second, for a different reason with the same shape. Room
+  # conversation is worker-facing: R11's readers are the people who worked the
+  # shift, a manager among them, and they read it through their own engagement
+  # from the person's side. An employer *session* that could read a venue's
+  # conversation in bulk has no reason to exist, so no grant creates one.
+  @ungranted_tables ["attested_entries", "room_messages"]
 
   # The queue's own tables. They belong to `oban` rather than to this
   # application, there is no Ecto schema for them in `:hospitality_coms`, and
@@ -150,6 +169,11 @@ defmodule HospitalityComs.BoundaryTest do
       @engagement_row_security_migration,
       Code.ensure_loaded?(EnableEngagementRowLevelSecurity)
     )
+
+    load_migration(@room_tables_migration, Code.ensure_loaded?(CreateRooms))
+    load_migration(@roster_tables_migration, Code.ensure_loaded?(CreateRosterEntries))
+    load_migration(@room_zone_migration, Code.ensure_loaded?(GrantRoomZone))
+    load_migration(@room_row_security_migration, Code.ensure_loaded?(EnableRoomRowLevelSecurity))
 
     :ok
   end
@@ -308,8 +332,14 @@ defmodule HospitalityComs.BoundaryTest do
       # Nothing said the two agreed, though, so a person-zone table added to
       # `Zones` without a REVOKE of its own would be caught only by the sweep,
       # and only once somebody granted something. This says it now.
-      assert Enum.sort(GrantZones.person_zone_tables()) ==
-               Enum.sort(Zones.person_zone_tables())
+      # U6 added the first person-zone table since U2, and U1-U5's migrations
+      # are not editable — so the comparison is a union over every migration
+      # that revoked, which is the same shape "grant on every table the
+      # classification places outside the person zone" already has. A
+      # person-zone table covered by no migration still fails here.
+      revoked = GrantZones.person_zone_tables() ++ GrantRoomZone.person_zone_tables()
+
+      assert Enum.sort(revoked) == Enum.sort(Zones.person_zone_tables())
     end
 
     test "spends no cluster-wide dependency of its own" do
@@ -361,7 +391,12 @@ defmodule HospitalityComs.BoundaryTest do
                {"shift_types", "SELECT"},
                {"shift_types", "INSERT"},
                {"invitations", "SELECT"},
-               {"invitations", "INSERT"}
+               {"invitations", "INSERT"},
+               {"shift_rooms", "SELECT"},
+               {"shift_rooms", "INSERT"},
+               {"roster_entries", "SELECT"},
+               {"roster_entries", "INSERT"},
+               {"roster_entries", "UPDATE"}
              ]
     end
 
@@ -502,7 +537,9 @@ defmodule HospitalityComs.BoundaryTest do
       # `@ungranted_tables` is a table somebody forgot to decide about, and this
       # is where they find out rather than at the first query that returns
       # `permission denied`.
-      granted = GrantEmployerZone.granted_tables() ++ GrantEngagementZone.granted_tables()
+      granted =
+        GrantEmployerZone.granted_tables() ++
+          GrantEngagementZone.granted_tables() ++ GrantRoomZone.granted_tables()
 
       assert Enum.sort(granted ++ @ungranted_tables) ==
                Enum.sort(Zones.employer_zone_tables() ++ Zones.shared_tables())
@@ -868,8 +905,97 @@ defmodule HospitalityComs.BoundaryTest do
                "engagements_grant_fkey" => {"s", true},
                "engagements_invitation_fkey" => {"f", false},
                "invitations_grant_fkey" => {"s", true},
-               "invitations_issued_by_grant_fkey" => {"f", false}
+               "invitations_issued_by_grant_fkey" => {"f", false},
+               "room_messages_author_fkey" => {"f", false},
+               "room_messages_shift_room_fkey" => {"s", true},
+               "roster_entries_engagement_fkey" => {"f", false},
+               "roster_entries_shift_room_fkey" => {"f", false},
+               "shift_rooms_shift_type_fkey" => {"f", false}
              }
+    end
+  end
+
+  describe "the rooms" do
+    test "put the suspension in the person zone, where the employer role holds nothing" do
+      # KTD18, as the classification it is. Origin R11 lets a person leave the
+      # venue room reversibly and requires the employer not to see that they
+      # have; a column on `engagements` would arrive with every membership read,
+      # because the employer role holds table-level SELECT there.
+      #
+      # The sweep asks about every table privilege and about column grants, so
+      # `GRANT SELECT (resumed_at)` would be caught alongside a table-level one.
+      assert "venue_room_suspensions" in Zones.person_zone_tables()
+      assert Zones.privileges(Repo, ["venue_room_suspensions"]) == []
+    end
+
+    test "and the sweep would notice if it stopped being true" do
+      # The control. Postgres default-denies on a table owned by another role,
+      # so the assertion above passes on a database where nothing ever revoked
+      # anything. This is what distinguishes an audit from a green tick.
+      Repo.query!("GRANT SELECT (resumed_at) ON venue_room_suspensions TO employer_role")
+
+      assert {"venue_room_suspensions", "SELECT"} in Zones.employer_privileges(Repo)
+    end
+
+    test "leave the suspension carrying no venue key and no person key" do
+      # The person zone's own rule, and KTD2's. It names the engagement, which
+      # is the one row that already means "this person, at this venue".
+      columns = columns("venue_room_suspensions")
+
+      refute "venue_id" in columns
+      refute "person_id" in columns
+      assert "engagement_id" in columns
+    end
+
+    test "give the employer role no privilege at all on room conversation" do
+      # `room_messages` is employer zone and ungranted, for the reason
+      # `attested_entries` is: the reads it would serve belong to somebody else.
+      # A manager reads a room through their own engagement, from the person's
+      # side; an employer session that could read a venue's conversation in bulk
+      # has no reason to exist, so no grant creates one.
+      assert Zones.privileges(Repo, ["room_messages"]) == []
+      assert "room_messages" in Zones.employer_zone_tables()
+    end
+
+    test "give UPDATE on two columns of roster_entries rather than on the table" do
+      # Removal closes a period, and that is the only mutation a roster entry
+      # has. A table-level UPDATE would also let a session move `joined_at`
+      # backwards, which is the retroactive grant KTD6b's structure exists to
+      # make impossible, or move an entry to another engagement or another
+      # shift.
+      refute table_privilege?("roster_entries", "UPDATE")
+
+      assert updatable_columns("roster_entries") == ["left_at", "updated_at"]
+    end
+
+    test "give no UPDATE on shift_rooms at all" do
+      # A room's term and its stamped grace are what every membership answer is
+      # derived from. A session that could move them could close a room
+      # somebody is standing in, or reopen one that shut yesterday.
+      refute table_privilege?("shift_rooms", "UPDATE")
+      assert updatable_columns("shift_rooms") == []
+    end
+
+    test "refuse two overlapping roster periods with the constraint the changeset names" do
+      # KTD6b's GiST index, doing two jobs at once. Named, so
+      # `HospitalityComs.Rosters.RosterEntry` can declare a matching
+      # `exclusion_constraint/3` and the violation arrives as a changeset error
+      # rather than raising through the transaction.
+      assert to_string(RosterEntry.overlap_constraint()) in exclusion_constraints(
+               "roster_entries"
+             )
+
+      assert to_string(VenueRoomSuspension.overlap_constraint()) in exclusion_constraints(
+               "venue_room_suspensions"
+             )
+    end
+
+    test "add no second crossing: no U6 table holds a foreign key to people" do
+      # The rule stated over this unit's own tables rather than only over the
+      # zone lists, so the failure names the unit that broke it.
+      u6 = MapSet.new(~w(shift_rooms roster_entries room_messages venue_room_suspensions))
+
+      assert MapSet.to_list(MapSet.intersection(tables_referencing_people(), u6)) == []
     end
   end
 
@@ -1625,6 +1751,17 @@ defmodule HospitalityComs.BoundaryTest do
     {@engagement_row_security_migration, EnableEngagementRowLevelSecurity}
   ]
 
+  # U6's four, likewise. `shift_rooms`, `roster_entries`, `room_messages` and
+  # `venue_room_suspensions` all reference `engagements`, `shift_types` or
+  # `venues` with `ON DELETE RESTRICT`, so they come off before U5's do — the
+  # same growth U5 forced on U4 and U4 on U3, one unit further along.
+  @room_migrations [
+    {@room_tables_migration, CreateRooms},
+    {@roster_tables_migration, CreateRosterEntries},
+    {@room_zone_migration, GrantRoomZone},
+    {@room_row_security_migration, EnableRoomRowLevelSecurity}
+  ]
+
   defp migrate_engagement_zone({name, module}, direction) do
     apply(Ecto.Migrator, direction, [Repo, migration_version(name), module, @migrator_opts])
   end
@@ -1646,11 +1783,25 @@ defmodule HospitalityComs.BoundaryTest do
   # here first. That is the same growth U4 forced on U3, one unit further along,
   # and the list is a record of what the bridge depends on.
   defp rolled_back_engagement_zone(between) do
-    @engagement_migrations |> Enum.reverse() |> Enum.each(&migrate_engagement_zone(&1, :down))
+    rolled_back_room_zone(fn ->
+      @engagement_migrations |> Enum.reverse() |> Enum.each(&migrate_engagement_zone(&1, :down))
+
+      result = between.()
+
+      capture_log(fn -> Enum.each(@engagement_migrations, &migrate_engagement_zone(&1, :up)) end)
+
+      result
+    end)
+  end
+
+  # U6's migrations rolled off and put back, around `between`. Outermost,
+  # because everything it creates hangs off something U5 or U4 created.
+  defp rolled_back_room_zone(between) do
+    @room_migrations |> Enum.reverse() |> Enum.each(&migrate_engagement_zone(&1, :down))
 
     result = between.()
 
-    capture_log(fn -> Enum.each(@engagement_migrations, &migrate_engagement_zone(&1, :up)) end)
+    capture_log(fn -> Enum.each(@room_migrations, &migrate_engagement_zone(&1, :up)) end)
 
     result
   end
@@ -1739,9 +1890,16 @@ defmodule HospitalityComs.BoundaryTest do
   # execute privilege on each scoping function — with `nil` standing for a
   # function that does not exist, which is what the rolled-back state looks
   # like.
+  #
+  # Swept over the tables *this* migration revoked rather than over the whole
+  # classification, because it is taken while the later units' migrations are
+  # rolled off and their tables do not exist. `Zones.privileges/2` raises on a
+  # missing table on purpose, and that loud failure is worth keeping — so the
+  # sweep is pointed at the tables that survive the rollback, and "the
+  # migration's list equals the classification" is asserted separately.
   defp privilege_snapshot do
     %{
-      tables: Zones.employer_privileges(Repo),
+      tables: Zones.privileges(Repo, GrantZones.person_zone_tables()),
       functions: Map.new(@scoping_functions, &{&1, function_privilege(&1)})
     }
   end
@@ -1804,13 +1962,15 @@ defmodule HospitalityComs.BoundaryTest do
   # role depends on what it was *granted*, and `attested_entries` is an
   # employer-zone table it was granted nothing on.
   defp dependent_zone_tables do
-    (GrantEmployerZone.granted_tables() ++ GrantEngagementZone.granted_tables())
+    (GrantEmployerZone.granted_tables() ++
+       GrantEngagementZone.granted_tables() ++ GrantRoomZone.granted_tables())
     |> Enum.map(&"table #{&1}")
     |> Enum.sort()
   end
 
   # Both grant migrations rolled off, in the order Ecto uses.
   defp revoke_zone_grants do
+    migrate_engagement_zone({@room_zone_migration, GrantRoomZone}, :down)
     migrate_engagement_zone({@engagement_zone_migration, GrantEngagementZone}, :down)
     migrate_employer_zone(:down)
   end
@@ -1818,6 +1978,7 @@ defmodule HospitalityComs.BoundaryTest do
   defp restore_zone_grants do
     migrate_employer_zone(:up)
     migrate_engagement_zone({@engagement_zone_migration, GrantEngagementZone}, :up)
+    migrate_engagement_zone({@room_zone_migration, GrantRoomZone}, :up)
   end
 
   # The same sweep the person zone is audited with, pointed at the employer
