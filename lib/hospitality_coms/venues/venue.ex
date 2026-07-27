@@ -95,6 +95,10 @@ defmodule HospitalityComs.Venues.Venue do
     |> validate_length(:name, max: @max_name_length)
     |> validate_timezone(known_timezone?)
     |> check_constraint(:name, name: :venues_name_present, message: "can't be blank")
+    |> check_constraint(:name,
+      name: :venues_name_within_bound,
+      message: "should be at most #{@max_name_length} character(s)"
+    )
     |> check_constraint(:timezone, name: :venues_timezone_present, message: "can't be blank")
     |> stamp(now)
   end

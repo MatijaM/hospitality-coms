@@ -92,6 +92,10 @@ defmodule HospitalityComs.Venues.ShiftType do
       message: "must be between 0 and #{@max_grace_minutes} minutes"
     )
     |> check_constraint(:name, name: :shift_types_name_present, message: "can't be blank")
+    |> check_constraint(:name,
+      name: :shift_types_name_within_bound,
+      message: "should be at most #{@max_name_length} character(s)"
+    )
     |> unique_constraint([:venue_id, :name])
     |> foreign_key_constraint(:venue_id)
     |> stamp(now)

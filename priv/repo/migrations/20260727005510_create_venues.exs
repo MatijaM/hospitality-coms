@@ -70,6 +70,18 @@ defmodule HospitalityComs.Repo.Migrations.CreateVenues do
   # starts being a second shift.
   @max_grace_minutes 120
 
+  # The bound the changesets carry, mirrored where an `insert_all`, a backfill
+  # or a later context also has to meet it. Every other validation in this
+  # schema is held in both places, and a length only a changeset enforces was
+  # the one asymmetry left.
+  #
+  # `length()` counts characters where `validate_length/3` counts graphemes, so
+  # this is very slightly the stricter of the two. That is the right way round:
+  # the changesets name the constraint, so a name the database refuses and the
+  # changeset would have allowed comes back as a field error rather than as a
+  # raised `Postgrex.Error`.
+  @max_name_length 160
+
   @grant_lineage_constraint "employer_grants_granted_by_fkey"
   @grant_revoked_by_constraint "employer_grants_revoked_by_fkey"
 
@@ -84,6 +96,10 @@ defmodule HospitalityComs.Repo.Migrations.CreateVenues do
 
     create constraint(:venues, :venues_name_present, check: "length(btrim(name)) > 0")
     create constraint(:venues, :venues_timezone_present, check: "length(btrim(timezone)) > 0")
+
+    create constraint(:venues, :venues_name_within_bound,
+             check: "length(name) <= #{@max_name_length}"
+           )
 
     create table(:employer_grants, primary_key: false) do
       add :id, :binary_id, primary_key: true
@@ -203,6 +219,10 @@ defmodule HospitalityComs.Repo.Migrations.CreateVenues do
            )
 
     create constraint(:shift_types, :shift_types_name_present, check: "length(btrim(name)) > 0")
+
+    create constraint(:shift_types, :shift_types_name_within_bound,
+             check: "length(name) <= #{@max_name_length}"
+           )
   end
 
   def down do

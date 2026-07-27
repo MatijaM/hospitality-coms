@@ -57,6 +57,7 @@ defmodule HospitalityComs.BoundaryTest do
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantEmployerZone}
   @compile {:no_warn_undefined,
             HospitalityComs.Repo.Migrations.EnableEmployerZoneRowLevelSecurity}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreateVenues}
 
   import Ecto.Query
   import ExUnit.CaptureLog
@@ -69,6 +70,7 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.EmployerRepo
   alias HospitalityComs.Repo
+  alias HospitalityComs.Repo.Migrations.CreateVenues
   alias HospitalityComs.Repo.Migrations.EnableEmployerZoneRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
   alias HospitalityComs.Repo.Migrations.GrantZones
@@ -84,6 +86,7 @@ defmodule HospitalityComs.BoundaryTest do
   @migration_name "grant_zones"
   @employer_zone_migration "grant_employer_zone"
   @row_security_migration "enable_employer_zone_row_level_security"
+  @employer_tables_migration "create_venues"
 
   @now ~U[2026-03-01 12:00:00.000000Z]
 
@@ -104,6 +107,8 @@ defmodule HospitalityComs.BoundaryTest do
       @row_security_migration,
       Code.ensure_loaded?(EnableEmployerZoneRowLevelSecurity)
     )
+
+    load_migration(@employer_tables_migration, Code.ensure_loaded?(CreateVenues))
 
     :ok
   end
@@ -422,6 +427,57 @@ defmodule HospitalityComs.BoundaryTest do
       )
 
       assert Zones.employer_role() in default_privilege_grantees()
+    end
+  end
+
+  describe "the employer zone's tables" do
+    test "are removed by their own migration's down and restored by its up" do
+      # `grant_employer_zone` has had a rollback test since it was written and
+      # the migration that creates the tables has not, which is the half of
+      # "reversible" only a rollback proves: a `down` nobody runs is a `down`
+      # nobody has read carefully, and this one drops two self-referential
+      # foreign keys by hand before it can drop the table they are on.
+      assert MapSet.subset?(employer_zone_tables(), database_tables())
+      assert "employer_grants_granted_by_fkey" in foreign_keys("employer_grants")
+      assert "employer_grants_revoked_by_fkey" in foreign_keys("employer_grants")
+      assert "employer_grants" in tables_with_composite_key()
+
+      rolled_back =
+        round_trip_employer_zone(fn ->
+          %{
+            tables: MapSet.intersection(employer_zone_tables(), database_tables()),
+            foreign_keys: foreign_keys("employer_grants"),
+            composite_key?: "employer_grants" in tables_with_composite_key()
+          }
+        end)
+
+      assert MapSet.to_list(rolled_back.tables) == []
+      assert rolled_back.foreign_keys == []
+      refute rolled_back.composite_key?
+
+      assert MapSet.subset?(employer_zone_tables(), database_tables())
+      assert "employer_grants_granted_by_fkey" in foreign_keys("employer_grants")
+      assert "employer_grants_revoked_by_fkey" in foreign_keys("employer_grants")
+      assert "employer_grants" in tables_with_composite_key()
+    end
+
+    test "come back with the privileges and the policies written on them" do
+      # The other half of the round trip, and the reason it rolls all three
+      # migrations rather than one: a table restored without its grants is a
+      # table `employer_role` cannot read, and one restored without its policy
+      # is a table every venue can read.
+      #
+      # The rolled-back state is not asked about here: `Zones.privileges/2`
+      # raises on a table that does not exist, deliberately, so that a zone
+      # naming a table nobody migrated fails loudly instead of sweeping
+      # nothing. The absence is asserted in the test above.
+      before = employer_zone_privileges()
+      refute before == []
+
+      round_trip_employer_zone(fn -> :nothing_in_between end)
+
+      assert employer_zone_privileges() == before
+      assert Enum.reject(row_security_flags(), fn {_table, %{enabled: on}} -> on end) == []
     end
   end
 
@@ -1321,6 +1377,47 @@ defmodule HospitalityComs.BoundaryTest do
       GrantEmployerZone,
       @migrator_opts
     ])
+  end
+
+  defp migrate_employer_tables(direction) do
+    apply(Ecto.Migrator, direction, [
+      Repo,
+      migration_version(@employer_tables_migration),
+      CreateVenues,
+      @migrator_opts
+    ])
+  end
+
+  # The three employer-zone migrations rolled in the order Ecto uses, which is
+  # reverse: the policies and the privileges come off before the tables they
+  # are written on, and go back on after them.
+  defp round_trip_employer_zone(between) do
+    migrate_row_security(:down)
+    migrate_employer_zone(:down)
+    migrate_employer_tables(:down)
+
+    result = between.()
+
+    capture_log(fn -> migrate_employer_tables(:up) end)
+    capture_log(fn -> migrate_employer_zone(:up) end)
+    capture_log(fn -> migrate_row_security(:up) end)
+
+    result
+  end
+
+  defp foreign_keys(table) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT c.conname
+        FROM pg_constraint c
+        WHERE c.contype = 'f' AND c.conrelid = to_regclass($1)
+        ORDER BY 1
+        """,
+        [table]
+      )
+
+    Enum.map(rows, &hd/1)
   end
 
   defp migrate_row_security(direction) do

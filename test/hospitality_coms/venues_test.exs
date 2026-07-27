@@ -27,10 +27,11 @@ defmodule HospitalityComs.VenuesTest do
   Several assertions could pass for the wrong reason and ship with something
   that fails when they do:
 
-    * the grace-period bound and the timezone requirement are asserted through
-      the changeset *and* against the check constraint behind it, by writing
-      raw SQL with the changeset bypassed. A validation the database does not
-      also hold is one that an `insert_all` walks around.
+    * every validation is asserted through the changeset *and* against the
+      check constraint behind it, by writing raw SQL with the changeset
+      bypassed. A validation the database does not also hold is one that an
+      `insert_all` walks around, so the name bounds — present, and within
+      length — are proven the same way the grace period and the timezone are.
     * the timezone rejection has a control asserting a real IANA name is
       accepted, so it cannot be a validation that refuses everything.
     * `list_shift_types/1` is asserted alongside a second venue whose rows it
@@ -101,6 +102,16 @@ defmodule HospitalityComs.VenuesTest do
                  creator_scope(@now),
                  valid_venue_attributes(%{timezone: "Pacific/Auckland"})
                )
+    end
+
+    test "rejects a name longer than the bound the database also holds" do
+      assert {:error, :venue, changeset, _changes} =
+               Venues.create_venue(
+                 creator_scope(@now),
+                 valid_venue_attributes(%{name: String.duplicate("a", 161)})
+               )
+
+      assert "should be at most 160 character(s)" in errors_on(changeset).name
     end
 
     test "rejects a venue with no name" do
@@ -705,8 +716,49 @@ defmodule HospitalityComs.VenuesTest do
       assert %{num_rows: 1} = raw_shift_type(venue_id, 0)
     end
 
+    test "reject a blank venue name" do
+      assert_raise Postgrex.Error, ~r/venues_name_present/, fn -> raw_venue(name: "   ") end
+    end
+
+    test "reject a blank shift type name" do
+      venue_id = raw_venue()
+
+      assert_raise Postgrex.Error, ~r/shift_types_name_present/, fn ->
+        raw_shift_type(venue_id, 0, name: "   ")
+      end
+    end
+
+    test "reject a venue name past the length the changeset bounds" do
+      # The asymmetry this closes: `@max_name_length` used to live in the
+      # changesets alone, so an `insert_all` or a backfill could write a name
+      # of any length the column would hold. Every other validation in this
+      # schema is held in both places.
+      assert_raise Postgrex.Error, ~r/venues_name_within_bound/, fn ->
+        raw_venue(name: String.duplicate("a", 161))
+      end
+    end
+
+    test "reject a shift type name past the same length" do
+      venue_id = raw_venue()
+
+      assert_raise Postgrex.Error, ~r/shift_types_name_within_bound/, fn ->
+        raw_shift_type(venue_id, 0, name: String.duplicate("a", 161))
+      end
+    end
+
+    test "accept names at the bound and names that are merely short" do
+      # The control for the four above: a constraint that rejected every name
+      # would pass all of them.
+      venue_id = raw_venue(name: String.duplicate("a", 160))
+
+      assert is_binary(venue_id)
+      assert %{num_rows: 1} = raw_shift_type(venue_id, 0, name: String.duplicate("a", 160))
+    end
+
     test "reject a blank timezone" do
-      assert_raise Postgrex.Error, ~r/venues_timezone_present/, fn -> raw_venue("   ") end
+      assert_raise Postgrex.Error, ~r/venues_timezone_present/, fn ->
+        raw_venue(timezone: "   ")
+      end
     end
 
     test "reject a grant revoked before it was issued" do
@@ -959,7 +1011,7 @@ defmodule HospitalityComs.VenuesTest do
 
   ## Raw SQL, for the constraints underneath
 
-  defp raw_venue(timezone \\ "Europe/Zagreb") do
+  defp raw_venue(opts \\ []) do
     %{rows: [[id]]} =
       Repo.query!(
         """
@@ -967,19 +1019,26 @@ defmodule HospitalityComs.VenuesTest do
         VALUES (gen_random_uuid(), $1, $2, now(), now())
         RETURNING id::text
         """,
-        ["Raw #{System.unique_integer([:positive])}", timezone]
+        [
+          Keyword.get(opts, :name, "Raw #{System.unique_integer([:positive])}"),
+          Keyword.get(opts, :timezone, "Europe/Zagreb")
+        ]
       )
 
     id
   end
 
-  defp raw_shift_type(venue_id, grace) do
+  defp raw_shift_type(venue_id, grace, opts \\ []) do
     Repo.query!(
       """
       INSERT INTO shift_types (id, venue_id, name, grace_period_minutes, inserted_at, updated_at)
       VALUES (gen_random_uuid(), $1, $2, $3, now(), now())
       """,
-      [raw_uuid(venue_id), "Raw #{System.unique_integer([:positive])}", grace]
+      [
+        raw_uuid(venue_id),
+        Keyword.get(opts, :name, "Raw #{System.unique_integer([:positive])}"),
+        grace
+      ]
     )
   end
 
