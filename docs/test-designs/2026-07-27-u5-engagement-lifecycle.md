@@ -87,7 +87,12 @@ of it possible. `engagements.person_id` is the only crossing between the two zon
 | 17 | Ending at Venue B leaves Venue A active | engagements_test | unit | per-venue period close |
 | 18 | Clock advance past the upper bound excludes the person, no job run | engagements_test | unit | activeness being derived |
 | 19 | Ending the venue's last grant-holding engagement is refused | engagements_test | unit | R22/KTD17 |
-| 20 | `employer_role` holds no privilege on the shared zone | boundary_test | boundary | the grant inventory |
+| 20 | `employer_role`'s privileges on the shared zone are exactly SELECT and a column-scoped UPDATE | boundary_test | boundary | the grant inventory |
+| 21 | `employer_role` holds nothing at all on `attested_entries` | boundary_test | boundary | KTD3 |
+| 22 | An employer session cannot insert an engagement | engagements_test | boundary | the absent INSERT grant |
+| 23 | `engagements` is the only table outside the person zone naming a person | boundary_test | boundary | the single-bridge rule |
+| 24 | The bridge key is non-null and `ON DELETE RESTRICT` | boundary_test | boundary | KTD15 |
+| 25 | Ending at the instant the term opened yields a term containing no instant | engagements_test | unit | half-open bounds |
 
 Controls carried alongside, so no assertion can pass for the wrong reason:
 
@@ -112,6 +117,52 @@ Controls carried alongside, so no assertion can pass for the wrong reason:
 - `match: :full` on composite foreign keys except where a column of the key is
   legitimately null — the same documented exception U4 shipped.
 - Concurrency tests non-sandboxed, following the two fixed precedents.
+
+## Revisions made during implementation
+
+Recorded rather than silently applied, because the gate exists to be departed
+from explicitly.
+
+1. **Row 20 was wrong and is replaced.** It claimed `employer_role` should hold
+   *no* privilege on the shared zone. It cannot: `engagements` is how a venue
+   knows who is engaged, so the employer role needs `SELECT`, and renewal and
+   ending need `UPDATE`. Granting nothing would make U6's venue-room membership
+   query unwritable from an employer scope. What is asserted instead is the
+   exact inventory — `SELECT`, plus `UPDATE` on `ends_at`, `lock_version` and
+   `updated_at` alone, and **no `INSERT`**, so no employer session can
+   manufacture a worker. Rows 21–24 were added alongside it, because the
+   inventory only means something next to the absences it is measured against.
+
+2. **Two tables the brief did not name.** `invitations` and `attested_entries`
+   are both created here. The brief implied the first and required the second —
+   scenarios 6, 7 and 14 are assertions about attested-entry rows — but neither
+   was listed. Both are employer zone, both carry `venue_id`, neither names a
+   person. `attested_entries` is granted nothing (KTD3); U9 owns its context and
+   extends the schema.
+
+3. **`Ecto.Multi.mode: :savepoint` is not used for the claim**, unlike U4's
+   venue creation. That multi runs inside `EmployerRepo.scoped_transaction/2`
+   and needs one; this is the outermost transaction there is, and asking
+   DBConnection for a savepoint outside a transaction is an error.
+
+4. **`engagements_term_not_reversed` is `>=`, not `>`.** Discovered by a failing
+   test: ending an engagement at the instant its term opened produces
+   `tstzrange(a, a, '[)')`, the empty range. An engagement cannot be *created*
+   that way — an invitation's term is strictly ordered — so the empty case is
+   reachable only by ending one, and it is the correct record of it: active at
+   no instant, overlapping nothing. Row 25 covers it.
+
+5. **`engagements_test.exs` is not sandboxed.** The claim spans both repos'
+   connections; under the sandbox those are two transactions that cannot see
+   each other's rows. The alternative was to run the claim as `employer_role`,
+   which would mean granting that role `INSERT` on `attested_entries` — the one
+   table KTD3 says it must hold nothing on — to make a test harness happier.
+
+6. **U4's last-grant invariant is unchanged.** The brief flagged
+   `venues_test.exs` as a regression risk and it stayed one: nothing in
+   `HospitalityComs.Venues` changed except an additive
+   `fetch_acting_grant/1`, so U5 does not duplicate U4's authorization check.
+   R22/KTD17's other half lives in `end_engagement/2`.
 
 ## Quality scores (self-assessed)
 
