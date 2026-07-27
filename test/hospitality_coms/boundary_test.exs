@@ -347,7 +347,7 @@ defmodule HospitalityComs.BoundaryTest do
       # The number `HospitalityComs.PostgresRolesTest` has to roll back before
       # it can drop the role, expressed as the objects rather than as a count:
       # a count of five is satisfied by five grants on `people`.
-      assert dependent_objects() == Enum.sort(Zones.employer_zone_tables())
+      assert dependent_objects() == dependent_zone_tables()
     end
 
     test "are what the check above would notice growing" do
@@ -356,7 +356,26 @@ defmodule HospitalityComs.BoundaryTest do
       # holds.
       Repo.query!("GRANT SELECT ON people TO employer_role")
 
-      assert "people" in dependent_objects()
+      assert "table people" in dependent_objects()
+    end
+
+    test "are what it would notice growing on something that is not a table, too" do
+      # The blind spot the control above shares with every other one in this
+      # file: they all grant on a table. This query used to carry
+      # `classid = 'pg_class'::regclass`, which drops every dependency on a
+      # function, a sequence or a type — and a GRANT on a function writes a
+      # `pg_shdepend` row exactly like a GRANT on a table does, and makes
+      # `DROP ROLE employer_role` fail exactly as hard. Measured: the grant
+      # below was invisible to the filtered query while the role could not be
+      # dropped.
+      #
+      # U4 narrowed U3's canary in two ways. The `current_database()` scoping
+      # was forced — `objid` only resolves in the database that owns it — and
+      # this filter was not. Names come from `pg_describe_object/3` now, which
+      # resolves every class rather than one.
+      Repo.query!("GRANT EXECUTE ON FUNCTION app_current_employer_id() TO employer_role")
+
+      assert "function app_current_employer_id()" in dependent_objects()
     end
 
     test "are removed by the migration's own down, leaving the role clean" do
@@ -1380,27 +1399,39 @@ defmodule HospitalityComs.BoundaryTest do
   #
   # Scoped to `current_database()` and reported as names rather than as a
   # count, both deliberately. Names because a count of five is satisfied by
-  # five grants on `people`; scoped because `objid` only resolves against
-  # `pg_class` in the database that owns it, so a row belonging to another
-  # database would come back as a number or as somebody else's table.
+  # five grants on `people`; scoped because `objid` only resolves in the
+  # database that owns it, so a row belonging to another database would come
+  # back as a number or as somebody else's object.
   # `HospitalityComs.PostgresRolesTest` is where the rest of the cluster is
   # accounted for.
+  #
+  # Names come from `pg_describe_object/3` rather than from `objid::regclass`,
+  # and there is no `classid` filter. The filtered form dropped every
+  # dependency whose class was not `pg_class` — a grant on a function, a
+  # sequence or a type — while `DROP ROLE` still failed on it. The
+  # `current_database()` narrowing is forced by the catalogue; that one was
+  # not.
   defp dependent_objects do
     %{rows: rows} =
       Repo.query!(
         """
-        SELECT DISTINCT d.objid::regclass::text
+        SELECT DISTINCT pg_describe_object(d.classid, d.objid, 0)
         FROM pg_shdepend d
         JOIN pg_authid a ON a.oid = d.refobjid
         WHERE a.rolname = $1
           AND d.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-          AND d.classid = 'pg_class'::regclass
         ORDER BY 1
         """,
         [Zones.employer_role()]
       )
 
     Enum.map(rows, &hd/1)
+  end
+
+  # The employer zone as `pg_describe_object/3` names it, which is what
+  # `dependent_objects/0` reports.
+  defp dependent_zone_tables do
+    Zones.employer_zone_tables() |> Enum.map(&"table #{&1}") |> Enum.sort()
   end
 
   # The same sweep the person zone is audited with, pointed at the employer
