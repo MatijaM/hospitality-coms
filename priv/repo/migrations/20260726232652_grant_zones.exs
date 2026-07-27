@@ -43,13 +43,21 @@ defmodule HospitalityComs.Repo.Migrations.GrantZones do
   worker who has disclosed nothing — the failure would look like an answer.
 
   Both cases raise, and they are genuinely two cases. On a connection that has
-  never run a scoped transaction, `current_setting/1` raises
-  `undefined_object`. On a *pooled* connection that has run one and committed,
-  the setting still exists and reads as the empty string, because `SET LOCAL`
-  reverts a parameter to its prior value rather than undefining it. The second
-  is the dangerous one — it is the state every connection in the pool is in
-  after the first employer request — so the two are collapsed into one
-  exception with one message.
+  never run a scoped transaction the setting is undefined; on a *pooled*
+  connection that has run one and committed, it exists and reads as the empty
+  string, because `SET LOCAL` reverts a parameter to its prior value rather
+  than undefining it. The second is the dangerous one — it is the state every
+  connection in the pool is in after the first employer request — so the two
+  are collapsed into one exception with one message.
+
+  They are told apart by the two-argument `current_setting(name, true)`, which
+  answers NULL for an undefined setting, and not by catching
+  `undefined_object`. A PL/pgSQL block with an `EXCEPTION` clause allocates an
+  implicit subtransaction on every entry, fired or not, and these functions are
+  written for U9's per-row view qualifier: one subtransaction per row of every
+  employer read, to handle a case that arises once per connection. Measured
+  over 200,000 rows on this database, 320ms with the exception block against
+  244ms without. Same behaviour, none of the cost.
 
   One limit on that, measured rather than assumed, and U9 inherits it. Postgres
   evaluates a `STABLE` function in a qualifier per row, so a scan that yields no
@@ -73,14 +81,55 @@ defmodule HospitalityComs.Repo.Migrations.GrantZones do
   The tables are a different matter and U4 will have to spend it: the employer
   zone cannot be read without real grants on real tables. When it does, U1's
   down-migration test has to be reckoned with rather than discovered.
+
+  ## What the REVOKE does not reach, for U4
+
+  `ALTER DEFAULT PRIVILEGES` is a separate mechanism and `REVOKE ALL ON TABLE`
+  does not touch it. Measured: a default-privilege grant to `employer_role`
+  survives the statements below and is inherited by every table created
+  afterwards, so a single `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT
+  SELECT ON TABLES TO employer_role` would hand the employer role every
+  person-zone table U10 adds, silently and retroactively-looking.
+
+  Nothing sets one today, and this migration does not attempt to revoke a
+  mechanism nobody used. The control is the sweep in
+  `HospitalityComs.Zones.employer_privileges/1`, which asks about effective
+  privilege and therefore catches a grant however it arrived. U4 is where this
+  stops being theoretical.
+
+  ## Why `down` does not CASCADE
+
+  `DROP FUNCTION IF EXISTS` without `CASCADE` fails once U9's view depends on
+  `app_current_employer_id()`. That is the intended behaviour rather than an
+  oversight. `CASCADE` would drop somebody else's object as a side effect of
+  rolling this one back, and the object in question is the employer-visible
+  view — the thing the hidden-entry rule is enforced by. A rollback that
+  quietly removes it is worse than a rollback that stops.
+
+  Ecto rolls migrations back in reverse order, so U9's `down` drops its own
+  view before this one runs and the ordinary path never meets the dependency.
+  The path that does is somebody rolling back out of order, and that is exactly
+  when a loud failure is worth having.
   """
 
   use Ecto.Migration
 
-  # Written out deliberately; see the moduledoc.
+  # Written out deliberately; see the moduledoc. `HospitalityComs.BoundaryTest`
+  # pins it against `HospitalityComs.Zones.person_zone_tables/0` as of today, so
+  # that the day the two diverge is the day somebody is told, rather than the
+  # day somebody notices.
   @person_zone_tables ~w(people people_tokens)
 
   @scoping_functions ["app_current_employer_id()", "app_current_instant()"]
+
+  @doc """
+  The tables this migration revoked, as it was written.
+
+  A historical record rather than a live list, exposed so the proof suite can
+  compare it with the classification instead of transcribing it a third time.
+  """
+  @spec person_zone_tables() :: [String.t()]
+  def person_zone_tables, do: @person_zone_tables
 
   def up do
     Enum.each(@person_zone_tables, &revoke_all/1)
@@ -90,6 +139,7 @@ defmodule HospitalityComs.Repo.Migrations.GrantZones do
   end
 
   def down do
+    # No CASCADE, deliberately; see the moduledoc.
     Enum.each(@scoping_functions, &execute("DROP FUNCTION IF EXISTS #{&1}"))
 
     # The tables are deliberately not re-granted. The state this migration
@@ -109,13 +159,12 @@ defmodule HospitalityComs.Repo.Migrations.GrantZones do
     DECLARE
       raw text;
     BEGIN
-      BEGIN
-        raw := current_setting('app.employer_id');
-      EXCEPTION WHEN undefined_object THEN
-        raw := '';
-      END;
+      -- Two arguments: missing_ok. NULL for a setting that was never defined,
+      -- rather than `undefined_object` and the per-row subtransaction an
+      -- EXCEPTION block would cost to catch it.
+      raw := current_setting('app.employer_id', true);
 
-      IF raw = '' THEN
+      IF raw IS NULL OR raw = '' THEN
         RAISE EXCEPTION 'app.employer_id is not set on this connection'
           USING HINT = 'employer reads run inside EmployerRepo.scoped_transaction/2';
       END IF;
@@ -135,13 +184,9 @@ defmodule HospitalityComs.Repo.Migrations.GrantZones do
     DECLARE
       raw text;
     BEGIN
-      BEGIN
-        raw := current_setting('app.now');
-      EXCEPTION WHEN undefined_object THEN
-        raw := '';
-      END;
+      raw := current_setting('app.now', true);
 
-      IF raw = '' THEN
+      IF raw IS NULL OR raw = '' THEN
         RAISE EXCEPTION 'app.now is not set on this connection'
           USING HINT = 'employer reads run inside EmployerRepo.scoped_transaction/2';
       END IF;

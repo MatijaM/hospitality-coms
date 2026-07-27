@@ -198,6 +198,22 @@ defmodule HospitalityComs.BoundaryTest do
       end)
     end
 
+    test "revoked the tables the classification calls the person zone today" do
+      # The migration writes its table list out rather than reading `Zones`,
+      # and that is right: a migration is a record of what was done to a
+      # database on a given day, and wiring it to a module later units will
+      # edit would make its behaviour change retroactively.
+      #
+      # Nothing said the two agreed, though, so a person-zone table added to
+      # `Zones` without a REVOKE of its own would be caught only by the sweep,
+      # and only once somebody granted something. This says it now.
+      # Through `apply/3` because migration files are not compiled into the
+      # application; `setup_all` is what puts this module in memory.
+      revoked = apply(GrantZones, :person_zone_tables, [])
+
+      assert Enum.sort(revoked) == Enum.sort(Zones.person_zone_tables())
+    end
+
     test "leaves the employer role droppable" do
       # Roles are cluster-global and grants are database-local, so a single
       # privilege granted to `employer_role` in any database in the cluster
