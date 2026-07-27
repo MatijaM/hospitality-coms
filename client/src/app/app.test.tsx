@@ -4,7 +4,8 @@ import { StrictMode } from "react";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ApiClient } from "../api/client";
+import type { ApiClient, ApiResult } from "../api/client";
+import type { Session } from "../api/types";
 import { SessionProvider } from "../session/session-context";
 import type { TokenStore } from "../session/token-store";
 import { createMemoryTokenStore } from "../session/token-store";
@@ -89,6 +90,38 @@ describe("asking for a magic link", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows a 422 that names a field this form does not render", async () => {
+    // The form has one input, and the copy for a per-field failure is attached
+    // to it. A 422 naming anything else therefore had nowhere to go and the
+    // page said nothing at all — the worker sees a submit that did nothing.
+    renderApp({
+      path: "/log-in",
+      api: createFakeApi({
+        requestMagicLink: () =>
+          Promise.resolve(
+            fails({
+              kind: "api_field_error",
+              status: 422,
+              code: "unprocessable_entity",
+              rawCode: "unprocessable_entity",
+              message: "the address was not accepted",
+              fields: { address: ["is not a field this form knows about"] },
+            }),
+          ),
+      }),
+    });
+
+    await userEvent.type(
+      await screen.findByLabelText(/email address/i),
+      "worker@example",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /send me a link/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /is not a field this form knows about/i,
+    );
+  });
+
   it("says the server could not be reached and leaves the form usable", async () => {
     renderApp({
       path: "/log-in",
@@ -134,6 +167,34 @@ describe("redeeming a link", () => {
     expect(await screen.findByText("worker@example.com")).toBeInTheDocument();
     expect(redeemMagicLink).toHaveBeenCalledWith("bWFnaWM");
     expect(tokenStore.read()).toBe("aXNzdWVk");
+  });
+
+  it("redeems a pasted link once however fast the button is clicked", async () => {
+    // The link is single use. A second redemption meets the 401 a spent link
+    // gets, and its message — "That is no longer valid" — would be written
+    // over a redemption that actually succeeded.
+    const redeemMagicLink = vi.fn(() => new Promise<ApiResult<Session>>(() => undefined));
+    renderApp({
+      path: "/log-in",
+      api: createFakeApi({
+        requestMagicLink: () => Promise.resolve(ok(null)),
+        redeemMagicLink,
+      }),
+    });
+
+    await userEvent.type(
+      await screen.findByLabelText(/email address/i),
+      "worker@example.com",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /send me a link/i }));
+    await userEvent.type(await screen.findByLabelText(/paste/i), "bWFnaWM");
+
+    const submit = await screen.findByRole("button", { name: /log in with this link/i });
+    await userEvent.click(submit);
+    await userEvent.click(submit);
+
+    expect(redeemMagicLink).toHaveBeenCalledOnce();
+    expect(submit).toBeDisabled();
   });
 
   it("redeems a link followed straight into the client", async () => {

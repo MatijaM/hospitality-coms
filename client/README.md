@@ -96,12 +96,14 @@ log-in flow against a live server and reads the magic link out of
 `/dev/mailbox/json`. Run it with the server up:
 
 ```bash
-HOSPITALITY_COMS_API_URL=http://localhost:4000 npm test
+npm run test:integration                                   # assumes :4000
+HOSPITALITY_COMS_API_URL=http://localhost:4001 npm run test:integration
 ```
 
 It is the only test here that checks this client's idea of the API against the
 API rather than against a stub this project also wrote, so run it whenever the
-API changes.
+API changes. Nothing runs it automatically — this repository has no CI — so it
+is on whoever changes `SessionController` or `ErrorEnvelope` to remember.
 
 ## How the code is arranged
 
@@ -201,6 +203,21 @@ worker. There is no cookie session to use instead, an `HttpOnly` cookie is not
 readable by the `fetch` calls that must send it as a bearer header, and memory
 alone would end the session on every refresh. It is behind a `TokenStore`
 interface, so moving it is one file.
+
+`TokenStore`'s three operations must not throw, and that is in the type rather
+than in a convention: both callers are event handlers that `void` the promise,
+so a throw becomes an unhandled rejection and a surface that never moves again.
+`createBrowserTokenStore()` picks storage if the browser has it and memory if
+not — private-mode Safari throws on write, storage switched off throws on
+everything, and `window.localStorage` is plainly `undefined` in this project's
+own test environment.
+
+**Known gap: the `unavailable` surface keeps the token and offers no way to
+drop it.** That is right for the case it was built for — a request that failed
+should not log a worker out — but it means a token that is somehow unusable
+without ever producing a 401 leaves the retry button as the only control on
+screen. Clearing site data is the workaround. A "sign out anyway" action is the
+fix and is not built, because nothing yet distinguishes the two cases.
 
 ## Deliberately absent, and why
 

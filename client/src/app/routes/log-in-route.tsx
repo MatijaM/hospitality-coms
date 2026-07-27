@@ -96,12 +96,36 @@ function RequestOutcome({ request }: { readonly request: LinkRequest }) {
         </p>
       );
     case "failed":
-      // Per-field messages are rendered against the input they name, so the
-      // banner would be a second copy of the same complaint.
-      if (request.failure.kind === "api_field_error") return null;
+      // A per-field message is rendered against the input it names, so the
+      // banner would be a second copy of the same complaint — but only for the
+      // inputs this form actually has.
+      if (request.failure.kind === "api_field_error") {
+        return <UnattachedMessages failure={request.failure} />;
+      }
 
       return <p role="alert">{failureMessage(request.failure)}</p>;
   }
+}
+
+/** The inputs this form renders, and can therefore attach a message to. */
+const RENDERED_FIELDS = ["email"];
+
+/**
+ * Anything the server rejected that this form has nowhere to put.
+ *
+ * Not reachable from today's `SessionController`, which names `email` and
+ * nothing else. It is here because the alternative is silence: without it a
+ * 422 naming any other field renders no message anywhere, and the worker sees
+ * a submit that did nothing at all.
+ */
+function UnattachedMessages({ failure }: { readonly failure: ApiFieldError }) {
+  const messages = Object.entries(failure.fields)
+    .filter(([field]) => !RENDERED_FIELDS.includes(field))
+    .flatMap(([, fieldMessages]) => fieldMessages);
+
+  if (messages.length === 0) return null;
+
+  return <p role="alert">{messages.join(" ")}</p>;
 }
 
 function FieldMessages({
@@ -146,8 +170,14 @@ function PasteLinkForm({
 }) {
   const [pasted, setPasted] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
+  const [redeeming, setRedeeming] = useState(false);
 
   async function submit() {
+    // A link is single use. Two redemptions in flight means the second meets
+    // the 401 a spent link gets, and writes "That is no longer valid" over the
+    // one that succeeded.
+    if (redeeming) return;
+
     const linkToken = tokenFromPastedValue(pasted);
 
     if (linkToken === null) {
@@ -156,8 +186,21 @@ function PasteLinkForm({
       return;
     }
 
+    setRedeeming(true);
     const outcome = await onRedeem(linkToken);
-    setProblem(outcome.ok ? null : failureMessage(outcome.failure));
+
+    // On success this component is about to be replaced by a redirect to the
+    // authenticated surface, so the button stays disabled: there is nothing
+    // left to redeem and re-enabling it only offers a second attempt that
+    // would fail.
+    if (outcome.ok) {
+      setProblem(null);
+
+      return;
+    }
+
+    setRedeeming(false);
+    setProblem(failureMessage(outcome.failure));
   }
 
   return (
@@ -180,7 +223,9 @@ function PasteLinkForm({
         }}
       />
       {problem !== null && <p role="alert">{problem}</p>}
-      <button type="submit">Log in with this link</button>
+      <button type="submit" disabled={redeeming}>
+        Log in with this link
+      </button>
     </form>
   );
 }
