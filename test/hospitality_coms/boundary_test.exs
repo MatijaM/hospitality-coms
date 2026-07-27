@@ -52,8 +52,9 @@ defmodule HospitalityComs.BoundaryTest do
   use ExUnit.Case, async: false
 
   # Migration files are not compiled into the application, so the compiler
-  # cannot see `GrantZones`. `setup_all` is what puts it in memory.
+  # cannot see them. `setup_all` is what puts them in memory.
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantZones}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantEmployerZone}
 
   import Ecto.Query
   import ExUnit.CaptureLog
@@ -66,6 +67,7 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.EmployerRepo
   alias HospitalityComs.Repo
+  alias HospitalityComs.Repo.Migrations.GrantEmployerZone
   alias HospitalityComs.Repo.Migrations.GrantZones
   alias HospitalityComs.Zones
 
@@ -75,6 +77,7 @@ defmodule HospitalityComs.BoundaryTest do
   alias __MODULE__.Venue
 
   @migration_name "grant_zones"
+  @employer_zone_migration "grant_employer_zone"
 
   @now ~U[2026-03-01 12:00:00.000000Z]
 
@@ -88,7 +91,8 @@ defmodule HospitalityComs.BoundaryTest do
   # migrator has already loaded it on the way in, which is what happens the
   # first time this runs against a database where the migration is pending.
   setup_all do
-    load_migration(Code.ensure_loaded?(GrantZones))
+    load_migration(@migration_name, Code.ensure_loaded?(GrantZones))
+    load_migration(@employer_zone_migration, Code.ensure_loaded?(GrantEmployerZone))
     :ok
   end
 
@@ -238,41 +242,139 @@ defmodule HospitalityComs.BoundaryTest do
                Enum.sort(Zones.person_zone_tables())
     end
 
-    test "leaves the employer role droppable" do
-      # Roles are cluster-global and grants are database-local, so a single
-      # privilege granted to `employer_role` in any database in the cluster
-      # makes `DROP ROLE employer_role` fail in every other one — including the
-      # rollback `HospitalityComs.PostgresRolesTest` asserts on U1's roles
-      # migration. Nothing this migration does is worth that, so nothing it
-      # does creates the dependency.
+    test "spends no cluster-wide dependency of its own" do
+      # This is U3's canary, adapted rather than retired. Its claim was that
+      # *this* migration creates no `pg_shdepend` row, because roles are
+      # cluster-global while grants are database-local and one such row in any
+      # database makes `DROP ROLE employer_role` fail in every other. It said
+      # so as `== 0` over the whole cluster, which was the right spelling while
+      # nothing anywhere had been granted.
       #
-      # U4 will have to: the employer zone is unreadable without real grants on
-      # real tables. This is the test that tells it so.
-      assert shared_dependencies(Zones.employer_role()) == 0,
+      # U4 grants for real, so the bare count now measures U4 rather than this
+      # migration. Rolling U4's grants back restores the original question, and
+      # the claim survives intact: `grant_zones` leaves the employer role with
+      # nothing depending on it. What U4 spends, and what it buys, is asserted
+      # in "the employer-zone grants" below.
+      migrate_employer_zone(:down)
+
+      assert dependent_objects() == [],
              """
-             `employer_role` now has cluster-wide dependencies, so \
-             `DROP ROLE employer_role` will fail — including in \
-             `HospitalityComs.PostgresRolesTest`, which asserts U1's roles \
-             migration rolls back.
+             `grant_zones` now leaves cluster-wide dependencies behind: \
+             #{inspect(dependent_objects())}
 
-             If you are U4 or later and this is your grant, this test has done \
-             its job and the answer is not to delete it. Do this instead:
-
-               1. Change the expected count here to the number of dependencies \
-                  the employer zone's grants actually create, and say in a \
-                  comment which grants they are. A number is still a tripwire; \
-                  zero was only ever the right number while nothing was \
-                  granted.
-               2. Make `PostgresRolesTest`'s rollback revoke them first, or \
-                  narrow it to assert the role is droppable once its grants \
-                  are gone. Rolling U1 back past a database that still grants \
-                  to the role is not a scenario that has to work; discovering \
-                  it at rollback time is.
-
-             Roles are cluster-global and grants are database-local, so one \
-             privilege granted in any database on this cluster is what breaks \
-             the drop in every other one.
+             It is not supposed to grant anything. Its scoping functions are \
+             left with the EXECUTE that Postgres gives PUBLIC precisely so \
+             that no `pg_shdepend` row is written for them.
              """
+    end
+  end
+
+  describe "the employer-zone grants" do
+    # The other half of the boundary, and the half that had no tests before U4
+    # because the employer zone had no tables. The person-zone assertions are
+    # about an absence; these are about an inventory, and an inventory is worth
+    # pinning exactly: these grants are what makes `DROP ROLE employer_role`
+    # fail across the cluster, so a privilege nobody exercises is a cost
+    # nobody chose.
+
+    test "are exactly the privileges the employer zone's code exercises" do
+      # In the order the sweep walks the zone, which is the order the
+      # classification lists it in.
+      assert employer_zone_privileges() == [
+               {"venues", "SELECT"},
+               {"venues", "INSERT"},
+               {"employer_grants", "SELECT"},
+               {"employer_grants", "INSERT"},
+               {"employer_grants", "UPDATE"},
+               {"shift_types", "SELECT"},
+               {"shift_types", "INSERT"}
+             ]
+    end
+
+    test "include no DELETE, and deletion is a different context's business" do
+      # Named separately from the inventory above because it is a rule rather
+      # than a list: deletion is confined to the lifecycle context (KTD21),
+      # which runs as the application's own role. A DELETE here would make an
+      # employer session able to destroy rows the retention design commits to
+      # keeping.
+      privileges = Enum.map(employer_zone_privileges(), fn {_table, privilege} -> privilege end)
+
+      refute "DELETE" in privileges
+      refute "TRUNCATE" in privileges
+      refute "MAINTAIN" in privileges
+    end
+
+    test "give UPDATE on two columns of employer_grants rather than on the table" do
+      # Revocation writes `revoked_at` and `updated_at`. A table-level UPDATE
+      # would also let a session move a grant to another venue, which is a
+      # cross-tenant write wearing an administrative hat — so the grant is
+      # column-scoped, and this is what says so rather than the migration's
+      # own comment.
+      refute table_privilege?("employer_grants", "UPDATE")
+
+      assert updatable_columns("employer_grants") == ["revoked_at", "updated_at"]
+    end
+
+    test "are the only thing the employer role depends on in this database" do
+      # The number `HospitalityComs.PostgresRolesTest` has to roll back before
+      # it can drop the role, expressed as the objects rather than as a count:
+      # a count of five is satisfied by five grants on `people`.
+      assert dependent_objects() == Enum.sort(Zones.employer_zone_tables())
+    end
+
+    test "are what the check above would notice growing" do
+      # The control. Without it the assertion passes on a query that cannot see
+      # a dependency at all, which is the same green tick as a boundary that
+      # holds.
+      Repo.query!("GRANT SELECT ON people TO employer_role")
+
+      assert "people" in dependent_objects()
+    end
+
+    test "are removed by the migration's own down, leaving the role clean" do
+      # Which is what makes U1's rollback reachable again, and the only test
+      # that proves the REVOKE statements execute and reach the objects they
+      # name.
+      migrate_employer_zone(:down)
+
+      assert employer_zone_privileges() == []
+      assert dependent_objects() == []
+    end
+
+    test "are restored by rolling the migration back and forward" do
+      before = employer_zone_privileges()
+
+      migrate_employer_zone(:down)
+      rolled_back = employer_zone_privileges()
+      capture_log(fn -> migrate_employer_zone(:up) end)
+
+      assert employer_zone_privileges() == before
+      refute rolled_back == before
+    end
+
+    test "grant on the tables the classification calls the employer zone" do
+      assert Enum.sort(GrantEmployerZone.granted_tables()) ==
+               Enum.sort(Zones.employer_zone_tables())
+    end
+
+    test "do not arrive through ALTER DEFAULT PRIVILEGES, which nothing sweeps" do
+      # The hole U3 measured and left for this unit. A default-privilege grant
+      # survives `REVOKE ALL ON TABLE` and is inherited by every table created
+      # afterwards, so one of these would hand `employer_role` every
+      # person-zone table U10 adds — silently, and looking retroactive. The
+      # column-aware sweep catches the *effect* on tables it knows about; this
+      # catches the mechanism, including for tables nobody has written yet.
+      assert default_privilege_grantees() == []
+    end
+
+    test "are what the check above would notice, since nothing else sweeps it" do
+      # The control, rolled back with the sandbox transaction like every other
+      # DDL in this file.
+      Repo.query!(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO employer_role"
+      )
+
+      assert Zones.employer_role() in default_privilege_grantees()
     end
   end
 
@@ -317,14 +419,56 @@ defmodule HospitalityComs.BoundaryTest do
     test "is the only crossing: no employer-zone table holds a foreign key to people" do
       offenders = MapSet.intersection(tables_referencing_people(), employer_zone_tables())
 
-      assert MapSet.to_list(offenders) == []
+      assert MapSet.to_list(offenders) == [],
+             """
+             These employer-zone tables hold a foreign key to `people`: \
+             #{inspect(MapSet.to_list(offenders))}
+
+             KTD2 permits exactly one crossing, `engagements.person_id`, and \
+             the employer zone is on the far side of it. An employer-zone row \
+             that names a person is a second crossing, and it puts a worker's \
+             identity in rows the employer role can read in bulk. Reference \
+             `engagements (id, venue_id)` instead, or record the association \
+             from the bridge's side.
+             """
     end
 
     test "is looked for with a query that finds the foreign keys that exist" do
-      # The rule above is vacuously true while the employer zone is empty. This
-      # is what makes it a tripwire for U4 onward rather than a no-op: the
-      # query does resolve real referencing tables.
+      # The rule above was vacuously true while the employer zone was empty.
+      # This is what makes it a tripwire rather than a no-op: the query does
+      # resolve real referencing tables.
       assert "people_tokens" in tables_referencing_people()
+    end
+
+    test "is checked against an employer zone that is not empty" do
+      # The other half of the same vacuity. An intersection with the empty set
+      # is empty whatever the query returns, so the rule above says nothing at
+      # all until there are employer-zone tables to say it about.
+      refute Enum.empty?(Zones.employer_zone_tables())
+    end
+
+    test "leaves every employer-zone table carrying a venue key" do
+      # The positive form of the rule. "No person key" is satisfied by a table
+      # with no keys at all; what KTD2 asks for is that every employer-zone row
+      # is reachable *only* by way of a venue. `venues` is exempt because its
+      # own id is that key.
+      assert without_venue_key() == []
+    end
+
+    test "gives every referenceable employer-zone table a unique (id, venue_id)" do
+      # The composite-key discipline, asserted rather than remembered. It looks
+      # redundant next to a primary key on `id` and it is what makes a
+      # composite foreign key possible: without it, a later table can only say
+      # `REFERENCES employer_grants (id)`, and a row at venue A can point at a
+      # grant belonging to venue B.
+      assert without_composite_key() == []
+    end
+
+    test "finds those indexes by a query that resolves the ones that exist" do
+      # The control for both structural checks: a query that matched nothing
+      # would report every table as compliant.
+      assert "employer_grants" in tables_with_composite_key()
+      assert "shift_types" in tables_with_composite_key()
     end
   end
 
@@ -925,21 +1069,35 @@ defmodule HospitalityComs.BoundaryTest do
   @migrator_opts [log: false, migration_lock: false]
 
   defp migrate(direction) do
-    apply(Ecto.Migrator, direction, [Repo, migration_version(), GrantZones, @migrator_opts])
+    apply(Ecto.Migrator, direction, [
+      Repo,
+      migration_version(@migration_name),
+      GrantZones,
+      @migrator_opts
+    ])
   end
 
-  defp migration_version do
+  defp migrate_employer_zone(direction) do
+    apply(Ecto.Migrator, direction, [
+      Repo,
+      migration_version(@employer_zone_migration),
+      GrantEmployerZone,
+      @migrator_opts
+    ])
+  end
+
+  defp migration_version(migration) do
     Repo
     |> Ecto.Migrator.migrations()
-    |> Enum.find_value(fn {_status, version, name} -> name == @migration_name && version end)
+    |> Enum.find_value(fn {_status, version, name} -> name == migration && version end)
   end
 
-  defp load_migration(true), do: :ok
+  defp load_migration(_migration, true), do: :ok
 
-  defp load_migration(false) do
+  defp load_migration(migration, false) do
     Repo
     |> Ecto.Migrator.migrations_path()
-    |> Path.join("*_#{@migration_name}.exs")
+    |> Path.join("*_#{migration}.exs")
     |> Path.wildcard()
     |> Enum.each(&Code.require_file/1)
   end
@@ -971,22 +1129,138 @@ defmodule HospitalityComs.BoundaryTest do
     held
   end
 
-  # Entries in the cluster-wide dependency catalogue that point at the role.
-  # Every one of them is a database somewhere that has to be cleaned up before
-  # the role can be dropped.
-  defp shared_dependencies(role) do
-    %{rows: [[count]]} =
+  # Objects in this database that the employer role has a shared dependency
+  # on. Every one is something that has to be revoked before `DROP ROLE` can
+  # succeed — anywhere in the cluster, since the catalogue is cluster-wide.
+  #
+  # Scoped to `current_database()` and reported as names rather than as a
+  # count, both deliberately. Names because a count of five is satisfied by
+  # five grants on `people`; scoped because `objid` only resolves against
+  # `pg_class` in the database that owns it, so a row belonging to another
+  # database would come back as a number or as somebody else's table.
+  # `HospitalityComs.PostgresRolesTest` is where the rest of the cluster is
+  # accounted for.
+  defp dependent_objects do
+    %{rows: rows} =
       Repo.query!(
         """
-        SELECT count(*)
+        SELECT DISTINCT d.objid::regclass::text
         FROM pg_shdepend d
         JOIN pg_authid a ON a.oid = d.refobjid
         WHERE a.rolname = $1
+          AND d.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND d.classid = 'pg_class'::regclass
+        ORDER BY 1
         """,
-        [role]
+        [Zones.employer_role()]
       )
 
-    count
+    Enum.map(rows, &hd/1)
+  end
+
+  # The same sweep the person zone is audited with, pointed at the employer
+  # zone. There it asserts an absence; here it asserts an inventory.
+  defp employer_zone_privileges do
+    Zones.privileges(Repo, Zones.employer_zone_tables())
+  end
+
+  defp table_privilege?(table, privilege) do
+    %{rows: [[held]]} =
+      Repo.query!("SELECT has_table_privilege($1, $2, $3)", [
+        Zones.employer_role(),
+        table,
+        privilege
+      ])
+
+    held
+  end
+
+  defp updatable_columns(table) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT a.attname
+        FROM pg_attribute a
+        WHERE a.attrelid = to_regclass($1)
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND has_column_privilege($2, a.attrelid, a.attnum, 'UPDATE')
+        ORDER BY a.attname
+        """,
+        [table, Zones.employer_role()]
+      )
+
+    Enum.map(rows, &hd/1)
+  end
+
+  # Roles named in any `ALTER DEFAULT PRIVILEGES` entry. The mechanism `REVOKE
+  # ALL ON TABLE` does not reach and the table sweep cannot see, because it
+  # applies to tables that do not exist yet.
+  defp default_privilege_grantees do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT DISTINCT grantee.rolname
+        FROM pg_default_acl acl
+        CROSS JOIN LATERAL aclexplode(acl.defaclacl) AS entry
+        JOIN pg_authid grantee ON grantee.oid = entry.grantee
+        ORDER BY 1
+        """,
+        []
+      )
+
+    Enum.map(rows, &hd/1)
+  end
+
+  # Employer-zone tables with no `venue_id` column. `venues` is exempt: its own
+  # id is the venue key.
+  defp without_venue_key do
+    Enum.reject(Zones.employer_zone_tables(), fn table ->
+      table == "venues" or "venue_id" in columns(table)
+    end)
+  end
+
+  defp without_composite_key do
+    with_key = tables_with_composite_key()
+    Enum.reject(Zones.employer_zone_tables(), &(&1 == "venues" or &1 in with_key))
+  end
+
+  defp columns(table) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT a.attname
+        FROM pg_attribute a
+        WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped
+        """,
+        [table]
+      )
+
+    Enum.map(rows, &hd/1)
+  end
+
+  # Tables carrying a unique index on exactly `(id, venue_id)`, which is what a
+  # composite foreign key from a later table has to reference.
+  defp tables_with_composite_key do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT DISTINCT c.relname
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND i.indisunique
+          AND (
+            SELECT array_agg(a.attname::text ORDER BY a.attname)
+            FROM unnest(i.indkey) AS k(attnum)
+            JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+          ) = ARRAY['id', 'venue_id']
+        """,
+        []
+      )
+
+    Enum.map(rows, &hd/1)
   end
 
   # Ecto's own bookkeeping. It is not application data and belongs to no zone;
