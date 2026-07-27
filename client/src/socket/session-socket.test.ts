@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createSessionSocket } from "./session-socket";
-import type { ChannelLike, PushLike, SocketLike } from "./session-socket";
+import type { ChannelLike, PushLike, SocketLike, SocketOptions } from "./session-socket";
 
 /**
  * A `Push` whose `receive` hooks can be fired by hand, which is what the real
@@ -67,12 +67,12 @@ class FakeChannel implements ChannelLike {
 
 class FakeSocket implements SocketLike {
   endpoint: string;
-  options: { params?: object };
+  options: SocketOptions;
   connects = 0;
   disconnects = 0;
   channels: FakeChannel[] = [];
 
-  constructor(endpoint: string, options: { params?: object }) {
+  constructor(endpoint: string, options: SocketOptions) {
     this.endpoint = endpoint;
     this.options = options;
   }
@@ -95,7 +95,7 @@ class FakeSocket implements SocketLike {
 }
 
 function build(token = "c2Vzc2lvbg") {
-  const socket = new FakeSocket("", {});
+  const socket = new FakeSocket("", { authToken: "" });
 
   const sessionSocket = createSessionSocket({
     endpoint: "/socket",
@@ -114,12 +114,30 @@ function build(token = "c2Vzc2lvbg") {
 }
 
 describe("connecting", () => {
-  it("carries the session token in the socket params rather than the URL", () => {
+  it("hands the token to phoenix as `authToken`, which travels as a header", () => {
     const { socket } = build("c2Vzc2lvbi10b2tlbg");
 
     expect(socket.endpoint).toBe("/socket");
-    expect(socket.options.params).toEqual({ token: "c2Vzc2lvbi10b2tlbg" });
+    expect(socket.options.authToken).toBe("c2Vzc2lvbi10b2tlbg");
     expect(socket.connects).toBe(1);
+  });
+
+  it("puts the token nowhere `endPointURL` would append to the query string", () => {
+    // The real invariant, and the one the first version of this file got
+    // wrong. `Socket.endPointURL()` is
+    // `appendParams(appendParams(endPoint, params()), {vsn})`, so anything in
+    // `params` — and anything in the endpoint itself — ends up in the URL, and
+    // a URL ends up in access and proxy logs. `authToken` is the only option
+    // that does not: it becomes a `Sec-WebSocket-Protocol` value on the
+    // websocket transport and an `X-Phoenix-AuthToken` header on the longpoll
+    // fallback.
+    const token = "c2Vzc2lvbi10b2tlbg";
+    const { socket } = build(token);
+    const { authToken, ...everythingElse } = socket.options;
+
+    expect(authToken).toBe(token);
+    expect(JSON.stringify(everythingElse)).not.toContain(token);
+    expect(socket.endpoint).not.toContain(token);
   });
 
   it("connects once however many times connect is called", () => {
@@ -139,21 +157,10 @@ describe("connecting", () => {
     expect(socket.disconnects).toBe(1);
   });
 
-  it("lets the caller name the token parameter, because U7 owns the socket's contract", () => {
-    let seen: { params?: object } | null = null;
+  it("sends no socket params at all, so there is no key for U7 to name", () => {
+    const { socket } = build();
 
-    createSessionSocket({
-      endpoint: "/socket",
-      token: "c2Vzc2lvbg",
-      tokenParam: "api_token",
-      createSocket: (_endpoint, options) => {
-        seen = options;
-
-        return new FakeSocket("/socket", options);
-      },
-    }).connect();
-
-    expect(seen).toEqual({ params: { api_token: "c2Vzc2lvbg" } });
+    expect(socket.options).toEqual({ authToken: "c2Vzc2lvbg" });
   });
 });
 
@@ -187,6 +194,20 @@ describe("joining a topic", () => {
 
     expect(onJoined).toHaveBeenCalledWith({ state: "open" });
     expect(socket.channels[0]?.leaves).toBe(0);
+  });
+
+  it("does not report a join that arrives after the caller left", () => {
+    // A component that unmounts between the join push and its reply has
+    // already torn its state down; calling back into it is how a leave becomes
+    // a subscription that is still delivering.
+    const { sessionSocket, socket } = build();
+    const onJoined = vi.fn();
+
+    const subscription = sessionSocket.join("some:topic", { onJoined });
+    subscription.leave();
+    socket.channels[0]?.joinPush.trigger("ok", { state: "open" });
+
+    expect(onJoined).not.toHaveBeenCalled();
   });
 });
 

@@ -28,12 +28,37 @@
  * the caller exactly once. A *timeout* is not a refusal — nobody decided
  * anything — so it is reported and left to Phoenix's own retry.
  *
- * ## Two things U7 owns
+ * ## Why the token is `authToken` and never a param
  *
- * The endpoint path and the name of the token parameter are both configuration
- * with a conventional default, because `HospitalityComsWeb.Endpoint` mounts no
- * socket yet and `connect/3` has not been written. Nothing here is wired into
- * the running app for the same reason: there is no topic to join.
+ * `Socket.endPointURL()` is
+ * `appendParams(appendParams(this.endPoint, this.params()), {vsn})`, so
+ * **socket params are the URL's query string**. Putting a session token there
+ * writes a live, fourteen-day bearer credential into every access log, proxy
+ * log and referrer that sees the connection — the exact disclosure the token
+ * being a database row rather than a signed claim is supposed to make
+ * revocable, not routine.
+ *
+ * `authToken` is the option that does not do that. On the websocket transport
+ * `transportConnect()` sends it as a `Sec-WebSocket-Protocol` value
+ * (`base64url.bearer.phx.<base64>`), and on the longpoll fallback as an
+ * `X-Phoenix-AuthToken` header. Phoenix surfaces it server-side as
+ * `connect_info[:auth_token]`. So there is no params key left for anyone to
+ * name, and this module sends no params at all.
+ *
+ * ## What U7 owns
+ *
+ * The endpoint path is configuration with a conventional default, because
+ * `HospitalityComsWeb.Endpoint` mounts no socket yet. Nothing here is wired
+ * into the running app for the same reason: there is no topic to join.
+ *
+ * **The token is captured when the socket is built, not when it connects.**
+ * `phoenix` wraps `authToken` in a closure at construction, so a socket built
+ * for one session carries that session's token for its whole life — including
+ * across reconnects. A re-login therefore needs a *new* socket, not a
+ * reconnect of this one. If U7 wants a socket that survives a token change,
+ * `authToken` also accepts a function, which `phoenix` calls on every connect;
+ * widening `token` to `string | (() => string)` is the change, and it is left
+ * for whoever has a reason to make it.
  */
 
 import { Socket } from "phoenix";
@@ -58,10 +83,17 @@ export type SocketLike = {
   channel(topic: string, params?: object): ChannelLike;
 };
 
-export type SocketFactory = (
-  endpoint: string,
-  options: { params?: object },
-) => SocketLike;
+/**
+ * Everything this module hands `phoenix`.
+ *
+ * One key, deliberately. `params` is absent from the type rather than merely
+ * unused, so that adding it back is a decision somebody has to type out.
+ */
+export type SocketOptions = {
+  readonly authToken: string;
+};
+
+export type SocketFactory = (endpoint: string, options: SocketOptions) => SocketLike;
 
 export type SessionSocketConfig = {
   /**
@@ -71,17 +103,12 @@ export type SessionSocketConfig = {
    */
   readonly endpoint: string;
 
-  /** The bearer token from `POST /api/log-in/token`, verbatim. */
-  readonly token: string;
-
   /**
-   * The params key the token travels under.
+   * The bearer token from `POST /api/log-in/token`, verbatim.
    *
-   * `token` is the near-universal Phoenix convention and is what this defaults
-   * to, but the key that matters is whatever `UserSocket.connect/3` pattern
-   * matches on and that function does not exist yet. One line to change.
+   * Captured when the socket is built. See the note on re-login above.
    */
-  readonly tokenParam?: string;
+  readonly token: string;
 
   /** Injected by the tests. Production passes nothing and gets `phoenix`. */
   readonly createSocket?: SocketFactory;
@@ -130,10 +157,7 @@ const defaultSocketFactory: SocketFactory = (endpoint, options) =>
 
 export function createSessionSocket(config: SessionSocketConfig): SessionSocket {
   const createSocket = config.createSocket ?? defaultSocketFactory;
-  const tokenParam = config.tokenParam ?? "token";
-  const socket = createSocket(config.endpoint, {
-    params: { [tokenParam]: config.token },
-  });
+  const socket = createSocket(config.endpoint, { authToken: config.token });
 
   let connected = false;
   const subscriptions = new Set<TopicSubscription>();
@@ -168,6 +192,10 @@ export function createSessionSocket(config: SessionSocketConfig): SessionSocket 
     channel
       .join()
       .receive("ok", (payload) => {
+        // A caller that has already left has torn down whatever it would have
+        // done with this; the reply is just in flight behind the leave.
+        if (left) return;
+
         options.onJoined?.(payload);
       })
       .receive("error", (payload) => {

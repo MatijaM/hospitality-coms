@@ -173,10 +173,25 @@ refusal, so Phoenix's own retry is left alone.
 `phoenix` is pinned at `^1.8.9`: earlier versions carry a Presence client crash
 on keys colliding with `Object.prototype` members.
 
+**The token goes in `authToken`, never in socket params.** An earlier version of
+this file said the token travelled "in the socket params rather than the URL",
+which is a false dichotomy: `Socket.endPointURL()` is
+`appendParams(appendParams(endPoint, params()), {vsn})`, so **params _are_ the
+query string**, and that version wrote a live fourteen-day bearer credential
+into every access and proxy log that saw the connection. `authToken` is the
+option that does not: a `Sec-WebSocket-Protocol` value on the websocket
+transport, an `X-Phoenix-AuthToken` header on the longpoll fallback, and
+`connect_info[:auth_token]` server-side. This module now sends no params at all.
+
+**The token is captured when the socket is built, not when it connects.**
+`phoenix` closes over `authToken` at construction, so a re-login needs a new
+socket rather than a reconnect. `authToken` also accepts a function, which
+`phoenix` calls on every connect; widening `token` to `string | (() => string)`
+is the change if U7 wants a socket that outlives a token.
+
 **Nothing connects the socket.** There is no topic to join, so wiring it into
-the app would be a guess. Two values are configuration with a conventional
-default for U7 to set: the endpoint path (`/socket`) and the name of the params
-key the token travels under (`token`).
+the app would be a guess. One value is configuration with a conventional default
+for U7 to set: the endpoint path (`/socket`).
 
 ### Where the token lives
 
@@ -212,9 +227,11 @@ Recorded so the next unit knows they are open questions and not settled:
 - **The socket mount path.** `/socket` is the Phoenix default and is what the
   Vite proxy assumes. `HospitalityComsWeb.Endpoint` currently declares no socket
   at all; U7 adds `PersonSocket` and `EmployerSocket` (KTD9).
-- **The socket's token parameter.** `token` is the convention; the key that
-  matters is whatever `connect/3` pattern matches on, and it has not been
-  written. Configurable in one place.
+- **How `connect/3` reads the token.** Not a guess any more, and not
+  configurable: it arrives as `connect_info[:auth_token]`, which needs
+  `socket "/socket", PersonSocket, websocket: [connect_info: [:auth_token]]` on
+  the endpoint side. The alternative — a socket param — is the query string, so
+  it is not an option this client offers.
 - **The magic link's landing origin.** `config/config.exs` defaults
   `MAGIC_LINK_BASE_URL` to `http://localhost:4000/log-in/`, which is Phoenix and
   not this client. `/log-in/:linkToken` matches that path shape so the link works
