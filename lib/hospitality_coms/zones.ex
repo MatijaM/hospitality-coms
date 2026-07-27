@@ -60,6 +60,42 @@ defmodule HospitalityComs.Zones do
   `attested_entries` — the hidden-entry rule is per row and grants cannot
   express it, so the employer reads U9's owner-privileged view (KTD3).
 
+  ## U6 is the first unit to add a person-zone table
+
+  `shift_rooms`, `roster_entries` and `room_messages` are employer zone on the
+  ordinary test: each carries `venue_id`, none carries `person_id`. A roster
+  entry names an `engagement`, and so does a message's author (KTD15b), which is
+  KTD2's rule doing exactly what it was written for. `employer_role` holds
+  SELECT and INSERT on the first two, UPDATE on `roster_entries.left_at` alone —
+  removal closes a period and there is no other mutation — and, deliberately,
+  **nothing at all** on `room_messages`: room conversation is worker-facing, a
+  manager reads it through their own engagement from the person's side, and an
+  employer session that could read a venue's conversation in bulk has no reason
+  to exist.
+
+  `venue_room_suspensions` is the first table in the **person zone** that U2 did
+  not create, and its classification is the whole of KTD18. Origin R11 lets a
+  person leave the venue room reversibly and requires the employer not to see
+  that they have — employer visibility of the flag would make it a retaliation
+  surface rather than an opt-out. A column on `engagements` could not deliver
+  that, because `employer_role` holds table-level SELECT there and the only
+  thing hiding the flag would be somebody remembering to trim a `select`. In its
+  own person-zone table, three things hold at once and none is a convention: the
+  privilege sweep asserts the employer role holds nothing on it,
+  `HospitalityComs.EmployerRepo`'s query backstop refuses any employer query
+  that reaches it, and Postgres would refuse the same statement anyway.
+
+  It carries no `venue_id` — a person-zone table with an employer key is the
+  thing the partition forbids — and no `person_id` either. It names the
+  *engagement*, which is the one row that already means "this person, at this
+  venue", and pointing at it from the person's side is what the bridge is for.
+
+  A person-zone table is not free of obligations. U3's `grant_zones` migration
+  wrote its revoked list out by hand, deliberately, and U6's `grant_room_zone`
+  writes out its own; `HospitalityComs.BoundaryTest` asserts the union of the
+  two equals `person_zone_tables/0`, so the day a person-zone table is added
+  without a migration covering it is the day somebody is told.
+
   Table names are derived from `__schema__(:source)` rather than written out
   a second time. The privilege sweep, the query backstop in
   `HospitalityComs.EmployerRepo`, and the classification therefore cannot
@@ -96,6 +132,10 @@ defmodule HospitalityComs.Zones do
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Engagements.Invitation
   alias HospitalityComs.Profiles.AttestedEntry
+  alias HospitalityComs.Rooms.RoomMessage
+  alias HospitalityComs.Rooms.ShiftRoom
+  alias HospitalityComs.Rooms.VenueRoomSuspension
+  alias HospitalityComs.Rosters.RosterEntry
   alias HospitalityComs.Venues.EmployerGrant
   alias HospitalityComs.Venues.ShiftType
   alias HospitalityComs.Venues.Venue
@@ -106,8 +146,17 @@ defmodule HospitalityComs.Zones do
   @typedoc "A privilege `employer_role` holds on a table it must not hold one on."
   @type offence() :: {table :: String.t(), privilege :: String.t()}
 
-  @person_zone [Person, PersonToken]
-  @employer_zone [Venue, EmployerGrant, ShiftType, Invitation, AttestedEntry]
+  @person_zone [Person, PersonToken, VenueRoomSuspension]
+  @employer_zone [
+    Venue,
+    EmployerGrant,
+    ShiftType,
+    Invitation,
+    AttestedEntry,
+    ShiftRoom,
+    RosterEntry,
+    RoomMessage
+  ]
   @shared [Engagement]
 
   @employer_role "employer_role"

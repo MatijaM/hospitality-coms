@@ -44,8 +44,13 @@ defmodule HospitalityComs.EngagementsFixtures do
   alias HospitalityComs.Engagements.Invitation
   alias HospitalityComs.Profiles.AttestedEntry
   alias HospitalityComs.Repo
+  alias HospitalityComs.Rooms.RoomMessage
+  alias HospitalityComs.Rooms.ShiftRoom
+  alias HospitalityComs.Rooms.VenueRoomSuspension
+  alias HospitalityComs.Rosters.RosterEntry
   alias HospitalityComs.Venues
   alias HospitalityComs.Venues.EmployerGrant
+  alias HospitalityComs.Venues.ShiftType
   alias HospitalityComs.Venues.Venue
 
   @venue_prefix "u5-venue"
@@ -127,9 +132,27 @@ defmodule HospitalityComs.EngagementsFixtures do
 
     Repo.query!("DELETE FROM oban_jobs WHERE args->>'venue_id' = ANY($1::text[])", [venue_ids])
 
+    # U6's tables, in foreign-key order and ahead of the bridge, because every
+    # one of them references `engagements` with `ON DELETE RESTRICT`. The
+    # suspension is keyed on the engagement alone — it is a person-zone table
+    # and carries no venue — so it is reached through the bridge rather than by
+    # `venue_id`.
+    Repo.delete_all(from message in RoomMessage, where: message.venue_id in ^venue_ids)
+    Repo.delete_all(from entry in RosterEntry, where: entry.venue_id in ^venue_ids)
+
+    Repo.delete_all(
+      from suspension in VenueRoomSuspension,
+        join: engagement in Engagement,
+        on: engagement.id == suspension.engagement_id,
+        where: engagement.venue_id in ^venue_ids
+    )
+
+    Repo.delete_all(from room in ShiftRoom, where: room.venue_id in ^venue_ids)
+
     Repo.delete_all(from entry in AttestedEntry, where: entry.venue_id in ^venue_ids)
     Repo.delete_all(from engagement in Engagement, where: engagement.venue_id in ^venue_ids)
     Repo.delete_all(from invitation in Invitation, where: invitation.venue_id in ^venue_ids)
+    Repo.delete_all(from shift_type in ShiftType, where: shift_type.venue_id in ^venue_ids)
 
     Repo.update_all(from(grant in EmployerGrant, where: grant.venue_id in ^venue_ids),
       set: [revoked_at: nil, revoked_by_grant_id: nil]

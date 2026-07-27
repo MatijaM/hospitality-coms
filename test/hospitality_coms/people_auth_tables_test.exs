@@ -24,6 +24,12 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
   would: the engagement zone's row-level security, its grants, then the tables.
   Rolling `create_people_auth_tables` back *without* that is an out-of-order
   rollback, and the loud failure it produces is the point of the `RESTRICT`.
+
+  U6 added three more dependents of the bridge — `roster_entries`,
+  `room_messages` and `venue_room_suspensions`, all `ON DELETE RESTRICT` — so
+  the chain grew again, at the far end. The list below is the record of what
+  stands between this migration and a droppable `people`, and every unit that
+  references the bridge adds to it.
   """
 
   use HospitalityComs.DataCase, async: false
@@ -32,8 +38,12 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
 
   alias HospitalityComs.Repo.Migrations.CreateEngagements
   alias HospitalityComs.Repo.Migrations.CreatePeopleAuthTables
+  alias HospitalityComs.Repo.Migrations.CreateRooms
+  alias HospitalityComs.Repo.Migrations.CreateRosterEntries
   alias HospitalityComs.Repo.Migrations.EnableEngagementRowLevelSecurity
+  alias HospitalityComs.Repo.Migrations.EnableRoomRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
+  alias HospitalityComs.Repo.Migrations.GrantRoomZone
 
   @migration_name "create_people_auth_tables"
 
@@ -42,7 +52,11 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
   @dependents [
     {"create_engagements", CreateEngagements},
     {"grant_engagement_zone", GrantEngagementZone},
-    {"enable_engagement_row_level_security", EnableEngagementRowLevelSecurity}
+    {"enable_engagement_row_level_security", EnableEngagementRowLevelSecurity},
+    {"create_rooms", CreateRooms},
+    {"create_roster_entries", CreateRosterEntries},
+    {"grant_room_zone", GrantRoomZone},
+    {"enable_room_row_level_security", EnableRoomRowLevelSecurity}
   ]
 
   # Migration files are not compiled into the application, so the modules have
