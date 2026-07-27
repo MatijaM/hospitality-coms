@@ -51,6 +51,11 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Repo.Migrations.GrantZones
   alias HospitalityComs.Zones
 
+  # Association shapes that do not exist in the application yet, declared at the
+  # bottom of this file. See the comment there for why they are not in
+  # `test/support`.
+  alias __MODULE__.Venue
+
   @migration_name "grant_zones"
 
   @now ~U[2026-03-01 12:00:00.000000Z]
@@ -435,6 +440,74 @@ defmodule HospitalityComs.BoundaryTest do
       end
     end
 
+    test "refuses one reached through a subquery in a where" do
+      # Ecto does not put an expression subquery in the binding list. It parks
+      # it on a `:subqueries` field of the `where` clause, which a walker
+      # reading bindings alone never opens — measured: of eight shapes, only
+      # from-position, CTE, union and association joins were refused.
+      query =
+        from(c in "pg_class",
+          where: c.relname in subquery(from(p in Person, select: p.email)),
+          select: c.relname
+        )
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        employer_query(query)
+      end
+    end
+
+    test "refuses one reached through a subquery in a select" do
+      query =
+        from(c in "pg_class", select: %{n: subquery(from(p in Person, select: count(p.id)))})
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        employer_query(query)
+      end
+    end
+
+    test "refuses one reached through a subquery in a having" do
+      query =
+        from(c in "pg_class",
+          group_by: c.relname,
+          having: count(c.oid) > subquery(from(p in Person, select: count(p.id))),
+          select: c.relname
+        )
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        employer_query(query)
+      end
+    end
+
+    test "refuses one reached through a subquery in an order_by or a group_by" do
+      ordered =
+        from(c in "pg_class",
+          order_by: [asc: subquery(from(p in Person, select: count(p.id)))],
+          select: c.relname
+        )
+
+      grouped =
+        from(c in "pg_class",
+          group_by: subquery(from(p in Person, select: count(p.id))),
+          select: c.relname
+        )
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn -> employer_query(ordered) end
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn -> employer_query(grouped) end
+    end
+
+    test "does not refuse an expression subquery that reaches nothing forbidden" do
+      # The control for the four above. A walker that refused every query
+      # carrying a `:subqueries` field would pass all of them.
+      query =
+        from(c in "pg_class",
+          where: c.oid in subquery(from(n in "pg_namespace", select: n.oid)),
+          select: c.relname,
+          limit: 1
+        )
+
+      assert {:ok, _rows} = employer_query(query)
+    end
+
     test "refuses one reached through a common table expression" do
       query =
         "pg_class"
@@ -487,6 +560,54 @@ defmodule HospitalityComs.BoundaryTest do
              updated_at: stamped_at
            })}
         end)
+      end
+    end
+
+    test "refuses one reached through a has_many :through" do
+      # `Ecto.Association.HasThrough` carries no `:related` key at all, only a
+      # chain of association names, so reading `.related` off it raised
+      # `KeyError` from inside the backstop — closed, but saying nothing, and
+      # closed for a legitimate join as much as for this one. The chain is
+      # walked now, and every table it passes through is checked.
+      query = from(v in Venue, join: p in assoc(v, :people), select: p.id)
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        employer_query(query)
+      end
+    end
+
+    test "does not refuse a has_many :through that stays inside the employer zone" do
+      # The control, and the regression the clause above would otherwise be:
+      # before it, *every* `:through` join raised, whatever it reached.
+      query = from(v in Venue, join: s in assoc(v, :shifts_through), select: s.id)
+
+      assert {_query, _opts} = EmployerRepo.prepare_query(:all, query, [])
+    end
+
+    test "refuses one whose many_to_many join table is in the person zone" do
+      # The related schema is innocent here. `join_through` is the table the
+      # query actually reaches, and the backstop never looked at it.
+      query = from(v in Venue, join: s in assoc(v, :smuggled_shifts), select: s.id)
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people_tokens/, fn ->
+        employer_query(query)
+      end
+    end
+
+    test "does not refuse a many_to_many whose join table is not" do
+      query = from(v in Venue, join: s in assoc(v, :shifts), select: s.id)
+
+      assert {_query, _opts} = EmployerRepo.prepare_query(:all, query, [])
+    end
+
+    test "refuses an association join it cannot resolve rather than crashing on it" do
+      # An unresolvable association is an association that cannot be placed in
+      # a zone. The refusal names the field instead of raising `KeyError` from
+      # somewhere in the walker.
+      query = from(v in Venue, join: x in assoc(v, :nonexistent), select: x.id)
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/is not an association/, fn ->
+        employer_query(query)
       end
     end
 
@@ -630,4 +751,70 @@ defmodule HospitalityComs.BoundaryTest do
   end
 
   defp employer_zone_tables, do: MapSet.new(Zones.employer_zone_tables())
+
+  ## The association shapes the backstop has to resolve
+
+  # Ecto reflects `has_many :through` and `many_to_many` differently from
+  # everything else, and neither shape exists in the application yet — U4's
+  # roster and U5's bridge are where they arrive. They are declared here rather
+  # than in `test/support` because `test/support` is compiled into the
+  # application, which would put these in `Zones.all_schemas/0` and fail the
+  # totality test with tables nobody ever migrated.
+  #
+  # None of these tables exists. Nothing here is queried; every assertion stops
+  # inside `prepare_query/3`, which runs before Postgres is asked anything.
+
+  defmodule Shift do
+    @moduledoc false
+    use Ecto.Schema
+
+    @primary_key {:id, :binary_id, autogenerate: true}
+    schema "shifts" do
+    end
+  end
+
+  defmodule VenueShift do
+    @moduledoc false
+    use Ecto.Schema
+
+    @primary_key false
+    schema "venue_shifts" do
+      field(:venue_id, :binary_id)
+      field(:shift_id, :binary_id)
+    end
+  end
+
+  defmodule Engagement do
+    @moduledoc false
+    use Ecto.Schema
+
+    @primary_key {:id, :binary_id, autogenerate: true}
+    schema "engagements" do
+      belongs_to(:venue, Venue, type: :binary_id)
+      belongs_to(:person, Person, type: :binary_id)
+      many_to_many(:shifts, Shift, join_through: VenueShift)
+    end
+  end
+
+  defmodule Venue do
+    @moduledoc false
+    use Ecto.Schema
+
+    @primary_key {:id, :binary_id, autogenerate: true}
+    schema "venues" do
+      has_many(:engagements, Engagement)
+
+      # Reaches `people` through the bridge, which is the crossing the zone
+      # rule exists to refuse.
+      has_many(:people, through: [:engagements, :person])
+
+      # Reaches nothing forbidden, and used to raise anyway.
+      has_many(:shifts_through, through: [:engagements, :shifts])
+
+      many_to_many(:shifts, Shift, join_through: VenueShift)
+
+      # Innocent related schema, person-zone join table.
+      many_to_many(:smuggled_shifts, Shift, join_through: "people_tokens")
+    end
+  end
 end

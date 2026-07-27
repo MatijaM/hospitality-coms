@@ -351,7 +351,8 @@ defmodule HospitalityComs.EmployerRepo do
   defp sources(%Ecto.Query{} = query) do
     bindings = resolve_bindings([query.from | query.joins])
 
-    Enum.flat_map(bindings, &expand/1) ++
+    Enum.flat_map(bindings, &expand_binding/1) ++
+      Enum.flat_map(expression_subqueries(query), &expand/1) ++
       Enum.flat_map(nested_queries(query), &sources/1)
   end
 
@@ -361,24 +362,103 @@ defmodule HospitalityComs.EmployerRepo do
   # shape is named here rather than at each call.
   @typep binding_expr() :: struct()
 
-  @spec resolve_bindings([binding_expr()]) :: [term()]
+  # What one binding resolves to: the source a later `assoc` is resolved
+  # against, and any source the join reaches without binding — the join table
+  # of a `many_to_many`, the intermediate tables of a `:through`.
+  @typep resolved_binding() :: {term(), [term()]}
+
+  @spec resolve_bindings([binding_expr()]) :: [resolved_binding()]
   defp resolve_bindings(exprs) do
     Enum.reduce(exprs, [], fn expr, resolved -> resolved ++ [binding(expr, resolved)] end)
   end
 
-  @spec binding(binding_expr(), [term()]) :: term()
+  @spec binding(binding_expr(), [resolved_binding()]) :: resolved_binding()
   defp binding(%{source: nil, assoc: {index, field}}, resolved) do
     resolved |> Enum.at(index) |> association_source(field)
   end
 
-  defp binding(%{source: source}, _resolved), do: source
+  defp binding(%{source: source}, _resolved), do: {source, []}
 
-  @spec association_source(term(), atom()) :: {nil, module()} | nil
-  defp association_source({_table, schema}, field) when is_atom(schema) and not is_nil(schema) do
-    {nil, schema.__schema__(:association, field).related}
+  @spec association_source(resolved_binding() | nil, atom()) :: resolved_binding()
+  defp association_source({{_table, schema}, _reached}, field)
+       when is_atom(schema) and not is_nil(schema) do
+    schema |> apply(:__schema__, [:association, field]) |> related(schema, field)
   end
 
-  defp association_source(_parent, _field), do: nil
+  defp association_source(_parent, _field), do: {nil, []}
+
+  # An association reflection is not one shape. `has_one`/`has_many`/`belongs_to`
+  # carry `:related` and nothing else; `many_to_many` carries `:related` and a
+  # `:join_through` the query reaches without binding; `has_one`/`has_many`
+  # `:through` carry neither, only a chain of association names — and reading
+  # `.related` off one of those is a `KeyError` raised from inside
+  # `prepare_query/3`, which fails closed and says nothing useful.
+  @spec related(term(), module(), atom()) :: resolved_binding()
+  defp related(
+         %Ecto.Association.ManyToMany{related: related, join_through: join},
+         _schema,
+         _field
+       ) do
+    {{nil, related}, [join_source(join)]}
+  end
+
+  defp related(%Ecto.Association.HasThrough{owner: owner, through: through}, _schema, _field) do
+    through
+    |> Enum.reduce([{{nil, owner}, []}], &step_through/2)
+    |> chain_binding()
+  end
+
+  defp related(%{related: related}, _schema, _field)
+       when is_atom(related) and not is_nil(related) do
+    {{nil, related}, []}
+  end
+
+  defp related(nil, schema, field) do
+    raise ZoneViolationError,
+      message: """
+      An employer-scoped query joined #{inspect(schema)}.#{field}, which is not \
+      an association.
+
+      The query cannot be checked against the zones because there is no table \
+      to name, so it is refused rather than sent. Ecto would refuse it too, one \
+      layer further in.
+      """
+  end
+
+  defp related(association, schema, field) do
+    raise ZoneViolationError,
+      message: """
+      An employer-scoped query joined #{inspect(schema)}.#{field}, whose \
+      reflection #{inspect(association.__struct__)} names no table this \
+      backstop knows how to resolve.
+
+      An association it cannot resolve is an association it cannot place in a \
+      zone, so it is refused rather than sent. Teach `related/3` the shape.
+      """
+  end
+
+  # `:through` is a chain of association names starting at the owner. Every
+  # link is a table the join reaches, so the whole chain is walked rather than
+  # only its last hop.
+  @spec step_through(atom(), [resolved_binding()]) :: [resolved_binding()]
+  defp step_through(field, [{source, _reached} | _rest] = chain) do
+    [association_source({source, []}, field) | chain]
+  end
+
+  # The head of the walked chain is what a later `assoc` resolves against;
+  # everything it passed through on the way is reached but not bound.
+  @spec chain_binding([resolved_binding()]) :: resolved_binding()
+  defp chain_binding([{source, reached} | passed]) do
+    {source, reached ++ Enum.flat_map(passed, fn {each, more} -> [each | more] end)}
+  end
+
+  # `:join_through` is a schema module or a bare table name.
+  @spec join_source(module() | String.t()) :: {String.t() | nil, module() | nil}
+  defp join_source(join) when is_binary(join), do: {join, nil}
+  defp join_source(join) when is_atom(join), do: {nil, join}
+
+  @spec expand_binding(resolved_binding()) :: [{String.t() | nil, module() | nil}]
+  defp expand_binding({source, reached}), do: Enum.flat_map([source | reached], &expand/1)
 
   # A binding is a `{table, schema}` pair, a subquery to walk into, or something
   # opaque — a fragment source, an unresolvable association — that only Postgres
@@ -390,6 +470,36 @@ defmodule HospitalityComs.EmployerRepo do
 
   defp expand(%Ecto.SubQuery{query: query}), do: sources(query)
   defp expand(_source), do: []
+
+  # A subquery written in `where`, `having`, `select`, `order_by`, `group_by`,
+  # `distinct` or a window is not in the binding list. Ecto parks it on a
+  # `:subqueries` field of the expression struct, and a walker reading bindings
+  # alone waves it through — measured: of eight shapes, only from-position,
+  # CTE, union and association joins were refused.
+  #
+  # The positions are the ones `Ecto.Query.Planner.plan/4` itself resolves
+  # subqueries in, taken from there so the two lists cannot drift apart in
+  # silence. `join ... on` is absent because Ecto refuses to build one.
+  @expression_lists [:wheres, :havings, :order_bys, :group_bys]
+  @expression_fields [:distinct, :select]
+
+  @spec expression_subqueries(Ecto.Query.t()) :: [term()]
+  defp expression_subqueries(%Ecto.Query{} = query) do
+    windows = Enum.map(query.windows, fn {_name, window} -> window end)
+
+    @expression_lists
+    |> Enum.flat_map(&Map.fetch!(query, &1))
+    |> Enum.concat(Enum.map(@expression_fields, &Map.fetch!(query, &1)))
+    |> Enum.concat(windows)
+    |> Enum.flat_map(&subqueries_of/1)
+  end
+
+  # `:distinct` and `:select` are nil on a query with neither, and
+  # `Ecto.Query.QueryExpr` has no `:subqueries` key at all — so this reads the
+  # key rather than assuming it.
+  @spec subqueries_of(term()) :: [term()]
+  defp subqueries_of(%_struct{} = expr), do: Map.get(expr, :subqueries, [])
+  defp subqueries_of(_expr), do: []
 
   @spec nested_queries(Ecto.Query.t()) :: [Ecto.Query.t()]
   defp nested_queries(%Ecto.Query{} = query) do
