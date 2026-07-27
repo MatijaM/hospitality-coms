@@ -9,6 +9,20 @@ defmodule HospitalityComs.Engagements.Engagement do
   table that named a person would be a second crossing, and
   `HospitalityComs.BoundaryTest` fails on one.
 
+  ## The person key is globally stable, and that is a disclosure
+
+  `person_id` is the same UUID at every venue, and `employer_role` can read it.
+  Two venues comparing ids out of band can therefore work out that the same
+  human works at both — which is precisely the concurrency U9's disclosure
+  default exists to hide.
+
+  It is inherent to the design rather than an oversight. The exclusion
+  constraint keys on `(person_id, venue_id, period)`, so the person key has to
+  be one value across venues for the overlap rule to mean anything; a per-venue
+  pseudonym would need either a second crossing or a mapping table, and both are
+  KTD2 decisions rather than implementation ones. Recorded here as a known
+  disclosure that **U9 governs**.
+
   ## Nothing stores whether it is active
 
   An engagement is active at instant `t` when `starts_at <= t < ends_at`.

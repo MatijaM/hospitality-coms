@@ -258,6 +258,13 @@ defmodule HospitalityComs.Engagements.Records do
 
   @doc """
   A venue's invitations that are still claimable at `instant`, oldest first.
+
+  **Returns whole structs, and one of their fields is `claim_code_digest`.**
+  `employer_role` holds table-level `SELECT` on `invitations`, so the digest
+  comes back with every row. It is SHA-256 of 32 random bytes and cannot be
+  turned back into a code, so it is not a working credential — but an endpoint
+  that renders one of these structs wholesale ships it to the client anyway. U6
+  should render a field list rather than the struct.
   """
   @spec outstanding_invitations(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
   def outstanding_invitations(venue_id, %DateTime{} = instant) when is_binary(venue_id) do

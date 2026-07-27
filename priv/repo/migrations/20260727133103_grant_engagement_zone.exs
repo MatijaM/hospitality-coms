@@ -16,6 +16,15 @@ defmodule HospitalityComs.Repo.Migrations.GrantEngagementZone do
       is the claim's first `Ecto.Multi` step, and the claim runs as the
       application's own role, so there is no employer session anywhere that can
       mark a code claimed.
+
+      The SELECT is table-level and therefore **includes `claim_code_digest`**.
+      That is a deliberate choice rather than an omission: the claim looks an
+      invitation up *by* that column, and a column list here would be a second
+      place to keep the schema's columns in step. The digest is SHA-256 of 32
+      random bytes, so a leak of it is not a leak of a working code — but it
+      does reach any employer session that reads a whole row, and
+      `HospitalityComs.Engagements.Records.outstanding_invitations/2` returns
+      whole rows. **U6 must render a field list rather than the struct.**
     * `engagements` — SELECT, plus UPDATE on `ends_at`, `lock_version` and
       `updated_at` alone. Renewal and ending write those three columns and
       nothing else. A table-level UPDATE would also let a session move an
