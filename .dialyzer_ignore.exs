@@ -25,5 +25,17 @@
   # anything this module constructs or reads. Venue creation seeds its grant in
   # the same transaction and AGENTS.md requires `Ecto.Multi` for exactly that
   # shape, so the call cannot go away either.
-  {"lib/hospitality_coms/venues.ex", :call_without_opaque}
+  {"lib/hospitality_coms/venues.ex", :call_without_opaque},
+
+  # The third instance of the same `Ecto.Multi` / `MapSet.t()` false positive,
+  # at the claim's multi. It is reported against `Oban.insert/3` rather than
+  # against an `Ecto.Multi` function this time, because that is the last call in
+  # the pipeline that takes the struct — but the opaque subterm the warning
+  # names is still `%Ecto.Multi{:names => %MapSet{...}}`, which this module
+  # neither constructs nor reads.
+  #
+  # The call cannot go away: the expiry job has to be inserted inside the
+  # claim's transaction, or a rolled-back claim leaves a job scheduled against
+  # an engagement that was never written.
+  {"lib/hospitality_coms/engagements.ex", :call_without_opaque}
 ]

@@ -20,23 +20,45 @@ defmodule HospitalityComs.Zones do
       `person_id`. Messages, roster entries, and attested entries reference
       `engagements(id, venue_id)` instead, so no worker's name is ever stored
       in an employer-zone row (KTD2).
-    * **shared** — reachable from both sides. `engagements` will live here: it
-      is the single bridge, the only table that names a human and an employer
-      in one row, and the only crossing the design permits.
+    * **shared** — reachable from both sides. `engagements` lives here: it is
+      the single bridge, the only table that names a human and an employer in
+      one row, and the only crossing the design permits.
 
-  The shared list is empty until U5 creates the bridge. It is declared now
-  because the totality test in `HospitalityComs.ZonesTest` fails on any schema
-  that is in none of them, so adding a table is not finished until somebody has
-  decided where it sits.
+  Adding a table is not finished until somebody has decided where it sits: the
+  totality test in `HospitalityComs.ZonesTest` fails on any schema that is in
+  none of the three.
 
   U4 filled the employer zone with `venues`, `employer_grants` and
   `shift_types`, and in doing so turned two of the proof suite's assertions
-  from vacuous into load-bearing: the disjointness check now has two non-empty
+  from vacuous into load-bearing: the disjointness check had two non-empty
   lists to disagree about, and "no employer-zone table holds a foreign key to
-  `people`" now has tables to check. None of the three carries a person key,
-  and none ever will — a grant records that a venue has an outstanding
-  authority, and *who holds it* is recorded on the bridge, from the person's
-  side.
+  `people`" had tables to check. None of the three carries a person key, and
+  none ever will — a grant records that a venue has an outstanding authority,
+  and *who holds it* is recorded on the bridge, from the person's side.
+
+  ## U5 filled the shared zone, and it has exactly one member
+
+  `engagements` is `:shared` rather than `:employer`, and the distinction is
+  what the shared zone was declared for. It is not a way of getting the bridge
+  past the employer zone's "no foreign key to `people`" rule; it is the
+  statement that this table is *the* crossing, which is why the rule can be
+  absolute on the employer side. `HospitalityComs.BoundaryTest` asserts both
+  halves — no employer-zone table references `people`, and `engagements` is the
+  only table outside the person zone that does.
+
+  Classification decides which privileges the employer role may hold, not which
+  rows it sees once it holds them. `engagements` carries a row-level security
+  policy on `venue_id` like every employer-zone table, because the employer's
+  *view* of the bridge is per venue even though the table is not the employer's
+  alone.
+
+  U5 also added `invitations` and `attested_entries` to the employer zone. Both
+  carry `venue_id` and neither names a person: an invitation is addressed to
+  nobody (R1) and an attested entry is keyed on `engagements (id, venue_id)`,
+  which is KTD2's rule in its narrowest form. `employer_role` holds SELECT and
+  INSERT on `invitations` and, deliberately, **nothing at all** on
+  `attested_entries` — the hidden-entry rule is per row and grants cannot
+  express it, so the employer reads U9's owner-privileged view (KTD3).
 
   Table names are derived from `__schema__(:source)` rather than written out
   a second time. The privilege sweep, the query backstop in
@@ -71,6 +93,9 @@ defmodule HospitalityComs.Zones do
 
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonToken
+  alias HospitalityComs.Engagements.Engagement
+  alias HospitalityComs.Engagements.Invitation
+  alias HospitalityComs.Profiles.AttestedEntry
   alias HospitalityComs.Venues.EmployerGrant
   alias HospitalityComs.Venues.ShiftType
   alias HospitalityComs.Venues.Venue
@@ -82,8 +107,8 @@ defmodule HospitalityComs.Zones do
   @type offence() :: {table :: String.t(), privilege :: String.t()}
 
   @person_zone [Person, PersonToken]
-  @employer_zone [Venue, EmployerGrant, ShiftType]
-  @shared []
+  @employer_zone [Venue, EmployerGrant, ShiftType, Invitation, AttestedEntry]
+  @shared [Engagement]
 
   @employer_role "employer_role"
 
@@ -199,9 +224,11 @@ defmodule HospitalityComs.Zones do
   defp placement(true, zone), do: {:ok, zone}
   defp placement(false, _zone), do: nil
 
-  # A keyword list rather than three literal memberships: two of the three are
-  # empty until U4 and U5 fill them, and `schema in []` is a compile-time
-  # falsehood the type checker is right to warn about.
+  # A keyword list rather than three literal memberships. It was written this
+  # way because two of the three lists were empty until U4 and U5 filled them,
+  # and `schema in []` is a compile-time falsehood the type checker is right to
+  # warn about; it stays that way because `overlapping/1` and the tests that
+  # watch it catch something have to run the same code.
   @spec zones() :: [{zone(), [module()]}]
   defp zones, do: [person: @person_zone, employer: @employer_zone, shared: @shared]
 
