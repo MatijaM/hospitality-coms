@@ -30,18 +30,24 @@ defmodule HospitalityComsWeb.SocketsTest do
 
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.PersonToken
+  alias HospitalityComs.Venues
   alias HospitalityComsWeb.EmployerSocket
   alias HospitalityComsWeb.PersonAuth
   alias HospitalityComsWeb.PersonSocket
 
   @now HospitalityComs.EngagementsFixtures.fixed_instant()
+  @term_ends DateTime.add(@now, 30, :day)
+  @opens DateTime.add(@now, 1, :hour)
+  @closes DateTime.add(@now, 9, :hour)
+
+  @refused_room %{code: "unauthorized", message: "this session is not in that venue's room"}
 
   describe "connecting a person socket" do
     test "authenticates the token the transport carried" do
       person = person_fixture(@now)
 
       assert {:ok, socket} = connect(PersonSocket, %{}, auth(session_token(person, @now)))
-      assert socket.assigns.person.id == person.id
+      assert socket.assigns.person_id == person.id
     end
 
     test "names the socket after the session, not the person (KTD7)" do
@@ -68,7 +74,7 @@ defmodule HospitalityComsWeb.SocketsTest do
       assert {:ok, second} = connect(PersonSocket, %{}, auth(session_token(person, @now)))
 
       assert first.id != second.id
-      assert first.assigns.person.id == second.assigns.person.id
+      assert first.assigns.person_id == second.assigns.person_id
     end
 
     test "names the topic log-out already broadcasts disconnect to" do
@@ -121,7 +127,7 @@ defmodule HospitalityComsWeb.SocketsTest do
       person = person_fixture(@now)
 
       assert {:ok, socket} = connect(EmployerSocket, %{}, auth(session_token(person, @now)))
-      assert socket.assigns.person.id == person.id
+      assert socket.assigns.person_id == person.id
     end
 
     test "gives the same session the same id as the person socket" do
@@ -144,6 +150,113 @@ defmodule HospitalityComsWeb.SocketsTest do
       person = person_fixture(@now)
 
       assert {:ok, _socket} = connect(EmployerSocket, %{}, auth(session_token(person, @now)))
+    end
+  end
+
+  describe "a socket whose session has ended" do
+    test "is refused at join after the token row is deleted, with no disconnect broadcast" do
+      # **The hole U7's review found.** `connect/3` authenticated once and the
+      # socket carried the person for ever; the credential was never derived
+      # again. Log-out happened to work, because `disconnect_sessions/1`
+      # broadcasts to the socket's id — so the guarantee rested on a *nudge*,
+      # and any deletion that skipped that path left a socket joining channels
+      # against a session that no longer exists.
+      #
+      # `Accounts.delete_person_session_token/1` is that path: it deletes the
+      # row and returns it, and it is the controller that broadcasts. Nothing
+      # broadcasts here.
+      %{venue: venue, socket: socket, raw_token: raw} = engaged()
+
+      assert {:ok, _reply, _channel} = subscribe_and_join(socket, venue_topic(venue), %{})
+
+      assert {:ok, _deleted} = Accounts.delete_person_session_token(raw)
+
+      assert {:error, refusal} = join(socket, venue_topic(venue), %{})
+      assert refusal.error == @refused_room
+    end
+
+    test "is refused at join once the token's own horizon passes" do
+      # The case no broadcast covers at all: nothing fires when a token simply
+      # ages out, so a socket connected on day 1 kept joining channels on day
+      # 20 — past the 14-day horizon `PersonToken.session_validity_in_days/0`
+      # names. The engagement runs 30 days, so what refuses this is the session
+      # and not the membership.
+      %{venue: venue, socket: socket} = engaged()
+
+      assert {:ok, _reply, _channel} = subscribe_and_join(socket, venue_topic(venue), %{})
+
+      at(DateTime.add(@now, PersonToken.session_validity_in_days() + 1, :day))
+
+      assert {:error, refusal} = join(socket, venue_topic(venue), %{})
+      assert refusal.error == @refused_room
+    end
+
+    test "is refused on every topic the two sockets route" do
+      # One socket, four channels, one credential. A re-derivation on the venue
+      # room alone would leave three ways in.
+      %{venue: venue, room: room, socket: socket, employer_socket: employer, raw_token: raw} =
+        engaged_manager()
+
+      assert {:ok, _venue, _a} = subscribe_and_join(socket, venue_topic(venue), %{})
+      assert {:ok, _shift, _b} = subscribe_and_join(socket, shift_topic(room), %{})
+      assert {:ok, _peer, _c} = subscribe_and_join(socket, "peer", %{})
+      assert {:ok, _emp, _d} = subscribe_and_join(employer, employer_topic(venue), %{})
+
+      assert {:ok, _deleted} = Accounts.delete_person_session_token(raw)
+
+      assert {:error, _venue_refusal} = join(socket, venue_topic(venue), %{})
+      assert {:error, _shift_refusal} = join(socket, shift_topic(room), %{})
+      assert {:error, _peer_refusal} = join(socket, "peer", %{})
+      assert {:error, _employer_refusal} = join(employer, employer_topic(venue), %{})
+    end
+
+    test "still joins while the token row is live, which is the control" do
+      # Every refusal above passes against a `join/3` that refused everything.
+      %{venue: venue, room: room, socket: socket, employer_socket: employer} = engaged_manager()
+
+      assert {:ok, _venue, _a} = subscribe_and_join(socket, venue_topic(venue), %{})
+      assert {:ok, _shift, _b} = subscribe_and_join(socket, shift_topic(room), %{})
+      assert {:ok, _peer, _c} = subscribe_and_join(socket, "peer", %{})
+      assert {:ok, _emp, _d} = subscribe_and_join(employer, employer_topic(venue), %{})
+    end
+  end
+
+  describe "what a connected socket carries" do
+    test "is the person's id and the session's digest, and no person record" do
+      # A channel crash report is `inspect/1` of the socket, so anything in
+      # assigns is in the logs. The socket used to carry the whole `%Person{}`,
+      # email included, and items 4, 5 and 6 of U7's review were three reachable
+      # ways to get one printed.
+      person = person_fixture(@now)
+      raw = Accounts.generate_person_session_token(person, @now)
+
+      assert {:ok, socket} = connect(PersonSocket, %{}, auth(PersonAuth.encode_token(raw)))
+
+      assert socket.assigns.person_id == person.id
+      assert socket.assigns.token_digest == PersonToken.hash_token(raw)
+      refute Map.has_key?(socket.assigns, :person)
+    end
+
+    test "prints no email when the whole socket is inspected" do
+      # The assertion in the shape the failure took: a crash report is the
+      # inspected socket, and the leak was that the address was in it.
+      person = person_fixture(@now)
+
+      assert {:ok, socket} = connect(PersonSocket, %{}, auth(session_token(person, @now)))
+      refute socket |> inspect(limit: :infinity) |> String.contains?(person.email)
+    end
+
+    test "carries the digest and never the token the client holds" do
+      # U2 hashed session tokens at rest precisely so that a leak yields
+      # digests. Putting the raw token on the socket to re-derive with would
+      # have handed it back.
+      person = person_fixture(@now)
+      raw = Accounts.generate_person_session_token(person, @now)
+
+      assert {:ok, socket} = connect(PersonSocket, %{}, auth(PersonAuth.encode_token(raw)))
+
+      refute socket |> inspect(limit: :infinity) |> String.contains?(inspect(raw))
+      refute raw in Map.values(socket.assigns)
     end
   end
 
@@ -215,5 +328,71 @@ defmodule HospitalityComsWeb.SocketsTest do
       # `HospitalityComs.PubSub`.
       assert PersonSocket.__channel__("employer_venue:" <> Ecto.UUID.generate()) == nil
     end
+  end
+
+  ## Fixtures
+
+  defp venue_topic(venue), do: "venue_room:" <> venue.id
+  defp shift_topic(room), do: "shift_room:" <> room.id
+  defp employer_topic(venue), do: "employer_venue:" <> venue.id
+
+  # A worker at one venue, on a socket built from a token the test still holds
+  # the raw bytes of — so it can delete the row the way a caller that skips
+  # `disconnect_sessions/1` would.
+  defp engaged do
+    creation = venue_fixture(@now)
+    employer = employer_scope_fixture(creation, @now)
+    person = person_scope_fixture(@now)
+
+    engagement =
+      engagement_fixture(employer, person, %{starts_at: @now, ends_at: @term_ends})
+
+    raw = Accounts.generate_person_session_token(person.person, @now)
+    {:ok, socket} = connect(PersonSocket, %{}, auth(PersonAuth.encode_token(raw)))
+
+    %{
+      venue: creation.venue,
+      employer: employer,
+      person: person,
+      engagement: engagement,
+      raw_token: raw,
+      socket: socket
+    }
+  end
+
+  # The same person holding a grant as well, so all four topics are reachable
+  # from one credential.
+  defp engaged_manager do
+    %{venue: venue, grant: founding} = creation = venue_fixture(@now)
+    employer = employer_scope_fixture(creation, @now)
+    person = person_scope_fixture(@now)
+
+    {:ok, held} = Venues.issue_grant(employer)
+
+    engagement =
+      engagement_fixture(employer, person, %{
+        starts_at: @now,
+        ends_at: @term_ends,
+        grant_id: held.id
+      })
+
+    shift_type = shift_type_fixture(employer, 30)
+    room = shift_room_fixture(employer, shift_type, @opens, @closes)
+    roster_entry_fixture(employer, room, engagement.id)
+
+    raw = Accounts.generate_person_session_token(person.person, @now)
+    {:ok, socket} = connect(PersonSocket, %{}, auth(PersonAuth.encode_token(raw)))
+    {:ok, employer_socket} = connect(EmployerSocket, %{}, auth(PersonAuth.encode_token(raw)))
+
+    %{
+      venue: venue,
+      founding_grant: founding,
+      grant: held,
+      room: room,
+      engagement: engagement,
+      raw_token: raw,
+      socket: socket,
+      employer_socket: employer_socket
+    }
   end
 end

@@ -61,7 +61,7 @@ defmodule HospitalityComsWeb.EmployerVenueChannel do
   # `ArgumentError` on anything that is not a canonical uuid.
   @spec resolve({:ok, Ecto.UUID.t()} | :error, Socket.t()) ::
           {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
-  defp resolve(:error, _socket), do: {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
+  defp resolve(:error, _socket), do: refuse()
 
   defp resolve({:ok, venue_id}, socket) do
     socket
@@ -69,16 +69,20 @@ defmodule HospitalityComsWeb.EmployerVenueChannel do
     |> admit(socket)
   end
 
-  @spec admit({:ok, EmployerScope.t()} | {:error, :no_grant}, Socket.t()) ::
+  # `:no_session` is a token deleted or expired since `connect/3` — the session
+  # is derived again at every join, so a socket cannot outlive its credential —
+  # and it gets the same sentence the missing grant does, for the reason above.
+  @spec admit({:ok, EmployerScope.t()} | {:error, :no_grant | :no_session}, Socket.t()) ::
           {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
   defp admit({:ok, %EmployerScope{} = scope}, socket) do
     {:ok, %{venue_id: scope.venue_id, grant_id: scope.grant_id},
      assign(socket, venue_id: scope.venue_id, grant_id: scope.grant_id)}
   end
 
-  defp admit({:error, :no_grant}, _socket) do
-    {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
-  end
+  defp admit({:error, refusal}, _socket) when refusal in [:no_grant, :no_session], do: refuse()
+
+  @spec refuse() :: {:error, ErrorEnvelope.t()}
+  defp refuse, do: {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
 
   @doc """
   Answers an event this channel does not carry.

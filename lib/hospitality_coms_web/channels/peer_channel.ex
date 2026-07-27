@@ -41,24 +41,39 @@ defmodule HospitalityComsWeb.PeerChannel do
   alias HospitalityComsWeb.ErrorEnvelope
   alias Phoenix.Socket
 
+  @refusal "this session is not live"
   @unknown_event "this channel does not handle that event"
 
   @doc """
-  Joins this person's peer surface.
+  Joins this person's peer surface, if the session is still live.
 
-  Refuses an anonymous socket by function clause rather than by a check —
-  `HospitalityComsWeb.PersonSocket` cannot produce one, because `connect/3`
-  answers `:error` without a live token, so this clause is the belt to that
+  The session is derived again here rather than taken from the socket, which is
+  what stops a socket outliving the token it connected with — see
+  `HospitalityComsWeb.ChannelAuth`. This topic needs it as much as the room
+  topics do and has less to fall back on: there is no membership behind `"peer"`
+  to refuse a stale session on its way past.
+
+  An anonymous scope is refused by function clause on top of that.
+  `PersonSocket.connect/3` cannot produce one, so the clause is the belt to that
   brace.
   """
   @impl true
-  @spec join(String.t(), map(), Socket.t()) :: {:ok, map(), Socket.t()}
+  @spec join(String.t(), map(), Socket.t()) ::
+          {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
   def join("peer", _payload, socket) do
-    %PersonScope{person: %Person{id: person_id}} = scope = ChannelAuth.person_scope(socket)
+    socket |> ChannelAuth.join_scope() |> admit(socket)
+  end
 
+  @spec admit({:ok, PersonScope.t()} | {:error, :no_session}, Socket.t()) ::
+          {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
+  defp admit({:ok, %PersonScope{person: %Person{id: person_id}} = scope}, socket) do
     :ok = PubSub.subscribe(scope, {:peer, person_id})
 
     {:ok, %{person_id: person_id}, socket}
+  end
+
+  defp admit({:error, :no_session}, _socket) do
+    {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
   end
 
   @doc """

@@ -90,15 +90,30 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
   # `join/3` and the transport reported a crash.
   @spec resolve({:ok, Ecto.UUID.t()} | :error, Socket.t()) ::
           {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
-  defp resolve(:error, _socket), do: {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
+  defp resolve(:error, _socket), do: refuse()
 
   defp resolve({:ok, venue_id}, socket) do
-    scope = ChannelAuth.person_scope(socket)
+    socket |> ChannelAuth.join_scope() |> authorize(venue_id, socket)
+  end
 
+  # The session is derived again here, not taken from the socket: a token
+  # deleted or expired since `connect/3` refuses the join with the same sentence
+  # an ended engagement gets, so the socket cannot outlive its credential.
+  @spec authorize(
+          {:ok, PersonScope.t()} | {:error, :no_session},
+          Ecto.UUID.t(),
+          Socket.t()
+        ) :: {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
+  defp authorize({:error, :no_session}, _venue_id, _socket), do: refuse()
+
+  defp authorize({:ok, scope}, venue_id, socket) do
     scope
     |> Rooms.fetch_venue_room_membership(venue_id)
     |> admit(scope, venue_id, socket)
   end
+
+  @spec refuse() :: {:error, ErrorEnvelope.t()}
+  defp refuse, do: {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
 
   @spec admit(
           {:ok, Engagement.t()} | {:error, :not_a_member},
@@ -117,9 +132,7 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
      assign(socket, engagement: engagement, venue_id: venue_id)}
   end
 
-  defp admit({:error, :not_a_member}, _scope, _venue_id, _socket) do
-    {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
-  end
+  defp admit({:error, :not_a_member}, _scope, _venue_id, _socket), do: refuse()
 
   @doc """
   Sends a message to the room, authorised at the instant it arrives.

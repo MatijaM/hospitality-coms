@@ -77,9 +77,18 @@ defmodule HospitalityComsWeb.EmployerSocket do
   @spec id(Socket.t()) :: String.t()
   def id(%Socket{assigns: %{socket_id: socket_id}}), do: socket_id
 
+  # The id and the digest, and nothing else. A `%Person{}` here would put the
+  # address in every crash report; the raw token would undo U2's hashing at
+  # rest. `HospitalityComsWeb.ChannelAuth.join_scope/1` re-derives the session
+  # from the digest at every join.
   @spec admit({:ok, ChannelAuth.session()} | :error, Socket.t()) :: {:ok, Socket.t()} | :error
-  defp admit({:ok, %{person: person, socket_id: socket_id}}, socket) do
-    {:ok, assign(socket, person: person, socket_id: socket_id)}
+  defp admit({:ok, session}, socket) do
+    {:ok,
+     assign(socket,
+       person_id: session.person_id,
+       token_digest: session.token_digest,
+       socket_id: session.socket_id
+     )}
   end
 
   defp admit(:error, _socket), do: :error

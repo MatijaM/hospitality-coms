@@ -121,8 +121,28 @@ defmodule HospitalityComs.Accounts.PersonToken do
   """
   @spec verify_session_token_query(binary(), DateTime.t()) :: {:ok, Ecto.Query.t()}
   def verify_session_token_query(token, %DateTime{} = now) when is_binary(token) do
+    verify_session_token_digest_query(hash_token(token), now)
+  end
+
+  @doc """
+  The same lookup, for a caller that holds the digest rather than the token.
+
+  `HospitalityComsWeb.ChannelAuth` is the caller. A socket has to be able to
+  ask "is this session still live?" on every join, and the one thing it must
+  not do to make that possible is keep the raw token in memory for the length
+  of a connection — this module hashes session tokens at rest precisely so that
+  a leak yields digests, and a socket's assigns are printed in full by every
+  crash report.
+
+  `verify_session_token_query/2` delegates here rather than repeating the
+  query, which is what makes "the same row and the same horizon" structural
+  instead of a comment. A horizon that drifted between the two would let a
+  socket outlive the requests made with the same token, or the other way about.
+  """
+  @spec verify_session_token_digest_query(binary(), DateTime.t()) :: {:ok, Ecto.Query.t()}
+  def verify_session_token_digest_query(digest, %DateTime{} = now) when is_binary(digest) do
     query =
-      from token in by_token_and_context_query(hash_token(token), "session"),
+      from token in by_token_and_context_query(digest, "session"),
         join: person in assoc(token, :person),
         where: token.inserted_at > ^horizon(now, @session_validity_in_days, :day),
         select: {%{person | authenticated_at: token.authenticated_at}, token.inserted_at}

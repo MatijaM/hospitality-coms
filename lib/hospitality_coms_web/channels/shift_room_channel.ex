@@ -74,15 +74,29 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
   # `Ecto.Query.CastError` out of `join/3`.
   @spec resolve({:ok, Ecto.UUID.t()} | :error, Socket.t()) ::
           {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
-  defp resolve(:error, _socket), do: {:error, ErrorEnvelope.new(:unauthorized, @unreadable)}
+  defp resolve(:error, _socket), do: refuse()
 
   defp resolve({:ok, shift_room_id}, socket) do
-    scope = ChannelAuth.person_scope(socket)
+    socket |> ChannelAuth.join_scope() |> authorize(shift_room_id, socket)
+  end
 
+  # The session is derived again here rather than taken from the socket. See
+  # `HospitalityComsWeb.ChannelAuth`.
+  @spec authorize(
+          {:ok, PersonScope.t()} | {:error, :no_session},
+          Ecto.UUID.t(),
+          Socket.t()
+        ) :: {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
+  defp authorize({:error, :no_session}, _shift_room_id, _socket), do: refuse()
+
+  defp authorize({:ok, scope}, shift_room_id, socket) do
     scope
     |> Rooms.fetch_shift_room_reader(shift_room_id)
     |> admit(scope, shift_room_id, socket)
   end
+
+  @spec refuse() :: {:error, ErrorEnvelope.t()}
+  defp refuse, do: {:error, ErrorEnvelope.new(:unauthorized, @unreadable)}
 
   @spec admit(
           {:ok, Engagement.t()} | {:error, :not_found},
@@ -98,9 +112,7 @@ defmodule HospitalityComsWeb.ShiftRoomChannel do
      assign(socket, engagement: engagement, shift_room_id: shift_room_id)}
   end
 
-  defp admit({:error, :not_found}, _scope, _shift_room_id, _socket) do
-    {:error, ErrorEnvelope.new(:unauthorized, @unreadable)}
-  end
+  defp admit({:error, :not_found}, _scope, _shift_room_id, _socket), do: refuse()
 
   @doc """
   Sends a message to the room, authorised at the instant it arrives.

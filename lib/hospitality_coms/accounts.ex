@@ -328,6 +328,28 @@ defmodule HospitalityComs.Accounts do
   end
 
   @doc """
+  The same lookup, for a caller holding the digest rather than the token.
+
+  `HospitalityComsWeb.ChannelAuth` is the caller, and the reason it needs one is
+  that a websocket outlives the request that opened it. An HTTP request carries
+  its credential every time, so `get_person_by_session_token/2` re-derives the
+  session on every call for free; a socket authenticates once and then lives for
+  days, so if it is to ask the same question again it has to ask it about
+  something it is willing to keep — and the digest is the value this application
+  is willing to keep, because `people_tokens.token` holds exactly that and a
+  leak of it must not yield a working session.
+
+  Same row, same fourteen-day horizon: `PersonToken.verify_session_token_query/2`
+  delegates to the query behind this one rather than repeating it.
+  """
+  @spec get_person_by_session_token_digest(binary(), DateTime.t()) ::
+          {Person.t(), DateTime.t()} | nil
+  def get_person_by_session_token_digest(digest, %DateTime{} = now) when is_binary(digest) do
+    {:ok, query} = PersonToken.verify_session_token_digest_query(digest, now)
+    Repo.one(query)
+  end
+
+  @doc """
   Gets the person the given magic-link token belongs to, without redeeming it.
   """
   @spec get_person_by_magic_link_token(String.t(), DateTime.t()) :: Person.t() | nil
