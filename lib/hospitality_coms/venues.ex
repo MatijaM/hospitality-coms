@@ -186,7 +186,7 @@ defmodule HospitalityComs.Venues do
   @spec read_venue(EmployerScope.t()) :: {:ok, Venue.t()} | {:error, :no_grant | :not_found}
   defp read_venue(scope) do
     with {:ok, _grant} <- authorize(scope) do
-      Venue |> EmployerRepo.get(scope.employer_id) |> found()
+      Venue |> EmployerRepo.get(scope.venue_id) |> found()
     end
   end
 
@@ -229,7 +229,7 @@ defmodule HospitalityComs.Venues do
           {:ok, EmployerGrant.t()} | {:error, :no_grant | Ecto.Changeset.t(EmployerGrant.t())}
   defp write_grant(scope) do
     with {:ok, authority} <- authorize(scope) do
-      scope.employer_id
+      scope.venue_id
       |> EmployerGrant.issued_changeset(authority.id, scope.now)
       |> EmployerRepo.insert()
     end
@@ -337,7 +337,7 @@ defmodule HospitalityComs.Venues do
   @spec read_shift_types(EmployerScope.t()) :: {:ok, [ShiftType.t()]} | {:error, :no_grant}
   defp read_shift_types(scope) do
     with {:ok, _grant} <- authorize(scope) do
-      {:ok, EmployerRepo.all(ShiftType.of_venue(scope.employer_id))}
+      {:ok, EmployerRepo.all(ShiftType.of_venue(scope.venue_id))}
     end
   end
 
@@ -350,13 +350,13 @@ defmodule HospitalityComs.Venues do
   # grant revoked a second ago is refused here with no job having run, which is
   # the same property engagements get from their period.
   @spec authorize(EmployerScope.t()) :: {:ok, EmployerGrant.t()} | {:error, :no_grant}
-  defp authorize(%EmployerScope{employer_id: venue_id} = scope), do: authorize(scope, venue_id)
+  defp authorize(%EmployerScope{venue_id: venue_id} = scope), do: authorize(scope, venue_id)
 
   # The venue is matched against the scope's own in the head, so a request for
   # another venue has no clause that reaches the database at all.
   @spec authorize(EmployerScope.t(), Ecto.UUID.t()) ::
           {:ok, EmployerGrant.t()} | {:error, :no_grant}
-  defp authorize(%EmployerScope{employer_id: venue_id} = scope, venue_id) do
+  defp authorize(%EmployerScope{venue_id: venue_id} = scope, venue_id) do
     scope
     |> live_grants()
     |> where([grant], grant.id == ^scope.grant_id)
@@ -371,7 +371,7 @@ defmodule HospitalityComs.Venues do
   defp held(nil), do: {:error, :no_grant}
 
   @spec live_grants(EmployerScope.t()) :: Ecto.Query.t()
-  defp live_grants(%EmployerScope{employer_id: venue_id, now: now}) do
+  defp live_grants(%EmployerScope{venue_id: venue_id, now: now}) do
     venue_id
     |> EmployerGrant.live_at(now)
     |> order_by([grant], asc: grant.id)

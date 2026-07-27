@@ -231,7 +231,7 @@ defmodule HospitalityComs.VenuesTest do
       {:ok, second} = Venues.issue_grant(scope)
       {:ok, _revoked} = Venues.revoke_grant(scope, second.id)
 
-      later = EmployerScope.for_grant(scope.employer_id, founding.id, @later)
+      later = EmployerScope.for_grant(scope.venue_id, founding.id, @later)
 
       assert employer_count(EmployerGrant) == 2
       assert Venues.revoke_grant(later, founding.id) == {:error, :last_grant_holder}
@@ -251,7 +251,7 @@ defmodule HospitalityComs.VenuesTest do
       {:ok, second} = Venues.issue_grant(scope)
       {:ok, revoked} = Venues.revoke_grant(scope, second.id)
 
-      later = EmployerScope.for_grant(scope.employer_id, scope.grant_id, @later)
+      later = EmployerScope.for_grant(scope.venue_id, scope.grant_id, @later)
 
       assert Venues.revoke_grant(later, second.id) == {:error, :not_found}
 
@@ -263,14 +263,14 @@ defmodule HospitalityComs.VenuesTest do
       {scope, _creation} = scoped_venue_fixture(%{}, @now)
       {:ok, second} = Venues.issue_grant(scope)
 
-      revoking = EmployerScope.for_grant(scope.employer_id, scope.grant_id, @later)
+      revoking = EmployerScope.for_grant(scope.venue_id, scope.grant_id, @later)
       {:ok, _revoked} = Venues.revoke_grant(revoking, second.id)
 
       # At the revocation instant the grant is gone; a second before it, it is
       # not. No instant falls in both states, which is the property every
       # period in this application is built on.
-      at_revocation = EmployerScope.for_grant(scope.employer_id, second.id, @later)
-      just_before = EmployerScope.for_grant(scope.employer_id, second.id, a_second_before(@later))
+      at_revocation = EmployerScope.for_grant(scope.venue_id, second.id, @later)
+      just_before = EmployerScope.for_grant(scope.venue_id, second.id, a_second_before(@later))
 
       assert Venues.fetch_venue(at_revocation) == {:error, :no_grant}
       assert {:ok, %Venue{}} = Venues.fetch_venue(just_before)
@@ -285,12 +285,12 @@ defmodule HospitalityComs.VenuesTest do
       {scope, _creation} = scoped_venue_fixture(%{}, @now)
       {:ok, second} = Venues.issue_grant(scope)
 
-      acting = EmployerScope.for_grant(scope.employer_id, second.id, @now)
+      acting = EmployerScope.for_grant(scope.venue_id, second.id, @now)
       assert {:ok, %Venue{}} = Venues.fetch_venue(acting)
 
       {:ok, _revoked} = Venues.revoke_grant(scope, second.id)
 
-      after_revocation = EmployerScope.for_grant(scope.employer_id, second.id, @later)
+      after_revocation = EmployerScope.for_grant(scope.venue_id, second.id, @later)
       assert Venues.fetch_venue(after_revocation) == {:error, :no_grant}
     end
 
@@ -335,7 +335,7 @@ defmodule HospitalityComs.VenuesTest do
                Venues.issue_grant(scope)
 
       assert parent_id == founding.id
-      assert venue_id == scope.employer_id
+      assert venue_id == scope.venue_id
     end
 
     test "cannot descend from a grant at another venue" do
@@ -386,7 +386,7 @@ defmodule HospitalityComs.VenuesTest do
       {scope, _creation} = scoped_venue_fixture(%{}, @now)
 
       assert {:error, changeset} =
-               Venues.create_shift_type(scope, scope.employer_id, %{grace_period_minutes: 0})
+               Venues.create_shift_type(scope, scope.venue_id, %{grace_period_minutes: 0})
 
       assert "can't be blank" in errors_on(changeset).name
     end
@@ -408,11 +408,11 @@ defmodule HospitalityComs.VenuesTest do
       {:ok, second} = Venues.issue_grant(scope)
       {:ok, _revoked} = Venues.revoke_grant(scope, second.id)
 
-      revoked_scope = EmployerScope.for_grant(scope.employer_id, second.id, @later)
+      revoked_scope = EmployerScope.for_grant(scope.venue_id, second.id, @later)
 
       assert Venues.create_shift_type(
                revoked_scope,
-               scope.employer_id,
+               scope.venue_id,
                valid_shift_type_attributes()
              ) == {:error, :no_grant}
     end
@@ -421,8 +421,8 @@ defmodule HospitalityComs.VenuesTest do
       {scope, _creation} = scoped_venue_fixture(%{}, @now)
       attrs = valid_shift_type_attributes(%{name: "Close"})
 
-      assert {:ok, %ShiftType{}} = Venues.create_shift_type(scope, scope.employer_id, attrs)
-      assert {:error, changeset} = Venues.create_shift_type(scope, scope.employer_id, attrs)
+      assert {:ok, %ShiftType{}} = Venues.create_shift_type(scope, scope.venue_id, attrs)
+      assert {:error, changeset} = Venues.create_shift_type(scope, scope.venue_id, attrs)
       assert "has already been taken" in errors_on(changeset).venue_id
     end
 
@@ -433,8 +433,8 @@ defmodule HospitalityComs.VenuesTest do
       {other, _other_creation} = scoped_venue_fixture(%{}, @now)
       attrs = valid_shift_type_attributes(%{name: "Close"})
 
-      assert {:ok, %ShiftType{}} = Venues.create_shift_type(scope, scope.employer_id, attrs)
-      assert {:ok, %ShiftType{}} = Venues.create_shift_type(other, other.employer_id, attrs)
+      assert {:ok, %ShiftType{}} = Venues.create_shift_type(scope, scope.venue_id, attrs)
+      assert {:ok, %ShiftType{}} = Venues.create_shift_type(other, other.venue_id, attrs)
     end
   end
 
@@ -581,7 +581,7 @@ defmodule HospitalityComs.VenuesTest do
   end
 
   defp create_shift_type(scope, attrs) do
-    Venues.create_shift_type(scope, scope.employer_id, valid_shift_type_attributes(attrs))
+    Venues.create_shift_type(scope, scope.venue_id, valid_shift_type_attributes(attrs))
   end
 
   # Live grant ids at a venue, read outside the context so the context's own
@@ -603,7 +603,7 @@ defmodule HospitalityComs.VenuesTest do
   end
 
   defp reload_grant(scope, id) do
-    employer_read(scope.employer_id, fn -> EmployerRepo.get!(EmployerGrant, id) end)
+    employer_read(scope.venue_id, fn -> EmployerRepo.get!(EmployerGrant, id) end)
   end
 
   defp employer_read(venue_id, fun) do

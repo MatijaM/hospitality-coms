@@ -487,7 +487,7 @@ defmodule HospitalityComs.BoundaryTest do
                  {:ok, {employer_id, instant}}
                end)
 
-      assert employer_id == scope.employer_id
+      assert employer_id == scope.venue_id
       assert DateTime.compare(instant, @now) == :eq
     end
 
@@ -528,8 +528,8 @@ defmodule HospitalityComs.BoundaryTest do
                  {:ok, current_employer_id()}
                end)
 
-      assert resolved == outer.employer_id
-      refute resolved == inner.employer_id
+      assert resolved == outer.venue_id
+      refute resolved == inner.venue_id
     end
 
     test "allows an identical scope to be entered again, writing nothing" do
@@ -548,8 +548,8 @@ defmodule HospitalityComs.BoundaryTest do
                  {:ok, {inner, current_employer_id()}}
                end)
 
-      assert inner == scope.employer_id
-      assert after_inner == scope.employer_id
+      assert inner == scope.venue_id
+      assert after_inner == scope.venue_id
     end
 
     test "leaves nothing behind for the next caller after the refusal" do
@@ -656,7 +656,7 @@ defmodule HospitalityComs.BoundaryTest do
                  {:ok, rows}
                end)
 
-      assert resolved == scope.employer_id
+      assert resolved == scope.venue_id
     end
   end
 

@@ -66,7 +66,7 @@ defmodule HospitalityComs.VenuesConcurrencyTest do
       assert Enum.count(results, &match?({:ok, %EmployerGrant{}}, &1)) == 1
       assert Enum.count(results, &(&1 == {:error, :last_grant_holder})) == 1
 
-      assert length(live_grants(scope.employer_id)) == 1
+      assert length(live_grants(scope.venue_id)) == 1
     end
 
     test "leave a venue that is still administrable" do
@@ -77,8 +77,8 @@ defmodule HospitalityComs.VenuesConcurrencyTest do
 
       race([first, second], scope)
 
-      [survivor] = live_grants(scope.employer_id)
-      surviving_scope = EmployerScope.for_grant(scope.employer_id, survivor.id, @now)
+      [survivor] = live_grants(scope.venue_id)
+      surviving_scope = EmployerScope.for_grant(scope.venue_id, survivor.id, @now)
 
       assert {:ok, %Venue{}} = Venues.fetch_venue(surviving_scope)
     end
@@ -90,13 +90,13 @@ defmodule HospitalityComs.VenuesConcurrencyTest do
       # lock, so this asserts that the barrier machinery is doing its job on
       # this database rather than silently degrading to a sequential run.
       {scope, first, second} = venue_with_two_grants()
-      holder = hold_grants(scope.employer_id)
+      holder = hold_grants(scope.venue_id)
 
       tasks = Enum.map([first, second], &revoker(&1, scope))
       await_blocked(2)
 
       # Both are inside `revoke_grant/2` and neither has written anything.
-      assert length(live_grants(scope.employer_id)) == 2
+      assert length(live_grants(scope.venue_id)) == 2
 
       release(holder)
       results = Task.await_many(tasks, @barrier_timeout)
@@ -108,7 +108,7 @@ defmodule HospitalityComs.VenuesConcurrencyTest do
   ## Racing
 
   defp race(grant_ids, scope) do
-    holder = hold_grants(scope.employer_id)
+    holder = hold_grants(scope.venue_id)
     tasks = Enum.map(grant_ids, &revoker(&1, scope))
 
     await_blocked(length(grant_ids))

@@ -92,12 +92,12 @@ defmodule HospitalityComs.BoundaryLifetimeTest do
         {:ok, setting("app.employer_id")}
       end)
 
-    assert inside == scope.employer_id
+    assert inside == scope.venue_id
     assert backend_pid() == pid_before
 
     # Not the previous employer's id. On a pooled connection that is the whole
     # difference between a boundary and a coin toss.
-    refute setting("app.employer_id") == scope.employer_id
+    refute setting("app.employer_id") == scope.venue_id
   end
 
   test "the scoping function raises on a connection that has already served an employer" do
@@ -132,8 +132,8 @@ defmodule HospitalityComs.BoundaryLifetimeTest do
         {:ok, {setting("app.employer_id"), setting("app.now")}}
       end)
 
-    assert employer_id == second.employer_id
-    refute employer_id == first.employer_id
+    assert employer_id == second.venue_id
+    refute employer_id == first.venue_id
     assert {:ok, parsed, 0} = DateTime.from_iso8601(instant)
     assert DateTime.compare(parsed, second.now) == :eq
   end

@@ -229,16 +229,16 @@ defmodule HospitalityComs.EmployerRepo do
   defp reentry(%EmployerScope{} = scope, %EmployerScope{} = in_force) do
     raise NestedScopeError,
       message: """
-      #{inspect(__MODULE__)} was asked to open a scope for employer \
-      #{scope.employer_id} inside one already in force for #{in_force.employer_id}.
+      #{inspect(__MODULE__)} was asked to open a scope for venue \
+      #{scope.venue_id} inside one already in force for #{in_force.venue_id}.
 
       The two would share one Postgres transaction — there is no savepoint \
       between them — so the inner set_config would overwrite app.employer_id \
       and app.now for the rest of it and stay there after the inner call \
-      returned. The outer work would read as the inner employer with nothing \
+      returned. The outer work would read as the inner venue with nothing \
       raised anywhere.
 
-      One unit of work is one employer. Pass the scope down rather than \
+      One unit of work is one venue. Pass the scope down rather than \
       opening a second one.
       """
   end
@@ -274,12 +274,12 @@ defmodule HospitalityComs.EmployerRepo do
   end
 
   @spec write_settings(EmployerScope.t()) :: :ok
-  defp write_settings(%EmployerScope{employer_id: employer_id, now: now}) do
+  defp write_settings(%EmployerScope{venue_id: venue_id, now: now}) do
     # Raw SQL on purpose: this runs before the scope is registered, and it must
     # not be refused by the guard it is on its way to satisfying.
     query!(
       "SELECT set_config('app.employer_id', $1, true), set_config('app.now', $2, true)",
-      [employer_id, DateTime.to_iso8601(now)]
+      [venue_id, DateTime.to_iso8601(now)]
     )
 
     :ok

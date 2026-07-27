@@ -113,7 +113,7 @@ defmodule HospitalityComs.VenuesFixtures do
   @spec shift_type_fixture(EmployerScope.t(), map()) :: ShiftType.t()
   def shift_type_fixture(%EmployerScope{} = scope, attrs \\ %{}) do
     {:ok, shift_type} =
-      Venues.create_shift_type(scope, scope.employer_id, valid_shift_type_attributes(attrs))
+      Venues.create_shift_type(scope, scope.venue_id, valid_shift_type_attributes(attrs))
 
     shift_type
   end
