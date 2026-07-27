@@ -24,10 +24,19 @@ defmodule HospitalityComs.Zones do
       is the single bridge, the only table that names a human and an employer
       in one row, and the only crossing the design permits.
 
-  Both other lists are empty until U4 creates the employer zone and U5 creates
-  the bridge. They are declared now because the totality test in
-  `HospitalityComs.ZonesTest` fails on any schema that is in none of them, so
-  adding a table is not finished until somebody has decided where it sits.
+  The shared list is empty until U5 creates the bridge. It is declared now
+  because the totality test in `HospitalityComs.ZonesTest` fails on any schema
+  that is in none of them, so adding a table is not finished until somebody has
+  decided where it sits.
+
+  U4 filled the employer zone with `venues`, `employer_grants` and
+  `shift_types`, and in doing so turned two of the proof suite's assertions
+  from vacuous into load-bearing: the disjointness check now has two non-empty
+  lists to disagree about, and "no employer-zone table holds a foreign key to
+  `people`" now has tables to check. None of the three carries a person key,
+  and none ever will — a grant records that a venue has an outstanding
+  authority, and *who holds it* is recorded on the bridge, from the person's
+  side.
 
   Table names are derived from `__schema__(:source)` rather than written out
   a second time. The privilege sweep, the query backstop in
@@ -62,6 +71,9 @@ defmodule HospitalityComs.Zones do
 
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonToken
+  alias HospitalityComs.Venues.EmployerGrant
+  alias HospitalityComs.Venues.ShiftType
+  alias HospitalityComs.Venues.Venue
 
   @typedoc "Which side of the boundary a schema sits on."
   @type zone() :: :person | :employer | :shared
@@ -70,7 +82,7 @@ defmodule HospitalityComs.Zones do
   @type offence() :: {table :: String.t(), privilege :: String.t()}
 
   @person_zone [Person, PersonToken]
-  @employer_zone []
+  @employer_zone [Venue, EmployerGrant, ShiftType]
   @shared []
 
   @employer_role "employer_role"
@@ -294,7 +306,23 @@ defmodule HospitalityComs.Zones do
   not, and the sweep's job is to say which door is open.
   """
   @spec employer_privileges(Ecto.Repo.t()) :: [offence()]
-  def employer_privileges(repo) do
+  def employer_privileges(repo), do: privileges(repo, person_zone_tables())
+
+  @doc """
+  Every privilege the employer role effectively holds on the given tables.
+
+  The same sweep `employer_privileges/1` runs, over a table list the caller
+  chooses. On the person zone an empty result is the boundary holding; on the
+  employer zone the result is the *inventory* — what the zone's own grants
+  actually confer, which is worth pinning as exactly as the absence is, since
+  the grants are what U4 spent a cluster-wide `pg_shdepend` dependency on.
+
+  Sharing one implementation is deliberate. If the sweep ever stops seeing a
+  kind of grant, the employer-zone inventory goes short at the same moment the
+  person-zone audit goes quiet, and one of the two is a test that fails.
+  """
+  @spec privileges(Ecto.Repo.t(), [String.t()]) :: [offence()]
+  def privileges(repo, tables) do
     %{rows: rows} =
       repo.query!(
         """
@@ -306,7 +334,7 @@ defmodule HospitalityComs.Zones do
                AND has_any_column_privilege($3, t.name, p.privilege))
         ORDER BY t.tord, p.pord
         """,
-        [person_zone_tables(), @table_privileges, @employer_role, @column_privileges]
+        [tables, @table_privileges, @employer_role, @column_privileges]
       )
 
     Enum.map(rows, fn [table, privilege] -> {table, privilege} end)

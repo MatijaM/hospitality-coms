@@ -44,7 +44,7 @@ In dev, `/dev/mailbox` is the only way to read a magic link — nothing renders 
 - `DateTime.utc_now/*` is flagged anywhere outside the `HospitalityComs.Clock` namespace.
 - `Clock.now/0` is flagged outside the modules listed in the check's `:boundary_modules` parameter in `.credo.exs`. That list currently holds one entry, `HospitalityComsWeb.PersonAuth`, which is the HTTP boundary. When you build another — a channel event handler, a job — add it there rather than working around the check.
 
-Everywhere else, the instant arrives on the scope struct — `%HospitalityComs.Accounts.PersonScope{person: _, now: _}`, assigned as `:current_scope` by `PersonAuth.fetch_person_scope/2`, or `%HospitalityComs.Accounts.EmployerScope{employer_id: _, now: _}`. `EmployerRepo`'s transaction wrapper takes the instant off the scope for the same reason; a repo is not a unit of work, so it is not a boundary module.
+Everywhere else, the instant arrives on the scope struct — `%HospitalityComs.Accounts.PersonScope{person: _, now: _}`, assigned as `:current_scope` by `PersonAuth.fetch_person_scope/2`, or `%HospitalityComs.Accounts.EmployerScope{venue_id: _, now: _}`. `EmployerRepo`'s transaction wrapper takes the instant off the scope for the same reason; a repo is not a unit of work, so it is not a boundary module.
 
 `Ecto.Query.ago/2` and `from_now/2` are banned for the same reason `DateTime.utc_now/0` is: they expand to `DateTime.utc_now()` inside the query macro, where the offsettable clock cannot move them. `ClockAuthority` flags the call itself, both imported and fully qualified, because by expansion time it is too late to see. Compare against an instant taken from the scope.
 
@@ -67,7 +67,11 @@ Neither guard is the boundary, and the boundary is not below them. Three escapes
 
 `employer_role` and `person_role` are created by `priv/repo/migrations/*_create_postgres_roles.exs`. Roles are cluster-global, not database-local; a test that drops one must run inside the sandbox transaction so it rolls back.
 
-Grants are database-local while roles are not, so one privilege granted to `employer_role` in *any* database on the cluster makes `DROP ROLE employer_role` fail in every other — including the rollback `PostgresRolesTest` asserts on. `*_grant_zones.exs` deliberately creates no such dependency. The first migration that grants the employer zone real table privileges has to reckon with that test rather than discover it.
+Grants are database-local while roles are not, so one privilege granted to `employer_role` in *any* database on the cluster makes `DROP ROLE employer_role` fail in every other — including the rollback `PostgresRolesTest` asserts on. `*_grant_zones.exs` deliberately creates no such dependency; `*_grant_employer_zone.exs` does, because the employer zone cannot be read without one.
+
+**Consequence, and it will bite you.** `PostgresRolesTest` now rolls `grant_employer_zone` down before it rolls the roles migration down, which is the real order Ecto uses. That fixes *this* database only. If you run `mix ecto.migrate` against `hospitality_coms_dev` (or any other database on the same cluster), its grants make `DROP ROLE employer_role` fail in the test database too, and no connection to the test database can revoke them. `PostgresRolesTest` detects that case and names the offending databases; the fix is to roll `grant_employer_zone` back there, or drop the database.
+
+Grant explicitly, per table, per privilege. `ALTER DEFAULT PRIVILEGES` is the one thing that must never be used: it survives `REVOKE ALL ON TABLE` and is inherited by every table created afterwards, so it would hand `employer_role` person-zone tables that do not exist yet. `boundary_test.exs` asserts `pg_default_acl` names no role at all, with a control that grants one and watches the check catch it.
 
 ## Zones
 
@@ -78,6 +82,30 @@ The sweep asks `has_table_privilege` *and* `has_any_column_privilege`: a column 
 The boundary's proof suite is `test/hospitality_coms/boundary_test.exs`, with `boundary_lifetime_test.exs` holding the parts that cannot be asserted inside the sandbox — there, `EmployerRepo`'s transaction is a savepoint inside the test's own, so a `SET LOCAL` survives its commit and the production lifetime is not reproduced. Measured: with the wrapper writing session-level settings instead, the sandboxed file still passes everything and the non-sandboxed one fails.
 
 `employer_role`'s lack of privilege on `people` is Postgres default-denying as much as it is the `REVOKE`. Every assertion in that suite that could pass for that reason carries a control that fails when it does; keep that property when extending it.
+
+## Employer zone
+
+`venues`, `employer_grants` and `shift_types`, all created by `*_create_venues.exs` and reached only through `HospitalityComs.Venues`.
+
+**No employer-zone table may name a person.** Not `person_id`, not `created_by`, not a foreign key to `people` under any name — `boundary_test.exs` asserts it against `pg_constraint`, and the employer zone being non-empty is what stopped that rule being vacuous. A person creates a venue and no row records which person: `engagements` (U5) is the single bridge and will carry `grant_id` referencing `employer_grants (id, venue_id)`, so the association is made from the person's side. Arrows point *into* the employer zone, never out.
+
+**Venue-to-venue tenancy has a database tier.** `*_enable_employer_zone_row_level_security.exs` puts row-level security on all three tables with one policy each — `USING` and `WITH CHECK`, both on the row's venue equalling `app_current_employer_id()`. Before it, isolation rested entirely on `Venues` pinning `venue_id` by hand, and one `EmployerRepo.update_all(EmployerGrant, ...)` with no filter passed both guards, passed Postgres, and revoked every grant in the database.
+
+It is deliberately **not** `FORCE`d. The tables are owned by the application's login role, so `Repo`, the migrator and the seeds bypass the policies while `employer_role` is bound by them; FORCE would bind the owner too, and the predicate raises wherever `app.employer_id` is unset. Policies are granted to `PUBLIC` rather than `TO employer_role`, so they write no `pg_shdepend` row. This is not KTD3 reversed — KTD3's view-not-RLS decision is about the per-row hidden-entry rule and stands.
+
+**Consequence for rollbacks.** The policies depend on `app_current_employer_id()`, which `grant_zones` drops with `RESTRICT` on purpose. Rolling `grant_zones` back without rolling this migration back first now fails loudly with `dependent_objects_still_exist` — which is that `RESTRICT` doing its job, and `boundary_test.exs` both rolls in the right order and pins the wrong one.
+
+Every employer-zone table other than `venues` carries `venue_id` and a unique index on `(id, venue_id)`, both asserted structurally. The composite index looks redundant next to the primary key and is what makes a composite foreign key possible — without it a later table can only reference `id`, and a row at venue A can point at a row belonging to venue B. `employer_grants.granted_by_grant_id` already uses one; it is `MATCH SIMPLE` rather than `MATCH FULL` because the founding grant has no parent and `venue_id` is `NOT NULL`, so MATCH FULL would reject the one row every venue must have.
+
+`EmployerScope`'s tenancy field is `venue_id`, because that is what it holds: there is no `employers` table and an employer session is scoped to a venue. The Postgres session setting is still `app.employer_id` and the SQL function is still `app_current_employer_id()` — they are literal strings written by a committed migration, and renaming them would be a schema change bought for a nicety.
+
+`EmployerScope` also gained `grant_id`. `for_employer/2` builds a scope with tenancy and no authority — enough for `EmployerRepo` and for U9's per-employer view — and `for_grant/3` builds one with both. Every `Venues` function *other than* `create_venue/2` heads on `grant_id` being a binary, so a grantless scope is refused by function clause, and the grant is then resolved against the database on every call: live at the scope's instant, and belonging to the scope's venue. Nothing caches it. `create_venue/2` is the exception, and heads on a `PersonScope`: the grant it acts under does not exist until it writes it.
+
+`Venues.revoke_grant/2` refuses the venue's last live grant (KTD17, R22) and takes the venue's live grants under `FOR UPDATE`, ordered by `(granted_at, id)`, before counting — the acting grant is resolved out of that locked set rather than by a separate read in front of it. `venues_concurrency_test.exs` is not sandboxed and proves the lock matters: without it, two concurrent revocations of two grants both succeed and orphan the venue.
+
+A survivor only counts if it carries no revocation at all, not merely if it is live at this instant: a grant revoked at 13:00 is live at 12:00, and counting it at 12:00 orphans the venue from 13:00. A grant that already carries a revocation is `{:error, :not_found}` whichever instant asks.
+
+What a grant may revoke is itself and its transitive descendants through `granted_by_grant_id`, walked with a recursive CTE so that a descendant hanging off an already-revoked link is still reachable. Everything else — an ancestor, a peer, another venue's grant, an id that names nothing — is `{:error, :not_found}`, so the refusal enumerates nothing. Revocation is **not** transitive in the other direction: closing a grant leaves the grants it issued live.
 
 ## Authentication
 
