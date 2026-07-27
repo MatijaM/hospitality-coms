@@ -181,7 +181,15 @@ defmodule HospitalityComs.BoundaryTest do
       before = privilege_snapshot()
 
       migrate(:down)
+
+      # The snapshot's `tables` component is `[]` before and `[]` after unless
+      # something puts a privilege in the way of the round trip, so without
+      # this the table half of the comparison was `[] == []` and only the
+      # function half carried any weight — a REVOKE round trip that never
+      # exercised a REVOKE.
+      Repo.query!("GRANT SELECT, INSERT ON people TO employer_role")
       rolled_back = privilege_snapshot()
+      assert {"people", "SELECT"} in rolled_back.tables
 
       capture_log(fn -> migrate(:up) end)
 
@@ -192,10 +200,25 @@ defmodule HospitalityComs.BoundaryTest do
       refute rolled_back == before
     end
 
-    test "leaves the employer role able to execute the scoping functions" do
+    test "creates both scoping functions, callable by the employer role" do
       Enum.each(@scoping_functions, fn function ->
         assert function_privilege(function) == true
       end)
+    end
+
+    test "is not what makes them callable, and the predicate can say so" do
+      # The control the test above needs, and the correction to what its name
+      # used to claim. `has_function_privilege` is true because Postgres grants
+      # EXECUTE on every new function to PUBLIC — not because this migration
+      # granted anything, which it deliberately does not: a grant would put a
+      # row in `pg_shdepend` and make `DROP ROLE employer_role` fail across the
+      # cluster. So the assertion above proves the functions exist. This is
+      # what says the predicate behind it can answer false at all.
+      [function | _rest] = @scoping_functions
+
+      Repo.query!("REVOKE EXECUTE ON FUNCTION #{function} FROM PUBLIC")
+
+      assert function_privilege(function) == false
     end
 
     test "revoked the tables the classification calls the person zone today" do
@@ -224,7 +247,68 @@ defmodule HospitalityComs.BoundaryTest do
       #
       # U4 will have to: the employer zone is unreadable without real grants on
       # real tables. This is the test that tells it so.
-      assert shared_dependencies(Zones.employer_role()) == 0
+      assert shared_dependencies(Zones.employer_role()) == 0,
+             """
+             `employer_role` now has cluster-wide dependencies, so \
+             `DROP ROLE employer_role` will fail — including in \
+             `HospitalityComs.PostgresRolesTest`, which asserts U1's roles \
+             migration rolls back.
+
+             If you are U4 or later and this is your grant, this test has done \
+             its job and the answer is not to delete it. Do this instead:
+
+               1. Change the expected count here to the number of dependencies \
+                  the employer zone's grants actually create, and say in a \
+                  comment which grants they are. A number is still a tripwire; \
+                  zero was only ever the right number while nothing was \
+                  granted.
+               2. Make `PostgresRolesTest`'s rollback revoke them first, or \
+                  narrow it to assert the role is droppable once its grants \
+                  are gone. Rolling U1 back past a database that still grants \
+                  to the role is not a scenario that has to work; discovering \
+                  it at rollback time is.
+
+             Roles are cluster-global and grants are database-local, so one \
+             privilege granted in any database on this cluster is what breaks \
+             the drop in every other one.
+             """
+    end
+  end
+
+  describe "the classification against the database it describes" do
+    test "every table in the database is in a zone" do
+      # `Zones.all_schemas/0` finds Ecto schemas, and totality in
+      # `HospitalityComs.ZonesTest` is total over those. A migration can create
+      # a table with no schema module — a `many_to_many` join table, an audit
+      # log, a backing table for a view — and that table is invisible from
+      # there while being just as much person data. Postgres is asked here
+      # instead of the module list.
+      unclassified = unclassified_tables()
+
+      assert MapSet.to_list(unclassified) == [],
+             """
+             These tables exist in the database and are in no zone: \
+             #{inspect(MapSet.to_list(unclassified))}
+
+             A table with no Ecto schema is invisible to the totality check in \
+             HospitalityComs.ZonesTest. Classify it in HospitalityComs.Zones, \
+             behind a schema if it has rows the application reads and behind \
+             an entry in this test's exclusion list if it is infrastructure.
+             """
+    end
+
+    test "an unclassified table is what the check above would report" do
+      # The control. Rolled back with the sandbox transaction, like every other
+      # DDL in this file.
+      Repo.query!("CREATE TABLE stowaway (id uuid PRIMARY KEY)")
+
+      assert "stowaway" in unclassified_tables()
+    end
+
+    test "the classification names tables the database actually has" do
+      # And the other direction: a zone naming a table nobody migrated would
+      # make the sweep raise, but nothing said so out loud.
+      assert MapSet.subset?(MapSet.new(Zones.classified_tables()), database_tables())
     end
   end
 
@@ -848,6 +932,34 @@ defmodule HospitalityComs.BoundaryTest do
       )
 
     count
+  end
+
+  # Ecto's own bookkeeping. It is not application data and belongs to no zone;
+  # anything else that ends up here needs a reason written next to it.
+  @unzoned_tables ~w(schema_migrations)
+
+  defp unclassified_tables do
+    MapSet.difference(database_tables(), MapSet.new(Zones.classified_tables()))
+  end
+
+  # Every relation in `public` that holds rows: ordinary and partitioned
+  # tables, and materialised views, which are person data if their sources
+  # were. Plain views are excluded — they hold nothing and U9 adds one.
+  defp database_tables do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p', 'm')
+          AND NOT (c.relname = ANY($1::text[]))
+        """,
+        [@unzoned_tables]
+      )
+
+    rows |> Enum.map(&hd/1) |> MapSet.new()
   end
 
   defp tables_referencing_people do

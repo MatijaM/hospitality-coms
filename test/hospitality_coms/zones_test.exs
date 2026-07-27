@@ -89,15 +89,37 @@ defmodule HospitalityComs.ZonesTest do
 
   describe "disjointness" do
     test "no schema sits in two zones" do
-      classified = Zones.classified()
+      overlapping = Zones.overlapping()
 
-      assert length(classified) == classified |> Enum.uniq() |> length()
+      assert overlapping == [],
+             """
+             These schemas are in more than one zone: #{inspect(overlapping)}
+
+             A table in two zones is a table whose grants are argued over \
+             rather than derived. Pick one.
+             """
     end
 
-    test "the zone lists do not overlap" do
-      assert Zones.person_zone() -- Zones.employer_zone() == Zones.person_zone()
-      assert Zones.person_zone() -- Zones.shared() == Zones.person_zone()
-      assert Zones.employer_zone() -- Zones.shared() == Zones.employer_zone()
+    test "a schema in two zones is what the check above would report" do
+      # The control, and the reason this check is not written as
+      # `person_zone() -- employer_zone() == person_zone()`. The employer and
+      # shared lists are empty until U4 and U5, so that spelling is
+      # `[A, B] -- [] == [A, B]` — a comparison that cannot fail, and one whose
+      # vacuity nothing in this file acknowledged.
+      assert Zones.overlapping(person: [Person], employer: [Person]) == [Person]
+      assert Zones.overlapping(person: [Person], employer: [PersonToken]) == []
+
+      assert Zones.overlapping(person: [Person, PersonToken], shared: [PersonToken]) ==
+               [PersonToken]
+    end
+
+    test "no schema is listed twice inside one zone" do
+      # A different defect from the one above, and `overlapping/1` deliberately
+      # does not conflate them: a schema written twice in one list is one
+      # placement typed twice, not two zones disagreeing. It is still worth
+      # catching, and this is what catches it.
+      assert Zones.overlapping(person: [Person, Person]) == []
+      assert Zones.classified() == Enum.uniq(Zones.classified())
     end
   end
 

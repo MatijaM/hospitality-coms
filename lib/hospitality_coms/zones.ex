@@ -156,6 +156,28 @@ defmodule HospitalityComs.Zones do
     Enum.find_value(zones(), {:error, :unclassified}, &placed_in(&1, schema))
   end
 
+  @doc """
+  Schemas that sit in more than one zone.
+
+  An empty list is the classification being unambiguous — a table in two zones
+  is a table whose grants are argued over rather than derived.
+
+  Takes the zone lists for the same reason `unclassified/1` does. Two of the
+  three are empty until U4 and U5 fill them, so the obvious spelling of this
+  check is `person_zone() -- employer_zone() == person_zone()`, which is
+  `[A, B] -- [] == [A, B]` and cannot fail. Handing the lists in is what lets
+  the test that asserts the classification is clean and the test that watches
+  the check catch something run the same code.
+  """
+  @spec overlapping([{zone(), [module()]}]) :: [module()]
+  def overlapping(zone_lists \\ zones()) do
+    zone_lists
+    |> Enum.flat_map(fn {_zone, schemas} -> Enum.uniq(schemas) end)
+    |> Enum.frequencies()
+    |> Enum.filter(fn {_schema, placements} -> placements > 1 end)
+    |> Enum.map(fn {schema, _placements} -> schema end)
+  end
+
   @spec placed_in({zone(), [module()]}, module()) :: {:ok, zone()} | nil
   defp placed_in({zone, schemas}, schema) do
     schema |> Kernel.in(schemas) |> placement(zone)
@@ -210,6 +232,23 @@ defmodule HospitalityComs.Zones do
   """
   @spec employer_zone_tables() :: [String.t()]
   def employer_zone_tables, do: tables(@employer_zone)
+
+  @doc """
+  The table names of the shared zone.
+  """
+  @spec shared_tables() :: [String.t()]
+  def shared_tables, do: tables(@shared)
+
+  @doc """
+  Every table name any zone claims.
+
+  What the classification says the database contains. The proof suite compares
+  it against what the database actually contains, because a table created by a
+  migration with no schema module is invisible to `all_schemas/0` and just as
+  much person data.
+  """
+  @spec classified_tables() :: [String.t()]
+  def classified_tables, do: tables(classified())
 
   @doc """
   Whether the named table belongs to the person zone.
