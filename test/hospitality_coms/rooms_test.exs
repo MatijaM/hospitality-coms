@@ -488,6 +488,37 @@ defmodule HospitalityComs.RoomsTest do
       assert {:ok, []} = Rooms.list_shift_room_readers(at_mid_shift, room.id)
     end
 
+    test "a roster period opened and closed inside one second is a period, not an empty range" do
+      # The consequence of truncating a roster bound, stated where it is
+      # observable. Rostered at 1.2s past the room's opening and removed at
+      # 1.8s, this person was demonstrably in the room; truncating both bounds
+      # made the period `[t, t)`, which overlaps nothing, so the six hundred
+      # milliseconds they were in it were unmade by the removal that ended them.
+      #
+      # KTD6b's claim is that no write can shorten an overlap that has already
+      # happened. A floored upper bound is a write that does.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+      room = shift_room(employer)
+
+      joined_at = DateTime.add(@shift_starts, 1_200, :millisecond)
+      left_at = DateTime.add(@shift_starts, 1_800, :millisecond)
+
+      roster_entry_fixture(employer_at(employer, joined_at), room, engagement.id)
+
+      assert {:ok, entry} =
+               Rosters.remove_from_roster(employer_at(employer, left_at), room.id, engagement.id)
+
+      assert entry.joined_at == joined_at
+      assert entry.left_at == left_at
+
+      after_close = DateTime.add(@grace_closes, 1, :hour)
+
+      assert Rooms.shift_room_readable?(person_at(person, after_close), room.id)
+
+      assert {:ok, [_reader]} =
+               Rooms.list_shift_room_readers(employer_at(employer, after_close), room.id)
+    end
+
     test "a person outside the overlap set cannot read the closed room, active engagement or not" do
       # KTD14's snapshot scope. The colleague is engaged at the venue for the
       # whole period and was never rostered on this shift.

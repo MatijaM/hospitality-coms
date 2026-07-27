@@ -44,6 +44,12 @@ defmodule HospitalityComs.RostersTest do
   @an_hour_on DateTime.add(@now, 1, :hour)
   @two_hours_on DateTime.add(@now, 2, :hour)
 
+  # Two instants inside one second. Every other instant in this unit's tests is
+  # a whole second, where truncation is the identity — which is exactly why a
+  # bound that truncated went unnoticed.
+  @joined_mid_second DateTime.add(@now, 1_200, :millisecond)
+  @left_mid_second DateTime.add(@now, 1_800, :millisecond)
+
   setup do
     real_connections()
   end
@@ -59,7 +65,7 @@ defmodule HospitalityComs.RostersTest do
       assert {:ok, %RosterEntry{} = entry} =
                Rosters.add_to_roster(employer, room.id, engagement.id)
 
-      assert entry.joined_at == DateTime.truncate(@now, :second)
+      assert entry.joined_at == @now
       assert is_nil(entry.left_at)
       assert entry.venue_id == employer.venue_id
       assert entry.shift_room_id == room.id
@@ -124,6 +130,36 @@ defmodule HospitalityComs.RostersTest do
       refute reopened.id == closed.id
     end
 
+    test "stamps both bounds at the instant they happened, microseconds included" do
+      # `DateTime.truncate(now, :second)` floored `joined_at` and `left_at`, and
+      # `timestamp(0)` underneath *rounded* them, so the two tiers did not even
+      # agree on which second a bound belonged to. Flooring `left_at` closes a
+      # period before the removal happened and erases up to a second of elapsed
+      # membership; flooring `joined_at` backdates the rostering by as much.
+      #
+      # Both bounds are the instant the call carried, exactly.
+      %{employer: employer, engagement: engagement} = engaged()
+      room = shift_room(employer)
+
+      entry = roster_entry_fixture(employer_at(employer, @joined_mid_second), room, engagement.id)
+
+      assert entry.joined_at == @joined_mid_second
+
+      assert {:ok, closed} =
+               Rosters.remove_from_roster(
+                 employer_at(employer, @left_mid_second),
+                 room.id,
+                 engagement.id
+               )
+
+      assert closed.left_at == @left_mid_second
+      assert Repo.get(RosterEntry, entry.id).left_at == @left_mid_second
+
+      # Six hundred milliseconds is a period. Truncated, it was `[t, t)` — the
+      # empty range, which overlaps nothing.
+      assert DateTime.compare(closed.left_at, closed.joined_at) == :gt
+    end
+
     test "refuses an engagement at another venue" do
       %{employer: employer} = engaged()
       %{engagement: elsewhere} = engaged()
@@ -182,7 +218,7 @@ defmodule HospitalityComs.RostersTest do
                )
 
       assert closed.id == entry.id
-      assert closed.left_at == DateTime.truncate(@an_hour_on, :second)
+      assert closed.left_at == @an_hour_on
       assert closed.joined_at == entry.joined_at
       assert Repo.get(RosterEntry, entry.id).left_at == closed.left_at
     end

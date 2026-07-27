@@ -46,6 +46,22 @@ defmodule HospitalityComs.Rooms.VenueRoomSuspension do
   person was never out, and they may suspend again over the same instant because
   an empty range overlaps nothing.
 
+  ## Both bounds are whole seconds, and `roster_entries` bounds are not
+
+  A deliberate asymmetry rather than an inconsistency.
+  `HospitalityComs.Rosters.RosterEntry` carries microsecond bounds because
+  flooring its upper bound *erases elapsed membership* — an overlap that already
+  happened stops having happened, which KTD6b says no write may do.
+
+  Nothing here has that shape. Flooring `suspended_at` starts the person's own
+  absence up to a second before they asked for it, and flooring `resumed_at`
+  ends it up to a second early; both are the person's own choice, moving in the
+  person's own favour, and neither changes an answer anybody else receives.
+  Nothing is derived from a suspension at a past instant either — every read
+  asks about the scope's `now`. So these stay `timestamp(0)` with the rest of
+  the schema, and the one place that needed more precision is the one place that
+  has it.
+
   ## Suspension does not reach shift rooms
 
   KTD18 says the venue room only, and this module cannot reach further even if a

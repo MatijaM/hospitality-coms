@@ -31,6 +31,29 @@ defmodule HospitalityComs.Rosters.RosterEntry do
   lets an entry added mid-shift overlap the rest of the room's open interval
   without anybody deciding what its upper bound should be.
 
+  ## Both bounds carry microseconds, and neither is truncated
+
+  `:utc_datetime_usec` over `timestamp(6)`, alone among this schema's instant
+  columns. A bound rounded to the second is a bound that moves when it is
+  written, and each direction breaks something the design claims:
+
+    * flooring `joined_at` backdates the rostering by up to a second, which is a
+      retroactive grant of the exact kind the period was chosen to make
+      unrepresentable;
+    * flooring `left_at` closes the period *before* the removal happened, which
+      shortens an overlap that has already elapsed — and "no write can do that"
+      is the whole of the paragraph above.
+
+  Dropping the truncation on its own would not have been enough. The columns
+  were `timestamp(0)`, which **rounds**: a removal at `12:00:01.8` would have
+  landed as `12:00:02`, a bound in the future of the call rather than the past
+  of it. The column type and the changeset had to move together, and
+  `*_create_roster_entries.exs` moved the first.
+
+  `inserted_at` and `updated_at` are still whole seconds — they are bookkeeping,
+  and no predicate reads them — so they are the one thing here that is still
+  truncated.
+
   ## Two overlapping periods on one shift are a database error
 
   `roster_entries_no_overlap` is an `EXCLUDE USING gist (shift_room_id WITH =,
@@ -65,8 +88,8 @@ defmodule HospitalityComs.Rosters.RosterEntry do
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "roster_entries" do
-    field :joined_at, :utc_datetime
-    field :left_at, :utc_datetime
+    field :joined_at, :utc_datetime_usec
+    field :left_at, :utc_datetime_usec
 
     belongs_to :venue, Venue
     belongs_to :shift_room, ShiftRoom
@@ -108,6 +131,11 @@ defmodule HospitalityComs.Rosters.RosterEntry do
   `HospitalityComs.Rosters` resolved against the database inside the same
   transaction, so there is no attribute a caller could pass that would move the
   entry to another venue or backdate its lower bound.
+
+  `joined_at` is `now` exactly. Truncating it to the second would backdate the
+  rostering by up to a second, which is the one thing a lower bound may never
+  do; `inserted_at` and `updated_at` are truncated because their column is
+  `timestamp(0)` and nothing reads them.
   """
   @spec join_changeset(ShiftRoom.t(), Engagement.t(), DateTime.t()) :: Ecto.Changeset.t(t())
   def join_changeset(%ShiftRoom{} = room, %Engagement{} = engagement, %DateTime{} = now) do
@@ -118,7 +146,7 @@ defmodule HospitalityComs.Rosters.RosterEntry do
       venue_id: room.venue_id,
       shift_room_id: room.id,
       engagement_id: engagement.id,
-      joined_at: stamped_at,
+      joined_at: now,
       inserted_at: stamped_at,
       updated_at: stamped_at
     )
@@ -129,24 +157,34 @@ defmodule HospitalityComs.Rosters.RosterEntry do
   Closes an open entry at `now`.
 
   The one mutation a roster entry has, and it moves the upper bound only. It
-  closes at the later of `now` and the entry's own `joined_at`, which for an
-  entry rostered in the future is its opening — `[a, a)`, the empty range,
-  overlapping nothing. `ends_at < starts_at` is unrepresentable and this is the
-  same widening `HospitalityComs.Engagements.end_engagement/2` makes for the
-  same reason: a rostering made in error must be undoable without leaving a
-  period nobody can free.
+  closes at `closing_instant/2` — `now` exactly, or the entry's own `joined_at`
+  where that is later, which for an entry rostered in the future is its opening
+  and therefore `[a, a)`, the empty range, overlapping nothing.
+  `ends_at < starts_at` is unrepresentable and this is the same widening
+  `HospitalityComs.Engagements.end_engagement/2` makes for the same reason: a
+  rostering made in error must be undoable without leaving a period nobody can
+  free.
   """
   @spec leave_changeset(t(), DateTime.t()) :: Ecto.Changeset.t(t())
   def leave_changeset(%__MODULE__{} = entry, %DateTime{} = now) do
-    stamped_at = DateTime.truncate(now, :second)
-
     entry
-    |> change(left_at: closing_instant(entry, stamped_at), updated_at: stamped_at)
+    |> change(
+      left_at: closing_instant(entry, now),
+      updated_at: DateTime.truncate(now, :second)
+    )
     |> declare_constraints()
   end
 
+  @doc """
+  The instant an open entry closes at: `now`, widened to `joined_at` where the
+  entry has not begun.
+
+  Not truncated. A floored upper bound closes the period before the removal
+  happened, and the part of a period that has already elapsed is the one thing
+  no write here may shorten.
+  """
   @spec closing_instant(t(), DateTime.t()) :: DateTime.t()
-  defp closing_instant(%__MODULE__{joined_at: joined_at}, now) do
+  def closing_instant(%__MODULE__{joined_at: joined_at}, %DateTime{} = now) do
     joined_at |> DateTime.compare(now) |> later_of(joined_at, now)
   end
 

@@ -37,6 +37,34 @@ defmodule HospitalityComs.Repo.Migrations.CreateRosterEntries do
   is not an engagement (R2's "no open-ended form" is about engagements), and the
   interval that bounds it is the shift's, which is fixed.
 
+  ## Both bounds are microsecond columns, and that is not tidiness
+
+  `timestamp(6)` rather than the `timestamp(0)` every other instant column in
+  this schema uses, and `HospitalityComs.Rosters.RosterEntry` stamps them
+  without truncating. A whole-second bound is a bound that *moves* when it is
+  written, and both directions are wrong:
+
+    * `joined_at` floored is a rostering backdated by up to a second — a
+      retroactive grant of exactly the kind KTD6b's structure exists to make
+      unrepresentable;
+    * `left_at` floored closes a period *before* the removal happened, which
+      shortens an overlap that has already elapsed. KTD6b's claim is that no
+      write can do that. A floored upper bound is a write that does.
+
+  The column type is half of the fix and not a detail of it. `timestamp(0)`
+  **rounds** where Ecto's `:utc_datetime` truncates, so dropping the truncation
+  in the changeset alone would have moved a removal at `12:00:01.8` to
+  `12:00:02` — a bound in the *future* of the call, which is the same class of
+  wrong answer in the other direction. The columns a period is generated from
+  are the one place in this schema where a second of slop is a wrong answer
+  rather than a rounded one, so they carry the precision the application has.
+
+  `inserted_at` and `updated_at` stay whole seconds. They are bookkeeping; no
+  predicate reads them.
+
+  A shift room's own term stays whole seconds too, and deliberately: it is a
+  time a human published, not an instant a call happened at.
+
   `joined_at` is the instant the rostering happened, not the shift's start. That
   is what makes "rostered on Monday for Friday's shift, removed on Tuesday" a
   period that ends before the room ever opens — no overlap, so the person never
@@ -98,11 +126,14 @@ defmodule HospitalityComs.Repo.Migrations.CreateRosterEntries do
       # The bridge, not the person. See the moduledoc.
       add :engagement_id, :binary_id, null: false
 
-      add :joined_at, :utc_datetime, null: false
+      # Microseconds, unlike every other instant column in this schema. See the
+      # moduledoc: a bound that only stores whole seconds is a bound that moves
+      # when it is written.
+      add :joined_at, :utc_datetime_usec, null: false
 
       # Null while the person is still rostered. Removal sets it; nothing
       # deletes the row, which is the whole of KTD6b.
-      add :left_at, :utc_datetime
+      add :left_at, :utc_datetime_usec
 
       timestamps(type: :utc_datetime)
     end
