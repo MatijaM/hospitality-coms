@@ -83,6 +83,34 @@ defmodule HospitalityComs.Engagements.Records do
   end
 
   @doc """
+  Engagements whose term has *not* closed by `instant`.
+
+  The exact complement of `ended_by/2`, and wider than `active_at/2` by one
+  state: an engagement that has been claimed and has not started yet is in this
+  set and not in that one. `HospitalityComs.Engagements.end_engagement/2` is
+  the only caller that wants the wider set, because a term it can still move is
+  a term it can still close.
+  """
+  @spec not_ended_by(Ecto.Queryable.t(), DateTime.t()) :: Ecto.Query.t()
+  def not_ended_by(queryable, %DateTime{} = instant) do
+    from engagement in queryable, where: engagement.ends_at > ^instant
+  end
+
+  @doc """
+  Engagements whose term closed in the half-open window `(since, instant]`.
+
+  The lower bound is what makes an unattended sweep able to keep up.
+  `ended_by/2` alone grows without limit, so a bounded sweep over it examines
+  the same oldest rows for ever and never reaches a term that closed this
+  morning. Half-open on the same side as every other period here, so two
+  consecutive windows neither overlap nor leave a gap.
+  """
+  @spec ended_between(Ecto.Queryable.t(), DateTime.t(), DateTime.t()) :: Ecto.Query.t()
+  def ended_between(queryable, %DateTime{} = since, %DateTime{} = instant) do
+    queryable |> ended_by(instant) |> not_ended_by(since)
+  end
+
+  @doc """
   Engagements at one venue.
   """
   @spec of_venue(Ecto.Queryable.t(), Ecto.UUID.t()) :: Ecto.Query.t()
@@ -128,6 +156,21 @@ defmodule HospitalityComs.Engagements.Records do
   @spec oldest_first(Ecto.Queryable.t()) :: Ecto.Query.t()
   def oldest_first(queryable) do
     from engagement in queryable, order_by: [asc: engagement.starts_at, asc: engagement.id]
+  end
+
+  @doc """
+  Most recently closed term first, with `id` breaking ties.
+
+  Ordered by the column `ended_between/3` filters on, and in the direction that
+  makes a bounded sweep converge: a limit applied to *oldest* first pins the
+  sweep to the same rows for ever once more than a batch of terms have closed,
+  so it keeps running, keeps reporting success, and never reaches a term that
+  closed this morning. `oldest_first/1` stays the order for reads that want
+  term order.
+  """
+  @spec newest_ended_first(Ecto.Queryable.t()) :: Ecto.Query.t()
+  def newest_ended_first(queryable) do
+    from engagement in queryable, order_by: [desc: engagement.ends_at, asc: engagement.id]
   end
 
   @doc """

@@ -284,9 +284,19 @@ defmodule HospitalityComs.Repo.Migrations.CreateEngagements do
     create index(:engagements, [:venue_id])
     create index(:engagements, [:person_id])
 
-    # The sweeper asks one question — which of this venue's engagements have
-    # ended — and this is the column pair it asks it on.
-    create index(:engagements, [:venue_id, :ends_at])
+    # The sweeper's index, and it is deliberately not led by `venue_id`.
+    #
+    # The sweep is the application acting for itself: it is scoped to no venue
+    # at all, and asks `ends_at > since AND ends_at <= now ORDER BY ends_at
+    # DESC, id ASC LIMIT n`. A `(venue_id, ends_at)` index cannot serve that —
+    # the leading column is unconstrained — so the index that used to be here
+    # was named for a query it could never have been used by. `(ends_at, id)`
+    # matches the filter and the order both, and the ordering makes the limit a
+    # window rather than a floor.
+    #
+    # The employer's own reads are covered by `[:venue_id]` above, which the
+    # row-level security predicate also leans on.
+    create index(:engagements, [:ends_at, :id])
 
     execute(
       """

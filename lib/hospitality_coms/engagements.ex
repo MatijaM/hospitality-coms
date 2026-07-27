@@ -653,21 +653,35 @@ defmodule HospitalityComs.Engagements do
   ## Expiry, which writes nothing
 
   @doc """
-  Engagements whose term closed at or before `instant`, oldest first.
+  Engagements whose term closed in `(since, instant]`, most recently first.
 
   What `HospitalityComs.Workers.EngagementSweeper` sweeps. Unscoped by venue —
   the sweeper is the application acting for itself rather than for an employer,
   so it runs through `HospitalityComs.Repo` and sees every venue, which is
   exactly what no employer session may do.
 
-  Bounded by `limit`, because an unattended query over a growing table is a
-  query that eventually stops finishing.
+  Bounded three ways, and each bound answers something different:
+
+    * `limit`, because an unattended query over a growing table is a query that
+      eventually stops finishing;
+    * `since`, because a limit on its own is worse than no limit. `ends_at <=
+      instant` matches every term that ever closed, so once more than a batch of
+      them have, a limited sweep examines the same oldest rows for ever and
+      never reaches a term that closed this morning — while continuing to run
+      and to report success;
+    * the ordering, which is on the column being filtered and runs from the
+      newest closure back, so the rows a sweep is most likely to owe an
+      announcement are the ones inside the limit.
+
+  The caller chooses `since`; `HospitalityComs.Workers.EngagementSweeper` is
+  where the lookback and the assumption behind it are written down.
   """
-  @spec list_expired(DateTime.t(), pos_integer()) :: [Engagement.t()]
-  def list_expired(%DateTime{} = instant, limit) when is_integer(limit) and limit > 0 do
+  @spec list_expired(DateTime.t(), DateTime.t(), pos_integer()) :: [Engagement.t()]
+  def list_expired(%DateTime{} = instant, %DateTime{} = since, limit)
+      when is_integer(limit) and limit > 0 do
     Engagement
-    |> Records.ended_by(instant)
-    |> Records.oldest_first()
+    |> Records.ended_between(since, instant)
+    |> Records.newest_ended_first()
     |> limit(^limit)
     |> Repo.all()
   end

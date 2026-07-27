@@ -55,6 +55,7 @@ defmodule HospitalityComs.Workers.EngagementSweeperTest do
   alias HospitalityComs.Clock
   alias HospitalityComs.Engagements
   alias HospitalityComs.Engagements.Engagement
+  alias HospitalityComs.Engagements.Invitation
   alias HospitalityComs.Repo
   alias HospitalityComs.Workers.EngagementSweeper
   alias HospitalityComs.Workers.ExpireEngagement
@@ -62,7 +63,17 @@ defmodule HospitalityComs.Workers.EngagementSweeperTest do
   @now ~U[2026-03-01 12:00:00.000000Z]
   @in_a_month DateTime.add(@now, 30, :day)
   @in_two_months DateTime.add(@now, 60, :day)
-  @after_expiry DateTime.add(@in_a_month, 1, :day)
+
+  # Inside the sweep's lookback window rather than merely after the term, which
+  # are different things now that the window has a lower edge. An instant a day
+  # and a half past the upper bound is past expiry *and* past the window, and a
+  # test that used one would be asserting the lookback while claiming to assert
+  # the sweep.
+  @after_expiry DateTime.add(@in_a_month, 1, :hour)
+
+  # After every term `ended_engagements/4` writes and well inside the lookback,
+  # so the whole batch is in one window.
+  @sweep_at DateTime.add(@now, 12, :hour)
 
   setup do
     real_connections()
@@ -216,7 +227,7 @@ defmodule HospitalityComs.Workers.EngagementSweeperTest do
       # One announcement so far, for the term the claim scheduled against.
       assert bounds_announced_for(engagement) == [DateTime.to_iso8601(engagement.ends_at)]
 
-      Clock.Offset.set(DateTime.add(@in_two_months, 1, :day))
+      Clock.Offset.set(DateTime.add(@in_two_months, 1, :hour))
       assert {:ok, %{enqueued: enqueued}} = perform_job(EngagementSweeper, %{})
 
       assert enqueued >= 1
@@ -246,6 +257,120 @@ defmodule HospitalityComs.Workers.EngagementSweeperTest do
       assert {:ok, _swept} = perform_job(EngagementSweeper, %{})
 
       assert reloaded(engagement) == engagement
+    end
+
+    test "enqueues again once the announcement it made was discarded" do
+      # The trap the uniqueness rule used to set for itself. Spanning *every*
+      # job state means a job that exhausted its attempts and reached
+      # `:discarded` suppresses its own replacement for ever — and suppresses
+      # the sweeper's identical insert too, so the backstop cannot substitute
+      # for the mechanism it exists to back up.
+      #
+      # `discard_scheduled_jobs/0` deletes, which is a purge rather than a
+      # failure; this leaves the row where a failed job leaves it.
+      engagement = expired_engagement()
+      move_announcements_to("discarded")
+
+      Clock.Offset.set(@after_expiry)
+      assert {:ok, %{enqueued: 1}} = perform_job(EngagementSweeper, %{})
+
+      # `all_enqueued/1` only sees runnable states, so this counts the
+      # replacement and not the job it replaced.
+      assert length(announcements_for(engagement)) == 1
+    end
+
+    test "enqueues again once the announcement it made was cancelled" do
+      engagement = expired_engagement()
+      move_announcements_to("cancelled")
+
+      Clock.Offset.set(@after_expiry)
+      assert {:ok, %{enqueued: 1}} = perform_job(EngagementSweeper, %{})
+      assert length(announcements_for(engagement)) == 1
+    end
+
+    test "adds nothing once the announcement it made has completed" do
+      # The control for the two above, and the reason the uniqueness states are
+      # "every state except the terminal failures" rather than Oban's
+      # `:incomplete`. Under `:incomplete` a *completed* announcement stops
+      # suppressing too, and every expired engagement inside the sweep's window
+      # is re-announced on every five-minute tick.
+      engagement = expired_engagement()
+      move_announcements_to("completed")
+
+      Clock.Offset.set(@after_expiry)
+      assert {:ok, %{enqueued: 0}} = perform_job(EngagementSweeper, %{})
+      assert announcements_for(engagement) == []
+    end
+
+    test "reports an insert it could not make separately from one it did not need" do
+      # `conflict?` and `{:error, changeset}` used to collapse into the same
+      # `false`, so a sweep whose every insert failed reported the same
+      # `enqueued: 0` as a sweep that had nothing to do.
+      engagement = expired_engagement()
+
+      Clock.Offset.set(@after_expiry)
+      assert {:ok, tally} = perform_job(EngagementSweeper, %{})
+
+      assert tally.swept == 1
+      assert tally.enqueued == 0
+      assert tally.suppressed == 1
+      assert tally.failed == 0
+      assert length(announcements_for(engagement)) == 1
+    end
+  end
+
+  describe "the sweep's window" do
+    test "reaches terms that closed after a whole batch of older ones" do
+      # The stall. Ordered oldest-first under a limit, the sweep examines the
+      # same `batch_size/0` rows on every tick once that many terms have ever
+      # closed, and never reaches one that closed this morning — while
+      # continuing to run and to report success.
+      %{venue: venue, grant: grant} = venue_fixture(@now)
+      person = person_fixture(@now)
+      count = EngagementSweeper.batch_size() + 1
+
+      ids = ended_engagements(venue, grant, person, count)
+      newest = List.last(ids)
+
+      swept =
+        Engagements.list_expired(
+          @sweep_at,
+          EngagementSweeper.lookback_from(@sweep_at),
+          EngagementSweeper.batch_size()
+        )
+
+      assert length(swept) == EngagementSweeper.batch_size()
+      assert newest in Enum.map(swept, & &1.id)
+    end
+
+    test "leaves out a term that closed before the window opened" do
+      # The other half of the bound. A window with no lower edge is the
+      # unbounded scan the limit was supposed to replace.
+      %{venue: venue, grant: grant} = venue_fixture(@now)
+      person = person_fixture(@now)
+
+      [ancient, recent] = ended_engagements(venue, grant, person, 2)
+
+      since = DateTime.add(@now, 60, :second)
+      swept = @sweep_at |> Engagements.list_expired(since, 10) |> Enum.map(& &1.id)
+
+      assert recent in swept
+      refute ancient in swept
+    end
+
+    test "sweeps nothing at all once every term is older than the lookback" do
+      engagement = expired_engagement()
+      discard_scheduled_jobs()
+
+      Clock.Offset.set(DateTime.add(@in_a_month, 2, :day))
+      assert {:ok, %{swept: 0, enqueued: 0}} = perform_job(EngagementSweeper, %{})
+
+      assert announcements_for(engagement) == []
+
+      # The control: a day earlier the same term is inside the window, so the
+      # silence above is the lookback rather than the sweep being broken.
+      Clock.Offset.set(@after_expiry)
+      assert {:ok, %{swept: 1, enqueued: 1}} = perform_job(EngagementSweeper, %{})
     end
   end
 
@@ -291,6 +416,78 @@ defmodule HospitalityComs.Workers.EngagementSweeperTest do
   # sweeper has to lose it first.
   defp discard_scheduled_jobs do
     Repo.query!("DELETE FROM oban_jobs WHERE worker = $1", [inspect(ExpireEngagement)])
+  end
+
+  # Deleting a job is a purge and not a failure, so it proves the backstop only
+  # against a row that is gone. These are the states a job actually reaches:
+  # `discarded` when it exhausts its attempts, `cancelled` when somebody stops
+  # it, `completed` when it worked. The uniqueness rule has to treat the first
+  # two differently from the third and nothing said so until now.
+  defp move_announcements_to(state) do
+    Repo.query!(
+      "UPDATE oban_jobs SET state = $1, completed_at = now() WHERE worker = $2",
+      [state, inspect(ExpireEngagement)]
+    )
+  end
+
+  # `count` engagements whose terms have all closed, packed a minute apart so
+  # that more than a whole batch of them fits inside the sweep's lookback.
+  #
+  # Written with two `insert_all`s rather than `count` claims: the exclusion
+  # constraint keys on `(person_id, venue_id, period)` and these terms do not
+  # overlap, so one person at one venue is enough, and 501 claims through the
+  # context would be 501 transactions to prove one ordering.
+  defp ended_engagements(venue, grant, person, count) do
+    stamped_at = DateTime.truncate(@now, :second)
+
+    terms =
+      Enum.map(0..(count - 1), fn index ->
+        starts_at = DateTime.add(stamped_at, index * 60, :second)
+
+        %{
+          id: Ecto.UUID.generate(),
+          invitation_id: Ecto.UUID.generate(),
+          starts_at: starts_at,
+          ends_at: DateTime.add(starts_at, 30, :second)
+        }
+      end)
+
+    Repo.insert_all(Invitation, Enum.map(terms, &invitation_row(&1, venue, grant, stamped_at)))
+    Repo.insert_all(Engagement, Enum.map(terms, &engagement_row(&1, venue, person, stamped_at)))
+
+    Enum.map(terms, & &1.id)
+  end
+
+  defp invitation_row(term, venue, grant, stamped_at) do
+    %{
+      id: term.invitation_id,
+      venue_id: venue.id,
+      issued_by_grant_id: grant.id,
+      role_label: "Bartender",
+      starts_at: term.starts_at,
+      ends_at: term.ends_at,
+      claim_code_digest: :crypto.strong_rand_bytes(32),
+      code_expires_at: DateTime.add(stamped_at, 1, :day),
+      issued_at: stamped_at,
+      inserted_at: stamped_at,
+      updated_at: stamped_at
+    }
+  end
+
+  defp engagement_row(term, venue, person, stamped_at) do
+    %{
+      id: term.id,
+      person_id: person.id,
+      venue_id: venue.id,
+      invitation_id: term.invitation_id,
+      role_label: "Bartender",
+      starts_at: term.starts_at,
+      ends_at: term.ends_at,
+      accepted_at: stamped_at,
+      lock_version: 0,
+      inserted_at: stamped_at,
+      updated_at: stamped_at
+    }
   end
 
   defp reloaded(%Engagement{id: id}), do: Repo.one!(from e in Engagement, where: e.id == ^id)

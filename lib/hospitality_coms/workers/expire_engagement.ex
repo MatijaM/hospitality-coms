@@ -42,20 +42,45 @@ defmodule HospitalityComs.Workers.ExpireEngagement do
   one under the uniqueness below, while two sweeps over the same unrenewed
   engagement do collide and produce one revocation rather than two.
 
-  ## Uniqueness is total, deliberately
+  ## Uniqueness spans every state except the two terminal failures
 
-  Every state, `period: :infinity`. One revocation per engagement per upper
-  bound, for the life of the queue. `HospitalityComs.Engagements.claim_invitation/2`
-  schedules the job at the term's upper bound inside the claim's transaction;
+  One revocation per engagement per upper bound, for as long as the queue
+  remembers the job. `HospitalityComs.Engagements.claim_invitation/2` schedules
+  it at the term's upper bound inside the claim's transaction;
   `HospitalityComs.Workers.EngagementSweeper` is the backstop for the case where
   that job was lost, and it inserts the same args on purpose so that the
   ordinary case costs nothing.
+
+  `:discarded` and `:cancelled` are excluded, and that exclusion is the whole
+  point of writing the list out. Spanning *every* state — which is what
+  `Oban.Job.states()` does — means a job that exhausted its attempts suppresses
+  its own replacement for ever, and suppresses the sweeper's identical insert
+  too, so the backstop cannot substitute for the mechanism it exists to back up.
+  A permanent failure became a permanent silence.
+
+  `:completed` is deliberately *kept*, which is where this parts company with
+  Oban's `:incomplete` shorthand. Under `:incomplete` a finished announcement
+  stops suppressing as well, and the sweeper re-announces every expiry inside
+  its lookback window on every five-minute tick. The rule wanted is "do not
+  repeat work that succeeded, do repeat work that failed", and that is this list
+  rather than either shorthand.
+
+  `period: :infinity` means the rule is bounded by retention rather than by a
+  clock, and `Oban.Plugins.Pruner` in `config/config.exs` is what makes that a
+  bound at all. A pruned announcement can be re-enqueued and re-broadcast once;
+  running twice is harmless, which is the property in the first section.
   """
+
+  # Every state a job can reach except the two it reaches by failing. Written as
+  # a subtraction from Oban's own list rather than as five literals: Oban
+  # validates at compile time that the set covers every `:incomplete` state, and
+  # a literal list is one Oban release away from silently missing one.
+  @unique_states Oban.Job.states() -- [:discarded, :cancelled]
 
   use Oban.Worker,
     queue: :engagements,
     max_attempts: 3,
-    unique: [fields: [:worker, :args], states: Oban.Job.states(), period: :infinity]
+    unique: [fields: [:worker, :args], states: @unique_states, period: :infinity]
 
   alias HospitalityComs.Clock
   alias HospitalityComs.Engagements
