@@ -12,7 +12,7 @@ import Config
 config :hospitality_coms, :scopes,
   person: [
     default: true,
-    module: HospitalityComs.Accounts.Scope,
+    module: HospitalityComs.Accounts.PersonScope,
     assign_key: :current_scope,
     access_path: [:person, :id],
     schema_key: :person_id,
