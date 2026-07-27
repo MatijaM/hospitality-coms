@@ -573,6 +573,40 @@ defmodule HospitalityComs.RoomsTest do
       assert {:error, :not_found} =
                Rooms.send_shift_room_message(person, Ecto.UUID.generate(), "hi")
     end
+
+    test "answers not-found about another venue's room, whether it is open or shut" do
+      # AE1's rule at the one place a caller supplies the id. `:room_closed` and
+      # `:not_rostered` are both statements that the named room exists, so
+      # answering either about an arbitrary id would enumerate every venue's
+      # shifts one probe at a time. The control is the pair of tests above: the
+      # same two answers *are* given about this person's own venue.
+      %{person: person} = engaged()
+      %{employer: other} = engaged()
+      elsewhere = shift_room(other)
+
+      open = person_at(person, @shift_starts)
+      shut = person_at(person, DateTime.add(@grace_closes, 1, :hour))
+
+      assert {:error, :not_found} = Rooms.send_shift_room_message(open, elsewhere.id, "hi")
+      assert {:error, :not_found} = Rooms.send_shift_room_message(shut, elsewhere.id, "hi")
+
+      # Same instants, this person's own venue: the answers are the informative
+      # ones, so the assertion above is about the venue and not about the clock.
+      %{employer: employer, engagement: engagement} = engaged()
+      mine = shift_room(employer)
+      roster_entry_fixture(employer, mine, engagement.id)
+      %{person: colleague} = engaged_at(employer)
+
+      assert {:error, :not_rostered} =
+               Rooms.send_shift_room_message(person_at(colleague, @shift_starts), mine.id, "hi")
+
+      assert {:error, :room_closed} =
+               Rooms.send_shift_room_message(
+                 person_at(colleague, DateTime.add(@grace_closes, 1, :hour)),
+                 mine.id,
+                 "hi"
+               )
+    end
   end
 
   ## History

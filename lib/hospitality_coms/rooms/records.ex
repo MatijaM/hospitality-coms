@@ -123,6 +123,33 @@ defmodule HospitalityComs.Rooms.Records do
   end
 
   @doc """
+  Shift rooms at a venue where this person holds an engagement active at
+  `instant`.
+
+  The refusal boundary for every person-scoped read of a room by id. Without it
+  the three answers a send can give — no such room, the room is shut, you are
+  not on its roster — enumerate the shift rooms of every venue in the database
+  one id at a time, which is the not-found-rather-than-forbidden rule (AE1) lost
+  at the one place a caller supplies the id.
+
+  Inside it the answers are safe: a person engaged at a venue may know that
+  venue runs shifts. Outside it every id is `:not_found`.
+
+  It deliberately does **not** subtract suspensions. Suspension is the venue
+  room only (KTD18), and a suspended person is still on their shift rosters.
+  """
+  @spec at_person_venues(Ecto.Queryable.t(), Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  def at_person_venues(queryable, person_id, %DateTime{} = instant) when is_binary(person_id) do
+    venue_ids =
+      Engagement
+      |> EngagementRecords.of_person(person_id)
+      |> EngagementRecords.active_at(instant)
+      |> select([engagement], engagement.venue_id)
+
+    from [room: room] in queryable, where: room.venue_id in subquery(venue_ids)
+  end
+
+  @doc """
   Shift rooms whose open window contains `instant`.
 
   `starts_at <= instant < closes_at`, where `closes_at` is the generated column

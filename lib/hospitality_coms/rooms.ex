@@ -534,22 +534,28 @@ defmodule HospitalityComs.Rooms do
   window is half-open and a room that has not opened is as closed as one that
   has shut. A shift type with a grace of zero closes writes at exactly `ends_at`.
 
-  Refused with `:not_found` when the room does not exist, and with
-  `:not_rostered` when it does and this person is not in it: rostered now, on an
+  Refused with `:not_found` when the room does not exist **or belongs to a venue
+  this person holds no active engagement at**, and with `:not_rostered` when it
+  is one of their venue's rooms and they are not in it: rostered now, on an
   engagement active now. Somebody who was removed from the roster an hour ago
   can still *read* the room — that is `list_shift_room_messages/2` — and cannot
   add to it.
 
-  The order of the two refusals is deliberate. A closed room is closed to
-  everyone, so answering `:room_closed` before consulting the roster tells a
-  caller only what the shift's own times already told them.
+  The order of the three refusals is deliberate, and the first one is the
+  interesting one. `:room_closed` and `:not_rostered` are both statements that
+  the named room exists; answered about an arbitrary id they would enumerate
+  every venue's shifts one probe at a time, which is the
+  not-found-rather-than-forbidden rule (AE1) lost at the one place a caller
+  supplies the id. So the lookup is confined to the person's own venues first,
+  and inside that boundary the two remaining answers tell them only what their
+  own venue's published shift times already do.
   """
   @spec send_shift_room_message(PersonScope.t(), Ecto.UUID.t(), String.t()) ::
           {:ok, RoomMessage.t()}
           | {:error, refusal() | :not_rostered | Ecto.Changeset.t(RoomMessage.t())}
   def send_shift_room_message(%PersonScope{} = scope, shift_room_id, body)
       when is_binary(shift_room_id) and is_binary(body) do
-    with {:ok, room} <- fetch_open_room(shift_room_id, scope.now),
+    with {:ok, room} <- fetch_open_room(scope, shift_room_id),
          {:ok, engagement} <- fetch_shift_room_member(scope, shift_room_id) do
       room
       |> RoomMessage.shift_room_changeset(engagement, body, scope.now)
@@ -557,26 +563,35 @@ defmodule HospitalityComs.Rooms do
     end
   end
 
-  # The open room, or why it is not available. The second query runs only on the
-  # failure path, so it can never turn a refusal into a success — the same shape
+  # The open room, or why it is not available. Both queries are confined to the
+  # person's own venues, and the second runs only on the failure path — so it
+  # can never turn a refusal into a success, which is the same shape
   # `HospitalityComs.Engagements` uses to tell three claim refusals apart.
-  @spec fetch_open_room(Ecto.UUID.t(), DateTime.t()) ::
+  @spec fetch_open_room(PersonScope.t(), Ecto.UUID.t()) ::
           {:ok, ShiftRoom.t()} | {:error, :not_found | :room_closed}
-  defp fetch_open_room(shift_room_id, now) do
-    open = Records.rooms() |> Records.room(shift_room_id) |> Records.open_at(now)
+  defp fetch_open_room(%PersonScope{person: %Person{id: person_id}, now: now}, shift_room_id)
+       when is_binary(person_id) do
+    reachable = reachable_room(person_id, shift_room_id, now)
 
-    open |> Repo.one() |> open_or_diagnose(shift_room_id)
+    reachable
+    |> Records.open_at(now)
+    |> Repo.one()
+    |> open_or_diagnose(reachable)
   end
 
-  @spec open_or_diagnose(ShiftRoom.t() | nil, Ecto.UUID.t()) ::
-          {:ok, ShiftRoom.t()} | {:error, :not_found | :room_closed}
-  defp open_or_diagnose(%ShiftRoom{} = room, _shift_room_id), do: {:ok, room}
-
-  defp open_or_diagnose(nil, shift_room_id) do
+  @spec reachable_room(Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  defp reachable_room(person_id, shift_room_id, now) do
     Records.rooms()
     |> Records.room(shift_room_id)
-    |> Repo.exists?()
-    |> closed_or_missing()
+    |> Records.at_person_venues(person_id, now)
+  end
+
+  @spec open_or_diagnose(ShiftRoom.t() | nil, Ecto.Query.t()) ::
+          {:ok, ShiftRoom.t()} | {:error, :not_found | :room_closed}
+  defp open_or_diagnose(%ShiftRoom{} = room, _reachable), do: {:ok, room}
+
+  defp open_or_diagnose(nil, reachable) do
+    reachable |> Repo.exists?() |> closed_or_missing()
   end
 
   @spec closed_or_missing(boolean()) :: {:error, :not_found | :room_closed}
