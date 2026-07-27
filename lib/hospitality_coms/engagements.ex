@@ -706,6 +706,19 @@ defmodule HospitalityComs.Engagements do
     survivors == [] and active?(target, scope.now) and holds_live_grant?(target, scope)
   end
 
+  # A second query, and deliberately not part of the locked rowset.
+  # `locked_decision_set/2` takes `FOR UPDATE` on engagements only, so this
+  # read of `employer_grants` sees whatever is committed *now* rather than
+  # whatever was visible when the decision set was locked. Under READ
+  # COMMITTED a `Venues.revoke_grant/2` committing between the two is
+  # therefore visible here and was not visible there.
+  #
+  # That widens the answer in one direction only: an engagement whose grant
+  # was revoked in the gap stops counting as an authority, so ending it is
+  # permitted. That is the outcome we want — a manager whose grant went away
+  # holds nothing to be the last of. Do not read `decision_set/4`'s
+  # subquery-in-`where` note as covering this call; that note is about SQL
+  # lock scope, not about the ordering of these two statements.
   @spec holds_live_grant?(Engagement.t(), EmployerScope.t()) :: boolean()
   defp holds_live_grant?(%Engagement{grant_id: grant_id}, %EmployerScope{} = scope) do
     scope.venue_id

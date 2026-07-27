@@ -103,8 +103,14 @@ defmodule HospitalityComs.Engagements.Records do
   The lower bound is what makes an unattended sweep able to keep up.
   `ended_by/2` alone grows without limit, so a bounded sweep over it examines
   the same oldest rows for ever and never reaches a term that closed this
-  morning. Half-open on the same side as every other period here, so two
-  consecutive windows neither overlap nor leave a gap.
+  morning.
+
+  Half-open, so two consecutive windows neither overlap nor leave a gap: an
+  instant that is the upper bound of one window is the excluded lower bound of
+  the next. Note the open end is the *opposite* one from an engagement period —
+  a period is `[starts_at, ends_at)`, open on the right, while this window is
+  `(since, instant]`, open on the left. Both are half-open and both tile
+  cleanly; do not copy the bound direction from one to the other.
   """
   @spec ended_between(Ecto.Queryable.t(), DateTime.t(), DateTime.t()) :: Ecto.Query.t()
   def ended_between(queryable, %DateTime{} = since, %DateTime{} = instant) do
