@@ -725,6 +725,60 @@ defmodule HospitalityComs.BoundaryTest do
       end
     end
 
+    test "refuses an update_all, a delete_all and a stream, not only an all" do
+      # `prepare_query/3`'s spec names five operations and only `:all` was ever
+      # exercised. A hook Ecto stopped calling for one of the others would have
+      # left that path open with every test in this file still green.
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        EmployerRepo.scoped_transaction(scope, fn _scope ->
+          {:ok, EmployerRepo.update_all(from(p in Person), set: [email: nil])}
+        end)
+      end
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        EmployerRepo.scoped_transaction(scope, fn _scope ->
+          {:ok, EmployerRepo.delete_all(from(p in Person))}
+        end)
+      end
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        EmployerRepo.scoped_transaction(scope, fn _scope ->
+          {:ok, from(p in Person, select: p.id) |> EmployerRepo.stream() |> Enum.to_list()}
+        end)
+      end
+    end
+
+    test "refuses an insert_all whose rows come from a person-zone query" do
+      # The one insert path that carries a query, and therefore the one the
+      # zone guard can see at all. The struct path below it cannot be.
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+      rows = from(p in Person, select: %{relname: p.email})
+
+      assert_raise EmployerRepo.ZoneViolationError, ~r/people/, fn ->
+        EmployerRepo.scoped_transaction(scope, fn _scope ->
+          {:ok, EmployerRepo.insert_all("pg_class", rows)}
+        end)
+      end
+    end
+
+    test "does not refuse the same operations when they reach nothing forbidden" do
+      # The control for the five above. A backstop that refused every
+      # non-`:all` operation would pass all of them.
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+      allowed = from(c in "pg_class", select: c.relname, limit: 1)
+
+      assert {:ok, [_relname]} =
+               EmployerRepo.scoped_transaction(scope, fn _scope ->
+                 {:ok, allowed |> EmployerRepo.stream() |> Enum.to_list()}
+               end)
+
+      assert {_query, _opts} = EmployerRepo.prepare_query(:update_all, allowed, [])
+      assert {_query, _opts} = EmployerRepo.prepare_query(:delete_all, allowed, [])
+      assert {_query, _opts} = EmployerRepo.prepare_query(:insert_all, allowed, [])
+    end
+
     test "does not refuse the same query issued through the person zone's own repo" do
       # Which is what says the query is well formed and the refusal above is the
       # boundary rather than a typo.

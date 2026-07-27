@@ -56,18 +56,31 @@ defmodule HospitalityComs.BoundaryLifetimeTest do
     # The control. This is the failure mode `scoped_transaction/2` avoids, shown
     # working, so that the assertion below cannot pass by talking to a fresh
     # connection.
+    #
+    # Nothing here is sandboxed, so the probe is a real session setting on a
+    # real pooled connection. Clearing it on the last line of the test would
+    # clear it only when the test passes; on a failure the connection would go
+    # back to the pool still carrying it, and the next thing to be handed that
+    # connection would inherit a leaked setting from a test about leaked
+    # settings.
+    #
+    # `after` rather than `on_exit`: the connection is checked out to this
+    # process and `on_exit` runs in another one, which the ownership pool
+    # refuses.
     pid_before = backend_pid()
 
-    {:ok, :written} =
-      EmployerRepo.transact(fn ->
-        set_session(@probe, "leaked")
-        {:ok, :written}
-      end)
+    try do
+      {:ok, :written} =
+        EmployerRepo.transact(fn ->
+          set_session(@probe, "leaked")
+          {:ok, :written}
+        end)
 
-    assert backend_pid() == pid_before
-    assert setting(@probe) == "leaked"
-
-    set_session(@probe, "")
+      assert backend_pid() == pid_before
+      assert setting(@probe) == "leaked"
+    after
+      set_session(@probe, "")
+    end
   end
 
   test "the employer scope does not survive the transaction that wrote it" do

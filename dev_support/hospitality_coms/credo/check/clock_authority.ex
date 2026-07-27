@@ -24,7 +24,10 @@ defmodule HospitalityComs.Credo.Check.ClockAuthority do
       Two rules follow, and this check enforces both.
 
       `DateTime.utc_now/0` belongs only to the clock. Everywhere else, the
-      instant arrives on the scope struct.
+      instant arrives on a scope struct — `PersonScope` in the person zone,
+      `EmployerScope` in the employer zone. There is no single `Scope`; the two
+      are separate so that a context function refuses the wrong caller by
+      function clause.
 
           # BAD
           def active?(engagement) do
@@ -32,16 +35,21 @@ defmodule HospitalityComs.Credo.Check.ClockAuthority do
           end
 
           # GOOD
-          def active?(engagement, %Scope{now: now}) do
+          def active?(engagement, %EmployerScope{now: now}) do
             DateTime.compare(engagement.ends_at, now) == :gt
           end
 
       `Clock.now/0` belongs only to a unit-of-work boundary — an HTTP request,
       one inbound channel message, one job attempt — which captures the instant
       once and puts it on the scope. Those modules are listed in
-      `:boundary_modules`. The list is empty until they exist; an empty list
-      means no module may call `Clock.now/0`, which is the correct default
-      while the boundary is still being built.
+      `:boundary_modules`. An empty list means no module may call
+      `Clock.now/0`, which is the correct default while the boundary is still
+      being built. `HospitalityComsWeb.PersonAuth` is the first entry.
+
+      A repo is not a boundary and is not on that list.
+      `HospitalityComs.EmployerRepo.scoped_transaction/2` takes the instant off
+      the scope it is handed, for the same reason: the unit of work that
+      captured it is the one that gets to say what "now" is.
 
       `Ecto.Query.ago/2` and `from_now/2` are banned outright, and are the
       reason this rule needs enforcing in a query as well as in Elixir. They

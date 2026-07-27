@@ -42,9 +42,42 @@ defmodule HospitalityComs.Accounts.EmployerScope do
   Unlike a person scope there is no anonymous form. An employer session with no
   employer is not a caller with less authority; it is a caller with no meaning,
   and the settings the transaction wrapper writes would have nothing to say.
+
+  Raises `ArgumentError` unless `employer_id` is a UUID in canonical form.
   """
   @spec for_employer(Ecto.UUID.t(), DateTime.t()) :: t()
   def for_employer(employer_id, %DateTime{} = now) when is_binary(employer_id) do
-    %__MODULE__{employer_id: employer_id, now: now}
+    %__MODULE__{employer_id: uuid!(employer_id), now: now}
+  end
+
+  # `""` and `"nope"` satisfy `is_binary/1` too, and a scope built from one is
+  # a scope that fails at `raw::uuid` inside `app_current_employer_id()` —
+  # three layers from the caller that built it, in the qualifier of the view
+  # U9 will read the employer zone through. It fails here instead.
+  #
+  # `Ecto.UUID.cast/1` on its own is not the check: it also accepts sixteen raw
+  # bytes and encodes them, so any sixteen-character string would come back a
+  # valid-looking employer. The scope carries the hex form, because the hex
+  # form is what goes into `app.employer_id`, so the hex form is what is taken.
+  @spec uuid!(String.t()) :: Ecto.UUID.t()
+  defp uuid!(employer_id) when byte_size(employer_id) == 36 do
+    employer_id |> Ecto.UUID.cast() |> cast_or_refuse(employer_id)
+  end
+
+  defp uuid!(employer_id), do: cast_or_refuse(:error, employer_id)
+
+  @spec cast_or_refuse({:ok, Ecto.UUID.t()} | :error, String.t()) :: Ecto.UUID.t()
+  defp cast_or_refuse({:ok, employer_id}, _given), do: employer_id
+
+  defp cast_or_refuse(:error, given) do
+    raise ArgumentError, """
+    #{inspect(given)} is not an employer id.
+
+    An employer scope is written into the transaction as app.employer_id and \
+    read back by app_current_employer_id(), which casts it to uuid. A scope \
+    built from anything else is a scope that fails inside Postgres, inside the \
+    qualifier of the employer-visible view, rather than at the boundary that \
+    built it.
+    """
   end
 end
