@@ -1,0 +1,144 @@
+/*
+ * Enough style to read the surfaces, and no design system.
+ *
+ * There is one screen with a form on it and one with a list. A component
+ * library, a token scale and a theme would all be built against surfaces that
+ * do not exist, and the unit that builds the rooms will want to choose them
+ * knowing what it is styling.
+ */
+
+:root {
+  --ink: #16181d;
+  --paper: #fbfaf8;
+  --muted: #5c6270;
+  --line: #d9d5cd;
+  --accent: #2f5d50;
+  --alert: #8c2f22;
+
+  color-scheme: light dark;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #ece9e3;
+    --paper: #16181d;
+    --muted: #a0a6b2;
+    --line: #343841;
+    --accent: #7fbfab;
+    --alert: #e8897a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.page {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 3rem 1.25rem 5rem;
+}
+
+h1 {
+  font-size: 1.6rem;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.5rem;
+}
+
+h2 {
+  font-size: 1.05rem;
+  margin: 2.5rem 0 0.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--line);
+}
+
+p {
+  margin: 0 0 1rem;
+  color: var(--muted);
+}
+
+strong {
+  color: var(--ink);
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 1.5rem 0;
+}
+
+label {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+input {
+  font: inherit;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+}
+
+input:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button {
+  font: inherit;
+  align-self: flex-start;
+  margin-top: 0.5rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: 0.3rem;
+  background: var(--accent);
+  color: var(--paper);
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+[role="alert"] {
+  color: var(--alert);
+}
+
+[role="status"] {
+  color: var(--accent);
+}
+
+ul {
+  margin: 0 0 1rem;
+  padding-left: 1.1rem;
+  color: var(--muted);
+}
+
+li {
+  margin-bottom: 0.3rem;
+}
+
+a {
+  color: var(--accent);
+}
