@@ -803,18 +803,23 @@ defmodule HospitalityComs.DemoTest do
   # is a list somebody forgets to extend, and the four it named left nineteen
   # tables in which a second seed could write freely.
   defp census do
+    # The identifier is quoted by Postgres's own `format('%I')` rather than
+    # spliced raw, which is `HospitalityComs.TestDatabaseGuard`'s rule for the
+    # same sweep. Every table here happens to be a bare lowercase word today, so
+    # raw interpolation works — and would silently mis-count, or error, against
+    # the first one that is a reserved word or carries a capital.
     %{rows: rows} =
       Repo.query!(
         """
-        SELECT table_name FROM information_schema.tables
+        SELECT table_name, format('%I', table_name) FROM information_schema.tables
         WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
         ORDER BY table_name
         """,
         []
       )
 
-    Map.new(rows, fn [table] ->
-      %{rows: [[count]]} = Repo.query!("SELECT count(*) FROM #{table}", [])
+    Map.new(rows, fn [table, quoted] ->
+      %{rows: [[count]]} = Repo.query!("SELECT count(*) FROM #{quoted}", [])
       {table, count}
     end)
   end
