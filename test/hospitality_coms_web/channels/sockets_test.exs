@@ -30,6 +30,7 @@ defmodule HospitalityComsWeb.SocketsTest do
 
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.PersonToken
+  alias HospitalityComs.Peers
   alias HospitalityComs.Venues
   alias HospitalityComsWeb.EmployerSocket
   alias HospitalityComsWeb.PersonAuth
@@ -199,14 +200,14 @@ defmodule HospitalityComsWeb.SocketsTest do
 
       assert {:ok, _venue, _a} = subscribe_and_join(socket, venue_topic(venue), %{})
       assert {:ok, _shift, _b} = subscribe_and_join(socket, shift_topic(room), %{})
-      assert {:ok, _peer, _c} = subscribe_and_join(socket, "peer", %{})
+      assert {:ok, _peer, _c} = subscribe_and_join(socket, peer_topic(socket), %{})
       assert {:ok, _emp, _d} = subscribe_and_join(employer, employer_topic(venue), %{})
 
       assert {:ok, _deleted} = Accounts.delete_person_session_token(raw)
 
       assert {:error, _venue_refusal} = join(socket, venue_topic(venue), %{})
       assert {:error, _shift_refusal} = join(socket, shift_topic(room), %{})
-      assert {:error, _peer_refusal} = join(socket, "peer", %{})
+      assert {:error, _peer_refusal} = join(socket, peer_topic(socket), %{})
       assert {:error, _employer_refusal} = join(employer, employer_topic(venue), %{})
     end
 
@@ -216,7 +217,7 @@ defmodule HospitalityComsWeb.SocketsTest do
 
       assert {:ok, _venue, _a} = subscribe_and_join(socket, venue_topic(venue), %{})
       assert {:ok, _shift, _b} = subscribe_and_join(socket, shift_topic(room), %{})
-      assert {:ok, _peer, _c} = subscribe_and_join(socket, "peer", %{})
+      assert {:ok, _peer, _c} = subscribe_and_join(socket, peer_topic(socket), %{})
       assert {:ok, _emp, _d} = subscribe_and_join(employer, employer_topic(venue), %{})
     end
   end
@@ -264,8 +265,13 @@ defmodule HospitalityComsWeb.SocketsTest do
     test "has no peer topic in it at all" do
       # The table itself, not a behaviour. This is the assertion that cannot be
       # satisfied by an authorization check somebody added inside a join.
+      person_id = Ecto.UUID.generate()
+
+      assert EmployerSocket.__channel__("peer:" <> person_id) == nil
       assert EmployerSocket.__channel__("peer") == nil
-      assert {HospitalityComsWeb.PeerChannel, _opts} = PersonSocket.__channel__("peer")
+
+      assert {HospitalityComsWeb.PeerChannel, _opts} =
+               PersonSocket.__channel__("peer:" <> person_id)
     end
 
     test "has no room topic in it either" do
@@ -292,8 +298,10 @@ defmodule HospitalityComsWeb.SocketsTest do
       person = person_fixture(@now)
       {:ok, socket} = connect(EmployerSocket, %{}, auth(session_token(person, @now)))
 
-      assert_raise RuntimeError, ~r/no channel found for topic "peer"/, fn ->
-        subscribe_and_join(socket, "peer", %{})
+      topic = "peer:" <> person.id
+
+      assert_raise RuntimeError, ~r/no channel found for topic "peer:/, fn ->
+        subscribe_and_join(socket, topic, %{})
       end
     end
 
@@ -319,8 +327,35 @@ defmodule HospitalityComsWeb.SocketsTest do
       person = person_fixture(@now)
       {:ok, socket} = connect(PersonSocket, %{}, auth(session_token(person, @now)))
 
-      assert {:ok, reply, _channel} = subscribe_and_join(socket, "peer", %{})
+      assert {:ok, reply, channel} = subscribe_and_join(socket, "peer:" <> person.id, %{})
       assert reply == %{person_id: person.id}
+
+      # The suffix is the person, so the channel's own Phoenix topic is the
+      # topic `HospitalityComs.Peers` announces on — which is what makes a
+      # `broadcast/3` from that channel reach one person rather than the whole
+      # cluster. An exact `"peer"` topic put every peer channel in one group.
+      assert channel.topic == Peers.topic(person.id)
+    end
+
+    test "refuses a peer topic naming somebody else, and a suffix that is not an id" do
+      # The routing table can only say "a peer topic"; which person's it is has
+      # to be decided at the join, and this is that decision. Both refusals are
+      # the same one, so a caller cannot learn from the answer whether the id
+      # they named is a real person.
+      person = person_fixture(@now)
+      {:ok, socket} = connect(PersonSocket, %{}, auth(session_token(person, @now)))
+
+      assert {:error, somebody_else} =
+               join(socket, "peer:" <> Ecto.UUID.generate(), %{})
+
+      assert {:error, malformed} = join(socket, "peer:not-a-uuid", %{})
+
+      assert somebody_else.error.code == "unauthorized"
+      assert somebody_else.error == malformed.error
+
+      # The control: the same socket joins its own.
+      assert {:ok, _reply, _channel} =
+               subscribe_and_join(socket, "peer:" <> person.id, %{})
     end
 
     test "has no employer venue topic" do
@@ -331,6 +366,11 @@ defmodule HospitalityComsWeb.SocketsTest do
   end
 
   ## Fixtures
+
+  # The peer topic names the person the socket authenticated as, so it is
+  # derived from the socket rather than passed in — a literal here would be a
+  # second place the suffix rule is written.
+  defp peer_topic(socket), do: Peers.topic(socket.assigns.person_id)
 
   defp venue_topic(venue), do: "venue_room:" <> venue.id
   defp shift_topic(room), do: "shift_room:" <> room.id

@@ -22,6 +22,12 @@ defmodule HospitalityComs.PostgresRolesTest do
   and forgets to add it here finds out from this file rather than from a
   `dependent_objects_still_exist` in the middle of a production rollback.
 
+  U8's `grant_peer_zone` is in the list and grants nothing — it only revokes, on
+  three person-zone tables — so it writes no `pg_shdepend` row and rolling it
+  back changes nothing here. It is listed anyway, because the rule is "every
+  grant migration" and a list with a judgement call in it is a list somebody
+  gets wrong later.
+
   Rolling U1 back *without* rolling the grants back is not a scenario that has
   to work. What has to work is that U1's `down` removes the roles once nothing
   depends on them, and `rolled_back_grants/0` is what puts the database in that
@@ -45,12 +51,14 @@ defmodule HospitalityComs.PostgresRolesTest do
   alias HospitalityComs.Repo.Migrations.CreatePostgresRoles
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
+  alias HospitalityComs.Repo.Migrations.GrantPeerZone
   alias HospitalityComs.Repo.Migrations.GrantRoomZone
 
   @roles_migration "create_postgres_roles"
   @employer_grants_migration "grant_employer_zone"
   @engagement_grants_migration "grant_engagement_zone"
   @room_grants_migration "grant_room_zone"
+  @peer_grants_migration "grant_peer_zone"
 
   # In the order Ecto applies them, which is the reverse of the order
   # `rolled_back_grants/0` unwinds them in. Every unit that grants adds an
@@ -60,7 +68,8 @@ defmodule HospitalityComs.PostgresRolesTest do
   @grant_migrations [
     {@employer_grants_migration, GrantEmployerZone},
     {@engagement_grants_migration, GrantEngagementZone},
-    {@room_grants_migration, GrantRoomZone}
+    {@room_grants_migration, GrantRoomZone},
+    {@peer_grants_migration, GrantPeerZone}
   ]
 
   @migrations [{@roles_migration, CreatePostgresRoles} | @grant_migrations]

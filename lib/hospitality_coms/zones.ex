@@ -92,9 +92,29 @@ defmodule HospitalityComs.Zones do
 
   A person-zone table is not free of obligations. U3's `grant_zones` migration
   wrote its revoked list out by hand, deliberately, and U6's `grant_room_zone`
-  writes out its own; `HospitalityComs.BoundaryTest` asserts the union of the
-  two equals `person_zone_tables/0`, so the day a person-zone table is added
-  without a migration covering it is the day somebody is told.
+  and U8's `grant_peer_zone` write out their own;
+  `HospitalityComs.BoundaryTest` asserts the union of the three equals
+  `person_zone_tables/0`, so the day a person-zone table is added without a
+  migration covering it is the day somebody is told.
+
+  ## U8 puts the whole peer graph in the person zone, and had no choice
+
+  `connection_requests`, `peer_connections` and `peer_messages` each hold at
+  least two foreign keys to `people` and hold nothing else that identifies
+  anything — no `venue_id`, no `engagement_id`, no employer key of any kind.
+  There is no reading under which they could sit anywhere else: KTD2 permits one
+  crossing and `engagements` is it, so a peer table in the employer or shared
+  zone would be a second one. `HospitalityComs.BoundaryTest` asserts that
+  positively — `engagements` is the only table *outside* the person zone with a
+  foreign key to `people` — which is what turns this classification from a
+  judgement into the only option that passes the suite.
+
+  `employer_role` holds nothing on any of the three, and there is not even a
+  filter that would make an employer-scoped query over them mean something,
+  because a peer connection records no venue. That is the Problem Frame's
+  inversion of ordinary multi-tenancy at its sharpest: the question is not
+  whether somebody forgot a `where`, it is whether the connection holds the
+  privilege.
 
   Table names are derived from `__schema__(:source)` rather than written out
   a second time. The privilege sweep, the query backstop in
@@ -131,6 +151,9 @@ defmodule HospitalityComs.Zones do
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Engagements.Invitation
+  alias HospitalityComs.Peers.Connection
+  alias HospitalityComs.Peers.ConnectionRequest
+  alias HospitalityComs.Peers.PeerMessage
   alias HospitalityComs.Profiles.AttestedEntry
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComs.Rooms.ShiftRoom
@@ -146,7 +169,14 @@ defmodule HospitalityComs.Zones do
   @typedoc "A privilege `employer_role` holds on a table it must not hold one on."
   @type offence() :: {table :: String.t(), privilege :: String.t()}
 
-  @person_zone [Person, PersonToken, VenueRoomSuspension]
+  @person_zone [
+    Person,
+    PersonToken,
+    VenueRoomSuspension,
+    ConnectionRequest,
+    Connection,
+    PeerMessage
+  ]
   @employer_zone [
     Venue,
     EmployerGrant,

@@ -8,11 +8,11 @@ defmodule HospitalityComsWeb.EmployerSocket do
   space is missing from this table on purpose, and each absence is a decision
   somebody would otherwise have had to enforce inside a `join/3`:
 
-    * **No `"peer"`.** This is the one the plan names. An employer session
+    * **No `"peer:*"`.** This is the one the plan names. An employer session
       cannot resolve a peer conversation through this transport because there is
-      no route to one — `__channel__("peer")` is `nil`, and the refusal happens
-      in Phoenix's dispatch with no application code running. AE1's "the
-      transport has no route to the topic", literally.
+      no route to one — `__channel__("peer:" <> person_id)` is `nil` for every
+      id, and the refusal happens in Phoenix's dispatch with no application code
+      running. AE1's "the transport has no route to the topic", literally.
     * **No `"venue_room:*"` and no `"shift_room:*"`.** Room conversation is
       worker-facing. `employer_role` holds no privilege at all on
       `room_messages` (U6), a manager reads their venue's room through their own

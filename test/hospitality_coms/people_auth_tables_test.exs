@@ -30,6 +30,15 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
   the chain grew again, at the far end. The list below is the record of what
   stands between this migration and a droppable `people`, and every unit that
   references the bridge adds to it.
+
+  U8 adds three more, and they are the first that hang off `people` **directly**
+  rather than through the bridge: `connection_requests` holds three foreign keys
+  to it, `peer_connections` three, and `peer_messages` exactly one — `author_id`,
+  because a peer message names its author where a room message resolves one
+  through an engagement (KTD15b) — all `ON DELETE RESTRICT`. That is not a widening of the crossing — a peer table naming a
+  person is the person zone doing what the person zone is for — but it is one
+  more thing standing between this migration and a droppable `people`, and the
+  list is where that is recorded.
   """
 
   use HospitalityComs.DataCase, async: false
@@ -37,12 +46,14 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
   import ExUnit.CaptureLog
 
   alias HospitalityComs.Repo.Migrations.CreateEngagements
+  alias HospitalityComs.Repo.Migrations.CreatePeerGraph
   alias HospitalityComs.Repo.Migrations.CreatePeopleAuthTables
   alias HospitalityComs.Repo.Migrations.CreateRooms
   alias HospitalityComs.Repo.Migrations.CreateRosterEntries
   alias HospitalityComs.Repo.Migrations.EnableEngagementRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.EnableRoomRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
+  alias HospitalityComs.Repo.Migrations.GrantPeerZone
   alias HospitalityComs.Repo.Migrations.GrantRoomZone
 
   @migration_name "create_people_auth_tables"
@@ -56,7 +67,9 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
     {"create_rooms", CreateRooms},
     {"create_roster_entries", CreateRosterEntries},
     {"grant_room_zone", GrantRoomZone},
-    {"enable_room_row_level_security", EnableRoomRowLevelSecurity}
+    {"enable_room_row_level_security", EnableRoomRowLevelSecurity},
+    {"create_peer_graph", CreatePeerGraph},
+    {"grant_peer_zone", GrantPeerZone}
   ]
 
   # Migration files are not compiled into the application, so the modules have
@@ -108,6 +121,20 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
       assert constraint_exists?("people_present_email_required")
       assert index_exists?("people_tokens_context_token_index")
       assert citext_installed?()
+    end
+
+    test "restores the peer graph that was rolled back with it" do
+      # U8's three hang off `people` directly, so they are the far end of the
+      # chain this migration has to unwind — and a `people` restored without
+      # them is a person zone with no peer surface, which the suite would not
+      # notice until the next file that opened a conversation.
+      rolled_back(fn -> refute table_exists?("peer_messages") end)
+
+      assert table_exists?("connection_requests")
+      assert table_exists?("peer_connections")
+      assert table_exists?("peer_messages")
+      assert constraint_exists?("peer_connections_pair_ordered")
+      assert index_exists?("connection_requests_one_current_per_pair")
     end
 
     test "restores the bridge that was rolled back with it" do
