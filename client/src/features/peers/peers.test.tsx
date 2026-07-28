@@ -10,6 +10,20 @@
  * The fake models `phoenix`'s rejoin behaviour rather than only its interface,
  * which is what makes "a refused join is asked once" a measurement instead of a
  * restatement — see `test-support/fake-socket.ts`.
+ *
+ * ## Two fixture rules this file learned the hard way
+ *
+ * **Answer `history` with both parties' messages.** Every disconnect test used
+ * to answer it with `{messages: []}`, so the counterpart's messages were never
+ * in the cache when the conversation closed — which made the whole class of
+ * "what does a disconnect take off the screen" untestable, and hid a real
+ * defect for a revision. A fixture that is empty exactly where the property
+ * lives cannot fail.
+ *
+ * **Pin which lists a refresh asks for.** `answerLists` takes the exact events
+ * it expects to be outstanding, so a handler refreshing a list it has no
+ * business refreshing fails here rather than passing quietly. Answering
+ * whatever had accumulated could not catch an over-fetch at all.
  */
 
 import { act, render, screen, waitFor, within } from "@testing-library/react";
@@ -35,6 +49,8 @@ const REQUEST_ID = "22222222-2222-4222-8222-222222222222";
 const CONNECTION_ID = "33333333-3333-4333-8333-333333333333";
 const OTHER_CONNECTION_ID = "44444444-4444-4444-8444-444444444444";
 
+const JOIN_LISTS = ["list_peers", "list_requests", "list_conversations"] as const;
+
 /** `rendered_peer/1`. */
 function peerWire(overrides: Record<string, unknown> = {}) {
   return {
@@ -48,7 +64,7 @@ function peerWire(overrides: Record<string, unknown> = {}) {
   };
 }
 
-/** `rendered_request/1`. */
+/** `rendered_request/1`, as this person's own outgoing approach. */
 function requestWire(overrides: Record<string, unknown> = {}) {
   return {
     request_id: REQUEST_ID,
@@ -60,6 +76,11 @@ function requestWire(overrides: Record<string, unknown> = {}) {
     declined_at: null,
     ...overrides,
   };
+}
+
+/** The same shape addressed the other way, which is what an incoming list holds. */
+function incomingWire(overrides: Record<string, unknown> = {}) {
+  return requestWire({ requester_id: PEER_ID, addressee_id: PERSON_ID, ...overrides });
 }
 
 /** `rendered_conversation/1`, which is also the `accept` and `disconnect` reply. */
@@ -85,6 +106,17 @@ function messageWire(overrides: Record<string, unknown> = {}) {
     sent_at: "2026-07-28T09:10:00Z",
     ...overrides,
   };
+}
+
+/** This person's own message, which is what a closed conversation keeps. */
+function mineWire(overrides: Record<string, unknown> = {}) {
+  return messageWire({
+    message_id: "55555555-5555-4555-8555-000000000011",
+    author_id: PERSON_ID,
+    body: "mine, from before",
+    sent_at: "2026-07-28T09:11:00Z",
+    ...overrides,
+  });
 }
 
 /**
@@ -132,45 +164,68 @@ function renderPeers(personId: string) {
   return socket;
 }
 
+/** A macrotask, so a push queued behind the ones just seen has landed. */
+function settle(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
 /**
  * Answers the list pushes the client has issued and not had answered.
  *
  * A cursor rather than "the last one", because a notice makes the client ask
  * again: `peer_connected` re-asks two lists in one handler, and a test that
  * answered only the most recent push would leave the other hanging.
+ *
+ * `expected` is the point of the shape. Every caller names exactly which lists
+ * it believes are outstanding, so a refresh that asks for one it should not —
+ * an over-fetch, invisible on screen and a round trip per event — fails here.
  */
 function serverFor(channel: FakeChannel) {
   let cursor = 0;
 
+  function pending(): string[] {
+    return channel.sent
+      .slice(cursor)
+      .map((sent) => sent.event)
+      .filter((event) => event.startsWith("list_"));
+  }
+
+  async function answerWith(
+    expected: readonly string[],
+    payloadFor: (event: string) => unknown,
+  ): Promise<void> {
+    await waitFor(() => {
+      expect(pending()).toEqual([...expected]);
+    });
+
+    // And nothing more arrives a turn later. Without this, an over-fetch issued
+    // in a microtask behind these would be missed by the assertion above.
+    await settle();
+    expect(pending()).toEqual([...expected]);
+
+    act(() => {
+      for (; cursor < channel.sent.length; cursor += 1) {
+        const sent = channel.sent[cursor];
+        if (sent?.event.startsWith("list_") !== true) continue;
+
+        sent.push.trigger("ok", payloadFor(sent.event));
+      }
+    });
+  }
+
   return {
-    async answerLists(lists: Lists): Promise<void> {
-      await waitFor(() => {
-        expect(
-          channel.sent.slice(cursor).some((sent) => sent.event.startsWith("list_")),
-        ).toBe(true);
-      });
-
-      act(() => {
-        for (; cursor < channel.sent.length; cursor += 1) {
-          const sent = channel.sent[cursor];
-          if (sent === undefined) continue;
-
-          switch (sent.event) {
-            case "list_peers":
-              sent.push.trigger("ok", { peers: lists.peers ?? [] });
-              break;
-            case "list_requests":
-              sent.push.trigger("ok", {
-                incoming: lists.incoming ?? [],
-                outgoing: lists.outgoing ?? [],
-              });
-              break;
-            case "list_conversations":
-              sent.push.trigger("ok", { conversations: lists.conversations ?? [] });
-              break;
-            default:
-              break;
-          }
+    answerWith,
+    answerLists(expected: readonly string[], lists: Lists): Promise<void> {
+      return answerWith(expected, (event) => {
+        switch (event) {
+          case "list_peers":
+            return { peers: lists.peers ?? [] };
+          case "list_requests":
+            return { incoming: lists.incoming ?? [], outgoing: lists.outgoing ?? [] };
+          default:
+            return { conversations: lists.conversations ?? [] };
         }
       });
     },
@@ -204,6 +259,17 @@ function pushesOf(
   return channel.pushed.filter((sent) => sent.event === event);
 }
 
+/** Waits until one event has been pushed exactly `count` times. */
+async function awaitPushes(
+  channel: FakeChannel,
+  event: string,
+  count: number,
+): Promise<void> {
+  await waitFor(() => {
+    expect(pushesOf(channel, event)).toHaveLength(count);
+  });
+}
+
 async function openPeers(lists: Lists = {}, personId: string = PERSON_ID) {
   const socket = renderPeers(personId);
   const topic = peerTopic(normalisePersonId(personId) ?? "");
@@ -220,9 +286,24 @@ async function openPeers(lists: Lists = {}, personId: string = PERSON_ID) {
   });
 
   const server = serverFor(channel);
-  await server.answerLists(lists);
+  await server.answerLists(JOIN_LISTS, lists);
 
   return { socket, channel, server };
+}
+
+/** Opens a listed conversation and answers the history it asks for. */
+async function openConversation(
+  channel: FakeChannel,
+  peerId: string,
+  messages: readonly object[] = [],
+): Promise<void> {
+  await userEvent.click(
+    await screen.findByRole("button", {
+      name: new RegExp(`open conversation ${peerId.slice(0, 8)}`, "i"),
+    }),
+  );
+
+  answer(channel, "history", "ok", { messages });
 }
 
 function messageBodies(): (string | null)[] {
@@ -253,14 +334,8 @@ describe("the topic the peer surface is joined on", () => {
 
     expect(socket.channels.map((opened) => opened.topic)).toEqual([`peer:${PERSON_ID}`]);
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
-    );
-    answer(channel, "history", "ok", { messages: [] });
-
-    await userEvent.click(
-      screen.getByRole("button", { name: /open conversation b2b2b2b2/i }),
-    );
+    await openConversation(channel, PEER_ID);
+    await openConversation(channel, OTHER_PEER_ID);
 
     // Still one. A second topic here would be the thing KTD10 exists to
     // prevent.
@@ -315,7 +390,10 @@ describe("a pending outbound request renders as pending until answered", () => {
     ]);
 
     answer(channel, "request", "ok", requestWire());
-    await server.answerLists({ peers: [peerWire()], outgoing: [requestWire()] });
+    await server.answerLists(["list_requests"], {
+      peers: [peerWire()],
+      outgoing: [requestWire()],
+    });
 
     const sent = within(await screen.findByRole("list", { name: /requests you sent/i }));
     expect(sent.getByText(/^Pending$/)).toBeInTheDocument();
@@ -329,7 +407,7 @@ describe("a pending outbound request renders as pending until answered", () => {
     // and `:accepted` are both the server's, derived at the instant it is
     // asked.
     act(() => {
-      channel.emit("peer_message", messageNotice({ connection_id: OTHER_CONNECTION_ID }));
+      channel.emit("peer_message", messageNotice({ connection_id: CONNECTION_ID }));
     });
     expect(sent.getByText(/^Pending$/)).toBeInTheDocument();
   });
@@ -357,7 +435,7 @@ describe("a pending outbound request renders as pending until answered", () => {
       });
     });
 
-    await server.answerLists({
+    await server.answerLists(["list_requests", "list_conversations"], {
       peers: [peerWire()],
       outgoing: [requestWire({ state: "accepted", accepted_at: "2026-07-28T09:05:00Z" })],
       conversations: [conversationWire()],
@@ -392,6 +470,21 @@ describe("a pending outbound request renders as pending until answered", () => {
 
     await screen.findByText(/^Pending$/);
     expect(screen.queryByRole("button", { name: /withdraw|cancel request/i })).toBeNull();
+  });
+
+  it("does not offer to ask somebody who has already asked you", async () => {
+    // Everything on `list_incoming_requests/1` is outstanding, so an entry from
+    // this peer means the approach already exists in the other direction. The
+    // server refuses the request `conflict`, so the button could only ever
+    // produce an error — and it reads as though nothing has happened, when
+    // somebody is waiting on an answer further down the page.
+    await openPeers({ peers: [peerWire()], incoming: [incomingWire()] });
+
+    expect(await screen.findByText(/they asked you to connect/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /ask c3c3c3c3 to connect/i })).toBeNull();
+
+    // The answer is still one click away, which is the point of saying where.
+    expect(screen.getByRole("button", { name: /accept c3c3c3c3/i })).toBeEnabled();
   });
 });
 
@@ -467,22 +560,139 @@ describe("two workers exchanging peer messages see them in order", () => {
     expect(bodies[2]).toMatch(/^You/);
   });
 
+  it("orders a sub-second instant after the whole second it follows", async () => {
+    // A guard on a hazard that is live rather than hypothetical. Compared as
+    // strings, `"…:00.5Z" < "…:00Z"` — `.` sorts before `Z` — so the moment any
+    // peer column becomes `:utc_datetime_usec` the order inverts inside every
+    // second. U6's review made exactly that change to `roster_entries` for a
+    // correctness reason, so this is a thing that happens in this codebase.
+    //
+    // Deleting the `Date.parse` in `byInstant` fails this and nothing else.
+    const { channel } = await openPeers({ conversations: [conversationWire()] });
+
+    await openConversation(channel, PEER_ID, [
+      messageWire({
+        message_id: "55555555-5555-4555-8555-00000000000a",
+        body: "on the hour",
+        sent_at: "2026-07-28T09:10:00Z",
+      }),
+      messageWire({
+        message_id: "55555555-5555-4555-8555-00000000000b",
+        body: "half a second later",
+        sent_at: "2026-07-28T09:10:00.500000Z",
+      }),
+    ]);
+
+    await waitFor(() => {
+      expect(messageBodies()).toHaveLength(2);
+    });
+
+    const bodies = messageBodies();
+    expect(bodies[0]).toContain("on the hour");
+    expect(bodies[1]).toContain("half a second later");
+  });
+
+  it("keeps the server's order for two messages sharing an instant", async () => {
+    // The clock is injectable and the demo pins it, so two messages stamped in
+    // the same second are ordinary rather than exotic. The sort is stable and
+    // the history is merged first, so the server's own ordering survives — and
+    // a message arriving afterwards at that same instant goes last, where it
+    // belongs.
+    const { channel } = await openPeers({ conversations: [conversationWire()] });
+
+    await openConversation(channel, PEER_ID, [
+      messageWire({
+        message_id: "55555555-5555-4555-8555-00000000000c",
+        body: "first",
+        sent_at: "2026-07-28T09:10:00Z",
+      }),
+      messageWire({
+        message_id: "55555555-5555-4555-8555-00000000000d",
+        body: "second",
+        sent_at: "2026-07-28T09:10:00Z",
+      }),
+    ]);
+
+    await waitFor(() => {
+      expect(messageBodies()).toHaveLength(2);
+    });
+
+    act(() => {
+      channel.emit(
+        "peer_message",
+        messageNotice({
+          message_id: "55555555-5555-4555-8555-00000000000e",
+          body: "third",
+          sent_at: "2026-07-28T09:10:00Z",
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(messageBodies()).toHaveLength(3);
+    });
+
+    const bodies = messageBodies();
+    expect(bodies[0]).toContain("first");
+    expect(bodies[1]).toContain("second");
+    expect(bodies[2]).toContain("third");
+  });
+
+  it("backfills what it missed while the socket was away", async () => {
+    // The gap `joinGeneration` closes. The three lists are re-asked on every
+    // join, so a reconnect re-derives them — but an open conversation's history
+    // is not a list, and a message sent while the link was down reached no push
+    // here, because this client was not subscribed to hear it.
+    //
+    // Deleting `joinGeneration` from `ConversationView`'s effect leaves the
+    // second message missing until the conversation is closed and reopened.
+    const { channel, server } = await openPeers({
+      conversations: [conversationWire()],
+    });
+
+    await openConversation(channel, PEER_ID, [
+      messageWire({ body: "before the drop", sent_at: "2026-07-28T09:10:00Z" }),
+    ]);
+    await waitFor(() => {
+      expect(messageBodies()).toHaveLength(1);
+    });
+
+    // What `phoenix` does when the link comes back: the same join push's
+    // `receive("ok")` hooks fire again, because `Push.reset()` keeps `recHooks`.
+    act(() => {
+      channel.joinPush.trigger("ok", { person_id: PERSON_ID });
+    });
+
+    await server.answerLists(JOIN_LISTS, { conversations: [conversationWire()] });
+
+    await awaitPushes(channel, "history", 2);
+    answer(channel, "history", "ok", {
+      messages: [
+        messageWire({ body: "before the drop", sent_at: "2026-07-28T09:10:00Z" }),
+        messageWire({
+          message_id: "55555555-5555-4555-8555-00000000000f",
+          body: "while you were away",
+          sent_at: "2026-07-28T09:11:00Z",
+        }),
+      ],
+    });
+
+    await waitFor(() => {
+      expect(messageBodies()).toHaveLength(2);
+    });
+    expect(messageBodies()[1]).toContain("while you were away");
+  });
+
   it("sends under the event and payload the channel handles", async () => {
     const { channel } = await openPeers({ conversations: [conversationWire()] });
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
-    );
-    answer(channel, "history", "ok", { messages: [] });
+    await openConversation(channel, PEER_ID);
 
     await userEvent.type(await screen.findByLabelText(/^message$/i), "on my way");
     await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
 
     expect(pushesOf(channel, "send")).toEqual([
-      {
-        event: "send",
-        payload: { connection_id: CONNECTION_ID, body: "on my way" },
-      },
+      { event: "send", payload: { connection_id: CONNECTION_ID, body: "on my way" } },
     ]);
   });
 
@@ -492,10 +702,7 @@ describe("two workers exchanging peer messages see them in order", () => {
     // row down two paths — under two different keys for its instant.
     const { channel } = await openPeers({ conversations: [conversationWire()] });
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
-    );
-    answer(channel, "history", "ok", { messages: [] });
+    await openConversation(channel, PEER_ID);
 
     await userEvent.type(await screen.findByLabelText(/^message$/i), "on my way");
     await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
@@ -518,10 +725,7 @@ describe("two workers exchanging peer messages see them in order", () => {
     // nothing left to correct and resend.
     const { channel } = await openPeers({ conversations: [conversationWire()] });
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
-    );
-    answer(channel, "history", "ok", { messages: [] });
+    await openConversation(channel, PEER_ID);
 
     await userEvent.type(await screen.findByLabelText(/^message$/i), "kitchen is short");
     await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
@@ -529,6 +733,31 @@ describe("two workers exchanging peer messages see them in order", () => {
 
     await screen.findByRole("alert");
     expect(composer()).toHaveValue("kitchen is short");
+  });
+
+  it("finds a conversation no list has mentioned, rather than losing it", async () => {
+    // `announce/2` is best effort and logged, so a `peer_connected` can be
+    // dropped. Without this the message piles up in a cache nothing can open
+    // and the conversation is invisible until a reload.
+    const { channel, server } = await openPeers({ conversations: [] });
+
+    expect(await screen.findByText(/no conversations yet/i)).toBeInTheDocument();
+
+    act(() => {
+      channel.emit("peer_message", messageNotice({ body: "did you get my request?" }));
+    });
+
+    await server.answerLists(["list_conversations"], {
+      conversations: [conversationWire()],
+    });
+
+    await openConversation(channel, PEER_ID);
+
+    // And the message that announced it is there, because it was kept.
+    await waitFor(() => {
+      expect(messageBodies()).toHaveLength(1);
+    });
+    expect(messageBodies()[0]).toContain("did you get my request?");
   });
 });
 
@@ -564,10 +793,7 @@ describe("a refusal on the peer channel", () => {
   it("renders the server's per-field messages, which name what was typed", async () => {
     const { channel } = await openPeers({ conversations: [conversationWire()] });
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
-    );
-    answer(channel, "history", "ok", { messages: [] });
+    await openConversation(channel, PEER_ID);
 
     await userEvent.type(await screen.findByLabelText(/^message$/i), "x");
     await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
@@ -584,6 +810,36 @@ describe("a refusal on the peer channel", () => {
     ).toBeInTheDocument();
   });
 
+  it("names an answer it cannot read, rather than leaving a stale list", async () => {
+    // `decode.ts` says every decoder returns `null` for "this is not that" so
+    // the caller can turn it into a *named absence*. The list loaders used to
+    // return silently, so one row carrying a `state` this client has no case
+    // for left an empty list on screen under "Nobody has asked you to
+    // connect" — the documented safety property and the implemented one
+    // disagreeing, which is the class this project keeps finding.
+    const socket = renderPeers(PERSON_ID);
+    const channel = await waitFor(() => {
+      const opened = socket.channelFor(peerTopic(PERSON_ID));
+      if (opened === undefined) throw new Error("nothing joined");
+
+      return opened;
+    });
+
+    act(() => {
+      channel.joinPush.trigger("ok", { person_id: PERSON_ID });
+    });
+
+    await serverFor(channel).answerWith(JOIN_LISTS, (event) =>
+      event === "list_requests"
+        ? { incoming: [incomingWire({ state: "withdrawn" })], outgoing: [] }
+        : { peers: [], conversations: [] },
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /shape this client does not understand/i,
+    );
+  });
+
   it("asks the server again when a send says the conversation is closed", async () => {
     // The one real difference from the rooms. A room had to *remember*
     // `room_closed`, because nothing on the wire carries a shift room's
@@ -592,16 +848,13 @@ describe("a refusal on the peer channel", () => {
     // inferred and nothing is stored.
     const { channel, server } = await openPeers({ conversations: [conversationWire()] });
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
-    );
-    answer(channel, "history", "ok", { messages: [] });
+    await openConversation(channel, PEER_ID, [mineWire()]);
 
     await userEvent.type(await screen.findByLabelText(/^message$/i), "still there?");
     await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
     answer(channel, "send", "error", refusal("conflict"));
 
-    await server.answerLists({
+    await server.answerLists(["list_conversations"], {
       conversations: [
         conversationWire({
           open: false,
@@ -610,6 +863,11 @@ describe("a refusal on the peer channel", () => {
         }),
       ],
     });
+
+    // Closing it re-asks the history, because a closed conversation is a
+    // different answer — see the disconnect block below.
+    await awaitPushes(channel, "history", 2);
+    answer(channel, "history", "ok", { messages: [mineWire()] });
 
     expect(await screen.findByText(/they ended it/i)).toBeInTheDocument();
     await waitFor(() => {
@@ -643,6 +901,72 @@ describe("a refusal on the peer channel", () => {
     expect(channel.joins).toBe(1);
   });
 
+  it("takes the whole graph off the screen when a rejoin is refused", async () => {
+    // The shared-terminal rule, arriving for the third time in this client —
+    // after room bookmarks surviving log-out, and a closed conversation's cache
+    // outliving the server's own answer.
+    //
+    // `phoenix` rejoins on its own backoff after a dropped link, and a session
+    // revoked in between is refused there. `RequireSession` still reads
+    // `authenticated` — `GET /api/me` was answered minutes ago — so nothing
+    // else on this page would clear it, and what is on screen names who this
+    // person knows.
+    const { channel } = await openPeers({
+      peers: [peerWire()],
+      incoming: [incomingWire()],
+      conversations: [conversationWire()],
+    });
+
+    expect(
+      await screen.findByRole("list", { name: /people you can see/i }),
+    ).toBeInTheDocument();
+
+    // The rejoin refusal: the same join push answering again, which is what
+    // `Push.reset()` keeping `recHooks` produces.
+    act(() => {
+      channel.joinPush.trigger("error", refusal("unauthorized"));
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /signed out somewhere else/i,
+    );
+
+    // The sections stay on the page and are **empty**, which is the evidence
+    // that the surface dropped what it held rather than merely hiding it. A
+    // route that hid them instead would satisfy "the peer is not on screen"
+    // while the graph sat in memory for the life of the page, and no assertion
+    // through the DOM could tell the two apart.
+    await waitFor(() => {
+      expect(screen.queryByRole("list", { name: /people you can see/i })).toBeNull();
+    });
+    expect(screen.queryByRole("list", { name: /requests to you/i })).toBeNull();
+    expect(screen.queryByRole("list", { name: /your conversations/i })).toBeNull();
+    expect(screen.queryByText(new RegExp(PEER_ID.slice(0, 8)))).toBeNull();
+
+    expect(screen.getByText(/nobody right now/i)).toBeInTheDocument();
+    expect(screen.getByText(/nobody has asked you to connect/i)).toBeInTheDocument();
+    expect(screen.getByText(/no conversations yet/i)).toBeInTheDocument();
+  });
+
+  it("keeps a list a refusal says nothing about, when the session is fine", async () => {
+    // The control for the test above, and the reason the clear is keyed on
+    // `unauthorized` rather than on any refusal. `phoenix` itself refuses with
+    // `%{reason: "too many channels joined"}` at `max_channels_per_transport`,
+    // which is not an `ErrorEnvelope` and says nothing about who is signed in.
+    // Emptying the graph there would throw away this person's own data to
+    // report a transport limit.
+    const { channel } = await openPeers({ peers: [peerWire()] });
+
+    await screen.findByRole("list", { name: /people you can see/i });
+
+    act(() => {
+      channel.joinPush.trigger("error", { reason: "too many channels joined" });
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/does not understand/i);
+    expect(screen.getByRole("list", { name: /people you can see/i })).toBeInTheDocument();
+  });
+
   it("control: the same harness counts a rejoin on a surface that was admitted", async () => {
     // Without this, `joins === 1` above would be satisfied by a fake that
     // cannot rejoin at all.
@@ -658,9 +982,7 @@ describe("a refusal on the peer channel", () => {
 
 describe("answering a request", () => {
   it("accepts, and the conversation it created appears", async () => {
-    const { channel, server } = await openPeers({
-      incoming: [requestWire({ requester_id: PEER_ID, addressee_id: PERSON_ID })],
-    });
+    const { channel, server } = await openPeers({ incoming: [incomingWire()] });
 
     await userEvent.click(
       await screen.findByRole("button", { name: /accept c3c3c3c3/i }),
@@ -673,7 +995,9 @@ describe("answering a request", () => {
     // `accept` replies with the conversation rather than the request, through
     // `rendered_connection/2`.
     answer(channel, "accept", "ok", conversationWire());
-    await server.answerLists({ conversations: [conversationWire()] });
+    await server.answerLists(["list_requests", "list_conversations"], {
+      conversations: [conversationWire()],
+    });
 
     expect(
       await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
@@ -681,10 +1005,29 @@ describe("answering a request", () => {
     expect(screen.getByText(/nobody has asked you to connect/i)).toBeInTheDocument();
   });
 
+  it("takes one answer per request, not one per click", async () => {
+    // Accepting and declining are the same conditional `UPDATE` on the server
+    // (`Records.answerable/2`), so a second click loses whichever it was and
+    // gets `:not_found` — indistinguishable from an id that names nothing
+    // (AE1), so the surface could not explain it if it wanted to.
+    const { channel } = await openPeers({ incoming: [incomingWire()] });
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /accept c3c3c3c3/i }),
+    );
+
+    expect(screen.getByRole("button", { name: /accept c3c3c3c3/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /decline c3c3c3c3/i })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole("button", { name: /accept c3c3c3c3/i }));
+    await userEvent.click(screen.getByRole("button", { name: /decline c3c3c3c3/i }));
+
+    expect(pushesOf(channel, "accept")).toHaveLength(1);
+    expect(pushesOf(channel, "decline")).toHaveLength(0);
+  });
+
   it("declines, and says so in a sentence that is not an error", async () => {
-    const { channel, server } = await openPeers({
-      incoming: [requestWire({ requester_id: PEER_ID, addressee_id: PERSON_ID })],
-    });
+    const { channel, server } = await openPeers({ incoming: [incomingWire()] });
 
     await userEvent.click(
       await screen.findByRole("button", { name: /decline c3c3c3c3/i }),
@@ -698,14 +1041,9 @@ describe("answering a request", () => {
       channel,
       "decline",
       "ok",
-      requestWire({
-        requester_id: PEER_ID,
-        addressee_id: PERSON_ID,
-        state: "declined",
-        declined_at: "2026-07-28T09:30:00Z",
-      }),
+      incomingWire({ state: "declined", declined_at: "2026-07-28T09:30:00Z" }),
     );
-    await server.answerLists({});
+    await server.answerLists(["list_requests"], {});
 
     expect(
       await screen.findByText(/nobody has asked you to connect/i),
@@ -719,13 +1057,7 @@ describe("answering a request", () => {
     // nobody could clear. Accepting one is refused `gone`, and the sentence
     // says it can be answered again if they work together again.
     const { channel } = await openPeers({
-      incoming: [
-        requestWire({
-          requester_id: PEER_ID,
-          addressee_id: PERSON_ID,
-          state: "lapsed",
-        }),
-      ],
+      incoming: [incomingWire({ state: "lapsed" })],
     });
 
     expect(
@@ -746,10 +1078,7 @@ describe("disconnecting", () => {
     // with a lasting effect on somebody else, not a window being closed.
     const { channel } = await openPeers({ conversations: [conversationWire()] });
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
-    );
-    answer(channel, "history", "ok", { messages: [] });
+    await openConversation(channel, PEER_ID);
 
     await userEvent.click(await screen.findByRole("button", { name: /^disconnect$/i }));
     expect(pushesOf(channel, "disconnect")).toEqual([]);
@@ -765,21 +1094,28 @@ describe("disconnecting", () => {
     ]);
   });
 
-  it("closes that conversation and leaves the rest of the surface alone", async () => {
-    // The whole of why this is one topic. A room channel stops on revocation
-    // because the topic *is* the room; stopping here would take down every
-    // other conversation this person has — so the channel is not left, and the
-    // other conversation is still sendable afterwards.
-    const conversations = [
-      conversationWire(),
-      conversationWire({ connection_id: OTHER_CONNECTION_ID, peer_id: OTHER_PEER_ID }),
-    ];
-    const { channel, server } = await openPeers({ conversations });
+  it("takes the other party's messages off the screen, because the server does", async () => {
+    // `Peers.list_messages/2` reads the whole conversation while it is open
+    // and, once disconnected, **each party's own messages and only their own**
+    // — R15's remedy, which `peers_test.exs` asserts with a row count as the
+    // control for nothing having been deleted.
+    //
+    // The client held a cache from while it was open and merged the new history
+    // into it, so the counterpart's messages stayed rendered: the enforcement
+    // held on the wire and not on the screen. It now **replaces** rather than
+    // merges once `open` is false, and re-asks when the flag flips — the merge
+    // exists to catch a push that raced the reply, and nothing can be pushed to
+    // a conversation that is closed.
+    const { channel, server } = await openPeers({ conversations: [conversationWire()] });
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
-    );
-    answer(channel, "history", "ok", { messages: [] });
+    await openConversation(channel, PEER_ID, [
+      messageWire({ author_id: PEER_ID, body: "theirs, from before" }),
+      mineWire(),
+    ]);
+
+    await waitFor(() => {
+      expect(messageBodies()).toHaveLength(2);
+    });
 
     await userEvent.click(await screen.findByRole("button", { name: /^disconnect$/i }));
     await userEvent.click(screen.getByRole("button", { name: /yes, disconnect/i }));
@@ -790,7 +1126,49 @@ describe("disconnecting", () => {
       disconnected_by_id: PERSON_ID,
     });
     answer(channel, "disconnect", "ok", closed);
-    await server.answerLists({ conversations: [closed, conversations[1] ?? {}] });
+    await server.answerLists(["list_conversations"], { conversations: [closed] });
+
+    // It asks again, because a closed conversation is a different answer.
+    await awaitPushes(channel, "history", 2);
+    answer(channel, "history", "ok", { messages: [mineWire()] });
+
+    await waitFor(() => {
+      expect(messageBodies()).toHaveLength(1);
+    });
+    expect(messageBodies()[0]).toContain("mine, from before");
+    expect(screen.queryByText(/theirs, from before/)).toBeNull();
+  });
+
+  it("closes that conversation and leaves the rest of the surface alone", async () => {
+    // The whole of why this is one topic. A room channel stops on revocation
+    // because the topic *is* the room; stopping here would take down every
+    // other conversation this person has — so the channel is not left, and the
+    // other conversation is still sendable afterwards.
+    const other = conversationWire({
+      connection_id: OTHER_CONNECTION_ID,
+      peer_id: OTHER_PEER_ID,
+    });
+    const { channel, server } = await openPeers({
+      conversations: [conversationWire(), other],
+    });
+
+    await openConversation(channel, PEER_ID, [
+      messageWire({ author_id: PEER_ID, body: "theirs" }),
+    ]);
+
+    await userEvent.click(await screen.findByRole("button", { name: /^disconnect$/i }));
+    await userEvent.click(screen.getByRole("button", { name: /yes, disconnect/i }));
+
+    const closed = conversationWire({
+      open: false,
+      disconnected_at: "2026-07-28T09:40:00Z",
+      disconnected_by_id: PERSON_ID,
+    });
+    answer(channel, "disconnect", "ok", closed);
+    await server.answerLists(["list_conversations"], { conversations: [closed, other] });
+
+    await awaitPushes(channel, "history", 2);
+    answer(channel, "history", "ok", { messages: [] });
 
     expect(await screen.findByText(/you ended it/i)).toBeInTheDocument();
     await waitFor(() => {
@@ -800,10 +1178,7 @@ describe("disconnecting", () => {
     // The channel is still here, and so is the other conversation.
     expect(channel.leaves).toBe(0);
 
-    await userEvent.click(
-      screen.getByRole("button", { name: /open conversation b2b2b2b2/i }),
-    );
-    answer(channel, "history", "ok", { messages: [] });
+    await openConversation(channel, OTHER_PEER_ID);
 
     await userEvent.type(await screen.findByLabelText(/^message$/i), "still talking");
     await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
@@ -831,12 +1206,7 @@ describe("disconnecting", () => {
       ],
     });
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
-    );
-    answer(channel, "history", "ok", {
-      messages: [messageWire({ author_id: PERSON_ID, body: "mine, kept" })],
-    });
+    await openConversation(channel, PEER_ID, [mineWire({ body: "mine, kept" })]);
 
     expect(await screen.findByText(/mine, kept/)).toBeInTheDocument();
     expect(composer()).toBeDisabled();
@@ -857,10 +1227,7 @@ describe("the surface with nothing in it", () => {
   it("ignores a push in a shape this client was not promised", async () => {
     const { channel } = await openPeers({ conversations: [conversationWire()] });
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
-    );
-    answer(channel, "history", "ok", { messages: [] });
+    await openConversation(channel, PEER_ID);
 
     act(() => {
       channel.emit("peer_message", { message_id: 7, body: null });
