@@ -148,22 +148,47 @@ retried, measured against `phoenix`'s own rejoin timers with a control that
 watches the loop happen when nothing leaves. It found the endpoint path the
 foundation had guessed wrong on its first run.
 
-It needs a server, and a server needs a database. `CLAUDE.md` is emphatic that
-migrating `hospitality_coms_dev` breaks `DROP ROLE employer_role` in
-`hospitality_coms_test` — grants are database-local while roles are
-cluster-global — so it runs against a **throwaway database that is dropped
-afterwards**. The full recipe, including how to mint a session token without
-`/dev/mailbox` (there is no dev mailbox outside dev), is in the file's own
-header.
+`npm run test:peers` is the third, and does the same job for `PeerChannel`: the
+topic, a topic naming somebody else, and the three list shapes against real JSON
+rather than object literals.
 
-`npm run test:peers` is the third, and it is the one that **has never been run**.
-It does the same job for `PeerChannel` — the topic, a topic naming somebody
-else, and the three list shapes against real JSON rather than object literals —
-and it was written and left opt-in because the throwaway database above breaks
-the Elixir suite for as long as it exists, and the peer surfaces were built
-while another unit was running that suite. Run it in a quiet window, and drop
-the database and check `pg_shdepend` afterwards. Treat its assertions as
-unverified until somebody has.
+### Run them against a throwaway **cluster**, not a throwaway database
+
+This is the part that was wrong for two units and is worth reading before
+running either. `CLAUDE.md` is emphatic that migrating `hospitality_coms_dev`
+breaks `DROP ROLE employer_role` in `hospitality_coms_test` — grants are
+database-local while roles are cluster-global — and the recipe both files
+carried, "create a throwaway database and drop it afterwards", **has the same
+problem**. Any migrated database on the cluster grants `employer_role`, so the
+Elixir suite is broken for everyone on that machine for as long as it exists.
+
+A throwaway **cluster** does not have the problem at all. `initdb` into a
+temporary directory is a postmaster with its own role namespace, so its
+`employer_role` is a different role that happens to share a name:
+
+```bash
+initdb -D /tmp/hc/data -U postgres --auth=trust --locale=C
+LC_ALL=C pg_ctl -D /tmp/hc/data -o "-p 55432" -l /tmp/hc/log start
+# … migrate, serve, test …
+LC_ALL=C pg_ctl -D /tmp/hc/data -m immediate stop && rm -rf /tmp/hc
+```
+
+`LC_ALL=C` on both commands is not optional on macOS: without it `initdb`
+refuses the locale, and the postmaster starts and immediately dies with
+"postmaster became multithreaded during startup", which reads like a build
+problem and is not one. A container (`docker run postgres:17`) is the same idea
+and also fine; this needs no daemon.
+
+Both files were run this way and both passed — 3 assertions for the peers, 5 for
+the transport. Measured afterwards: `pg_shdepend` on the real cluster held the
+same 22 rows for `employer_role` as before, all of them `hospitality_coms_test`'s.
+
+**The token-minting snippet in both headers was also wrong**, and running it is
+what found that: `Accounts.register_person/2` inserts with `mode: :savepoint`,
+which outside a transaction raises `DBConnection.TransactionError: transaction
+is not started`. Every ordinary caller reaches it from inside
+`request_magic_link/2`'s transaction, so nothing had ever noticed. Both recipes
+now wrap it.
 
 ## How the code is arranged
 
@@ -454,7 +479,7 @@ push and receive no announcement at all, for the whole session, with nothing
 refused and nothing logged. A room in the wrong case loses one room's fan-out;
 this loses the surface's.
 
-### Nothing about who you know is written to this browser
+### Nothing about who you know is written to this browser, and what is in memory is dropped
 
 There is no store, no `localStorage` key, and nothing added to
 `SessionProvider`'s `onSessionEnded`. The rooms keep a bookmark file because no
@@ -467,6 +492,28 @@ anything about peers, it clears on session end too" — arrived at from the othe
 end: peer data is a graph of who a worker knows, which is more sensitive than
 which venue they worked at, and the reason none of it survives a log-out on a
 shared terminal is that none of it was ever stored.
+
+Storage was not the whole of it. **A rejoin refused `unauthorized` empties what
+the hook holds**, which is a different path and needed its own answer:
+`phoenix` re-joins on its own backoff after a dropped link, and a session
+revoked in between is refused there. `RequireSession` still reads
+`authenticated` — `GET /api/me` was answered minutes ago — so nothing else on
+the page would have cleared it, and the graph would have sat on screen under an
+alert saying the session was gone. The sections stay mounted and render empty,
+which is deliberate: hiding them in the route as well made the clear
+unfalsifiable, because no assertion through the DOM can tell "not rendered" from
+"not held".
+
+It is keyed on `unauthorized` and not on any refusal. Phoenix's own
+`%{reason: "too many channels joined"}` says nothing about who is signed in, and
+emptying the graph there would throw away this person's own data to report a
+transport limit. There is a test for each direction.
+
+**This is the third shared-terminal finding this client has produced** — room
+bookmarks surviving log-out, a closed conversation's cache outliving the
+server's own answer, and this. The backend keeps its guarantees; the pattern is
+that a client-side cache quietly becomes a second, unenforced copy of something
+the server is careful about.
 
 ### An announcement is a nudge; the list is the answer
 
@@ -489,9 +536,28 @@ on that topic stamps its instant as `at`. There are two decoders and one type,
 and `decode.ts` refuses each key where the other belongs — a single decoder with
 a fallback would also accept a payload carrying neither.
 
+A `peer_message` naming a conversation no list has mentioned **re-asks
+`list_conversations`**, because every peer message is for a connection this
+person is a party to and `list_conversations` returns all of them — so a
+mismatch means the list is stale, and the usual cause is a `peer_connected`
+announcement that was dropped, which `announce/2` explicitly permits. Without it
+the conversation is invisible until a reload while its messages pile up in a
+cache nothing can open.
+
 Every action refreshes as well as listening, because `announce/2` is best effort
 and logged rather than propagated. Both paths are idempotent reads, which is
-what makes running both harmless rather than something to be careful about.
+what makes running both harmless rather than something to be careful about. The
+tests pin **which** lists each path asks for, so an over-fetch — invisible on
+screen, a round trip per event — fails rather than passing quietly.
+
+**What the nudges do not cover is an open conversation's history.** The three
+lists are re-asked on every join, so a reconnect re-derives them; a history is
+not a list, and a message sent while the link was down reached no push here
+because this client was not subscribed to hear it. `joinGeneration` counts
+admitted joins and `ConversationView` names it in the effect that loads history,
+so a rejoin backfills the open conversation — **only the open one**, because
+every other cache is unreachable until it is opened and opening one re-fetches
+anyway.
 
 ### A closed conversation is asked about, not remembered
 
@@ -508,6 +574,23 @@ leave the topic either — the topic is the person, not the conversation, and
 leaving would take every other conversation down with it. `peers.test.tsx`
 asserts `channel.leaves === 0` after a disconnect and then sends into a second
 conversation on the same channel.
+
+**Closing one also replaces the message cache rather than merging into it**, and
+that is the second shared-terminal finding. `Peers.list_messages/2` reads the
+whole conversation while it is open and, once disconnected, each party's own
+messages and only their own — R15's remedy, which `peers_test.exs` asserts with
+a row count as the control for nothing having been deleted. The client held a
+cache from while it was open and merged the new history into it, so the
+counterpart's messages stayed on screen: **the enforcement held on the wire and
+not on the screen.** `loadHistory` now takes the conversation's `open` flag and
+assigns rather than merges when it is false, and `ConversationView` names the
+flag in its effect so the re-fetch happens the moment it flips. Merging survives
+for the open case, where the reply can genuinely race a push; nothing can be
+pushed to a closed conversation, so there is nothing to race.
+
+It was invisible because every disconnect fixture answered `history` with
+`{messages: []}` first — the counterpart's messages were never in the cache when
+the conversation closed, so the property had nothing to fail on.
 
 ### What the peer surface deliberately does not decide
 
@@ -527,6 +610,38 @@ conversation on the same channel.
 - **No profile, disclosure, or attested entries.** U9 owns those and was being
   written at the same time as this; guessing at its shapes would be a
   placeholder for a surface nobody has chosen.
+
+What it _does_ decide is what the server has already settled. "Ask to connect"
+is not offered when the client is holding an open conversation with that person,
+an approach they sent, or **one they have received** — everything on
+`list_incoming_requests/1` is outstanding, so an entry from that peer means the
+approach exists in the other direction, the server would refuse the request
+`conflict`, and the button reads as though nothing has happened while somebody
+waits for an answer further down the page. Accept and Decline close while an
+answer is in flight, because they are the same conditional `UPDATE` server-side
+and the second click of a double-click gets `:not_found` — indistinguishable
+from an id that names nothing (AE1), so the surface could not explain it.
+
+### One ordering hazard, guarded twice
+
+`merged` orders messages by the server's instant, and comparing those instants
+**as strings** was safe only by accident: every peer timestamp is `:utc_datetime`,
+truncated to the second. `"…:00.5Z" < "…:00Z"` — `.` sorts before `Z` — so the
+day any peer column becomes `:utc_datetime_usec` the order silently inverts
+inside every second. That is not hypothetical here: U6's review moved
+`roster_entries` from second to microsecond precision for a correctness reason.
+
+Both halves are in place rather than one: `byInstant` parses with `Date.parse`
+and falls back to the string comparison only for a value it cannot read at all
+(`NaN` compares false against everything, which would scramble the whole list
+rather than misplace one row), **and** a test carries a sub-second instant that
+fails today if the parse is removed. The fix alone would be unasserted; the test
+alone would leave the code wrong until somebody read the failure.
+
+This is not the time arithmetic `peer.ts` bans. That ban is about deriving
+product state — whether a request has expired — against this client's own clock,
+which is why `lapsed` arrives from the server. Ordering two instants the server
+stamped decides nothing.
 
 ## Deliberately absent, and why
 

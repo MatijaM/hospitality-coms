@@ -6,14 +6,39 @@
  * `src/socket/session-socket.integration.test.ts` is skipped without a token,
  * so `npm test` on a machine with no backend is still green.
  *
- * **It has not been run.** It is written and left opt-in deliberately, and the
- * reason is in `CLAUDE.md`'s Database section rather than in laziness: a server
- * needs a database, migrating one grants privileges to `employer_role`, grants
- * are database-local while **roles are cluster-global**, and one grant anywhere
- * on the cluster makes `DROP ROLE employer_role` fail in `hospitality_coms_test`
- * — which `PostgresRolesTest` asserts on. Standing a throwaway database up
- * breaks the Elixir suite for as long as it exists. Run this when nothing else
- * is running against the cluster, and drop the database afterwards.
+ * **It has been run, against a Postgres cluster of its own**, and all three
+ * assertions passed.
+ *
+ * ## Why a separate cluster and not a throwaway database
+ *
+ * The obvious recipe — `createdb hospitality_coms_u12peers` on the machine's
+ * usual cluster — is the one `CLAUDE.md`'s Database section warns about, and it
+ * is worth restating because the failure lands somewhere else entirely.
+ * Migrating any database grants privileges to `employer_role`; grants are
+ * database-local while **roles are cluster-global**; so one grant anywhere on
+ * the cluster makes `DROP ROLE employer_role` fail in `hospitality_coms_test`,
+ * which `PostgresRolesTest` asserts on. A throwaway database breaks the Elixir
+ * suite for as long as it exists, which is intolerable when somebody else is
+ * running that suite.
+ *
+ * A **cluster** of its own does not, and that is the whole trick: `initdb` into
+ * a temporary directory produces a postmaster with its own role namespace, so
+ * `employer_role` there is a different role that happens to share a name. A
+ * container image is the same idea with more moving parts; this needs no daemon
+ * and the same `psql` that is already installed.
+ *
+ *     initdb -D /tmp/hc-peers/data -U postgres --auth=trust --locale=C
+ *     LC_ALL=C pg_ctl -D /tmp/hc-peers/data -o "-p 55432" -l /tmp/hc-peers/log start
+ *     createdb -h 127.0.0.1 -p 55432 -U postgres hospitality_coms_u12peers
+ *
+ * `LC_ALL=C` on both is not optional on macOS: without it `initdb` refuses the
+ * locale outright, and the postmaster starts and then dies with "postmaster
+ * became multithreaded during startup", which reads like a build problem.
+ *
+ * Afterwards, `pg_ctl stop` and delete the directory. Nothing needs revoking,
+ * because nothing was granted anywhere that outlives it — measured, by counting
+ * `pg_shdepend` rows for `employer_role` on the real cluster before and after
+ * and finding the same 22, all of them `hospitality_coms_test`'s.
  *
  * ## What only this file can settle
  *
@@ -35,29 +60,35 @@
  *
  * ## Getting the two variables
  *
- *     createdb -U postgres hospitality_coms_u12peers
- *     export DATABASE_URL=ecto://postgres:postgres@localhost/hospitality_coms_u12peers
+ *     export DATABASE_URL=ecto://postgres:postgres@127.0.0.1:55432/hospitality_coms_u12peers
  *     export SECRET_KEY_BASE=$(mix phx.gen.secret)
  *     export MAGIC_LINK_BASE_URL=http://localhost:5173/log-in/
  *     export WEBSOCKET_ORIGINS=http://localhost:5173
- *     MIX_ENV=prod mix ecto.migrate
- *     MIX_ENV=prod PHX_SERVER=true mix phx.server &
+ *     export PORT=4010 MIX_ENV=prod
+ *     mix ecto.migrate
+ *     PHX_SERVER=true mix phx.server &
  *
  *     # a person, their id, and a session token, minted directly:
  *     # `/dev/mailbox` is a dev-only route and this server is not in dev.
- *     MIX_ENV=prod mix run -e '
+ *     #
+ *     # The transaction is **required**, and this is the correction that
+ *     # running it produced: `Accounts.register_person/2` inserts with
+ *     # `mode: :savepoint`, which outside a transaction raises
+ *     # `DBConnection.TransactionError: transaction is not started`. Every
+ *     # ordinary caller reaches it from inside `request_magic_link/2`'s
+ *     # transaction, so nothing had noticed.
+ *     mix run -e '
  *       now = HospitalityComs.Clock.now()
- *       {:ok, p} = HospitalityComs.Accounts.register_person(%{email: "u12p@example.com"}, now)
+ *       {:ok, {p, t}} = HospitalityComs.Repo.transaction(fn ->
+ *         {:ok, p} = HospitalityComs.Accounts.register_person(%{email: "u12p@example.com"}, now)
+ *         {p, HospitalityComs.Accounts.generate_person_session_token(p, now)}
+ *       end)
  *       IO.puts(p.id)
- *       IO.puts(HospitalityComsWeb.PersonAuth.encode_token(
- *         HospitalityComs.Accounts.generate_person_session_token(p, now)))'
+ *       IO.puts(HospitalityComsWeb.PersonAuth.encode_token(t))'
  *
- *     HOSPITALITY_COMS_PERSON_ID=<the first line> \
+ *     HOSPITALITY_COMS_SOCKET_URL=ws://localhost:4010/socket/person \
+ *       HOSPITALITY_COMS_PERSON_ID=<the first line> \
  *       HOSPITALITY_COMS_SESSION_TOKEN=<the second> npm run test:peers
- *
- *     # afterwards, and this part is not optional
- *     dropdb -U postgres hospitality_coms_u12peers
- *     psql -U postgres -c "select count(*) from pg_shdepend"   # and check the roles
  *
  * A person with no engagements is enough for every assertion here: the lists
  * come back empty and the shapes are still the shapes. Seeding a co-rostered
