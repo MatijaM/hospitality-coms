@@ -16,7 +16,7 @@ per-employer and per-peer disclosure over the attested ones, correction requests
 
 **The view is the tier, and on this deployment it is the only tier that could be.** U7's
 review measured that `HospitalityComs.Repo` connects as `postgres`, for which
-`pg_authid.usesuper` is true. A superuser bypasses row-level security whether or not a
+`pg_authid.rolsuper` is true. A superuser bypasses row-level security whether or not a
 policy is `FORCE`d, so an RLS-based hidden-entry rule would read as a tier in the migration
 and provide none in the database. KTD3's argument was "a view has no equivalent of `FORCE`
 to forget"; the measurement makes it stronger than that. The base table stays ungranted, the
@@ -282,8 +282,16 @@ Controls, so no assertion can pass for the wrong reason:
 - 22 is the control for 23 and 24 — an override path that did nothing satisfies both.
 - 41 is the control for 42 and 44; 43 is what makes 42 about *independence* rather than about
   hiding.
-- 52 is the control for the whole of criterion 7: a notice that was a constant but a *view* that
-  carried a count would satisfy 51 alone.
+- ~~52 is the control for the whole of criterion 7: a notice that was a constant but a *view* that
+  carried a count would satisfy 51 alone.~~ **False as shipped, corrected in revision 13.** Row 52's
+  body ended in `Map.keys(hd(concealed)) == Map.keys(hd(ordinary))`, and both sides are
+  `%VisibleEntry{}` — `defstruct` fixes the key set at compile time, so the assertion is invariant
+  under every possible difference in what the two reads contain. Measured: a `hidden_count` on the
+  view, selected in `Records` and carried on the struct, reported 1 against 0 and row 52 passed.
+  What caught it was row 13, the view's column-list pin, and nothing else — so an oracle introduced
+  at the **render** layer was caught by nothing at all. Row 52 is the control for criterion 7 only
+  in the corrected form: a literal field list written in the test file, plus an equality over the
+  values with the two entry ids dropped.
 - 31 is the control for 9 and 10 together: an owner without privilege, or a
   `security_invoker` view, makes it return nothing; an owner that bypasses RLS with no filter
   of its own makes it return every venue's.
@@ -403,6 +411,134 @@ Recorded rather than silently applied, because the gate exists to be departed fr
 
 12. **Every claim about what a test would catch was checked by breaking the code**, and each
     mutation was reverted. Recorded in the final report with the tests each one failed.
+
+## Revisions made after review
+
+Five reviewers read the unit as shipped. What follows is what changed and why; the rows above are
+left as written so the difference between the design and the correction stays visible.
+
+13. **The oracle control could not fail, and criterion 7 rested on it.** See the struck-through
+    bullet under Controls. Row 52 now asserts a literal field list held in `profiles_test.exs` and
+    an equality over the values with `attested_entry_id` and `entry_engagement_id` dropped. Both
+    halves were measured against the same mutation — a `hidden_count` added to the view, selected in
+    `Records`, carried on `VisibleEntry` — and each fails on its own. This is the fifth "control
+    that does not control" this project has produced; the pattern in all five is a comparison
+    against the other side of the thing under test rather than against something written down.
+
+14. **The peer default let a manager read what the employer view withheld, and it is now the
+    venue's own rule.** An employer session is a person session plus a venue, so a venue's manager
+    holds an engagement there, is co-rostered with every worker there, and is therefore a *visible
+    peer* — and the peer default was "disclosed". `list_visible_entries(manager_session, worker)`
+    hid the worker's second job while `fetch_peer_profile(manager, worker)` handed it over: no
+    grant, nothing manufactured, and no consent step, because the gate is visible **or** connected.
+
+    The design missed it because "what does a peer see?" and "what does an employer see?" were
+    answered in separate paragraphs and the matrix gave the two scopes to two different people in
+    every row. `Records.peer_disclosure/4` now applies, for each venue where the *viewer* holds an
+    engagement active at the asking instant, that venue's concurrency rule — the entries view's
+    predicate clause for clause, own-venue branch included — with the per-peer override layering on
+    top in both directions. Peers whose venues the worker never worked at are unaffected; a viewer
+    holding posts at two venues is bound by both. `profiles_test.exs` gains a block named for the
+    overlap, giving both scopes to one human.
+
+    **Row 53 changed what it asserts, and the change is disclosed rather than absorbed.** It
+    asserted that the two sessions differ *by default*, which after this fix is exactly the defect
+    restated. It now asserts they agree by default and differ once the worker discloses to the
+    manager by name — same claim, about a difference the product means. It also reads
+    `own_profile/1`, which had no caller and no test.
+
+    **Residual, asserted rather than described:** the rule keys on the viewer's engagement being
+    active at the instant, so during visibility's thirty-day tail an ex-colleague holds no post and
+    no venue's rule applies to them.
+
+15. **Three person filters and one peer filter were unexercised.** Deleting
+    `where: engagement.person_id == ^person_id` from `disclosures_of/1` or
+    `correction_requests_of/1`, or `where: entry.person_id == ^person_id` from
+    `declared_entries_of/1`, left 825/825 passing; so did dropping the peer disclosure filter from
+    the correction-request read, which nothing anywhere called. Unfiltered, `list_disclosures/1`
+    hands every person's concealment ledger to any `PersonScope`. The matrix has no row for any of
+    the four: rows 41–44 are about entries, and only the peer scenarios ever put two people's rows
+    in one database. Six tests added, each measured.
+
+16. **The two non-emptiness clauses needed a test on the peer side too.** Row 19 says "from either
+    side" and was built on the employer path alone; the same pair on the new peer predicate killed
+    nothing. Two more bodies, one per side, each measured.
+
+17. **`{:error, :no_grant}` was enumerated in four specs and asserted nowhere**, and
+    `list_visible_corrections/2` had no grantless function-clause test where
+    `list_visible_entries/2` did. One body covering all four, with the same four calls under a real
+    grant as its control.
+
+18. **`AT TIME ZONE 'UTC'` (revision 2) shipped without a regression test.** The suite runs under
+    `Etc/UTC`, which is why the bug was invisible and why nothing pinned the fix. One employer read
+    now runs under `SET LOCAL TimeZone = 'America/New_York'`; measured, it comes back empty with the
+    conversion removed.
+
+19. **`resolve_correction/3` raised `Postgrex.Error` from a function whose spec enumerates three
+    atoms**, when the resolving instant preceded `requested_at`. It is an `update_all`, so no
+    changeset can carry `correction_requests_resolved_after_requested`. The predicate now carries
+    it, in `resolvable_correction/3` and in the diagnostic behind it, and the refusal is
+    `:not_found`.
+
+20. **"Four readers, one shape" was untrue and the suite had locked the divergence in.**
+    `venue_corrections/1` had no `select:`, so the attesting venue's own read returned schema
+    structs — `resolution` as `"declined"` where the other three gave `:declined`, and the id under
+    `id` rather than `correction_request_id` — with row 36's body asserting both spellings two lines
+    apart. Both the query and the test were corrected. `list_venue_corrections/1` now returns
+    `[VisibleCorrection.t()]`; nothing read the fields it drops.
+
+21. **Two indexes, per `AGENTS.md`'s rule that a new query on a new column combination ships with
+    one.** `(audience_person_id, disclosed)` for the peer read's subqueries — four per profile after
+    revision 14 — and because `audience_person_id` is an unindexed `ON DELETE RESTRICT` key that
+    U10's erasure will scan; and `(engagement_id, decided_at, id)` for the worker's own read of the
+    ledger. Migrations are unmerged, so `create_profiles.exs` was edited in place and the full
+    rollback round trip re-run at every depth with the catalogue diffed.
+
+22. **The disclosure ledger's ownership rule moved into Postgres.**
+    `attested_entry_disclosures` carries `person_id`, and `(engagement_id, person_id)` is a MATCH
+    FULL composite key into `engagements (id, person_id)`. It was the one ownership rule in the tree
+    resting on an application-level `exists?` while `attested_entries`, `roster_entries`,
+    `room_messages` and `correction_requests` all key into `engagements (id, venue_id)`. The check
+    stays, because it is what produces `:not_found` rather than a foreign-key violation.
+
+23. **Two view columns with no reader were removed.** `viewer_venue_id` from both views — it
+    restated `app_current_employer_id()`, which is the value the caller opened the scope with — and
+    `attested_entry_id` from the corrections view, a unique function of the `entry_engagement_id`
+    beside it. Row 13 pins these lists, so a column with no consumer is a permanent employer-facing
+    surface.
+
+24. **Four documentation claims were false and are corrected**, each named in the relevant
+    moduledoc: `pg_authid.usesuper` is `rolsuper` (this brief's line 19 and the view migration);
+    "the employer reads two views and never a table" ignores `correction_requests`;
+    `grant_profile_zone` writes seven `pg_shdepend` rows and not three, because a column-scoped
+    grant writes one per column; and `VisibleEntry.entry_engagement_id` is not "venue-local by
+    construction" whenever the entry comes from another venue, which is the only case the rule
+    exists for.
+
+25. **Structural checks that had holes.** `profiles_test.exs`'s `@read_builders` named eight query
+    builders and omitted `Filter`, `Select`, `Update`, `Dynamic`, `CTE` and `Combination`, so a
+    `Profiles.*` sibling composing `where/3` escaped the sweep — the exact drift U8 found in
+    `Peers`. It is now every builder, since nothing outside `Records` composes any. Row 3's
+    "exposes no function that writes an attested entry" filtered for names *containing* "attested",
+    which `edit_entry/3` satisfies; it is now the whole export list against a literal.
+
+26. **An aborted non-sandboxed run poisons the test database and nothing reported it.** Not a
+    finding about the unit, but U9 adds an eleventh non-sandboxed file and three more
+    `ON DELETE RESTRICT` tables. `EngagementsFixtures.purge/0` now rescues the violation and
+    re-raises naming the residue and the remedy, and confirms afterwards that no prefixed row
+    survived. Two reviewers lost time to this independently; measured against a database poisoned on
+    purpose.
+
+27. **Dead code removed:** `Records.entries_view/0` and `corrections_view/0`,
+    `Disclosure.venue_constraint/0` and `person_constraint/0`, `CorrectionRequest.resolutions/0`,
+    `boundary_test.exs`'s `round_trip_profile_zone/1` (a one-line alias), and `VisibleEntry`'s
+    `row()` type, which restated `t()` field for field and which Dialyzer could not connect to
+    anything. `VisibleEntry.new/1` is **kept** despite being an identity map: it is where three
+    differently-typed queries become one struct, and `@enforce_keys` turns a dropped field into a
+    `KeyError` at the boundary rather than a `nil` in a rendered profile.
+    `CreateEmployerVisibleView.views/0` is kept and made load-bearing — `boundary_test.exs` now
+    asserts it three ways against `GrantProfileZone.granted_views/0` and `Zones.employer_views/0`,
+    since the names are literals in three modules.
 
 ## Quality scores (self-assessed)
 

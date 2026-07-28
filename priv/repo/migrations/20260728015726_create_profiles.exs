@@ -33,6 +33,24 @@ defmodule HospitalityComs.Repo.Migrations.CreateProfiles do
   "this person, at this venue", and `attested_entries.engagement_id` is unique,
   so an engagement names exactly one entry.
 
+  **And it carries `person_id`, so ownership is a key rather than a check.**
+  Whether a worker may decide about an engagement is an ownership question, and
+  every other ownership question in this tree is answered by a composite foreign
+  key: `attested_entries`, `roster_entries`, `room_messages` and
+  `correction_requests` all key into `engagements (id, venue_id)` precisely so
+  that a forgotten `where` in Elixir is not the only thing between a row and the
+  wrong tenant. This is that discipline read from the person zone's side —
+  `(engagement_id, person_id)` MATCH FULL into `engagements (id, person_id)`,
+  with the unique index that makes it referenceable created here because
+  `create_engagements` is on `main`.
+
+  `HospitalityComs.Profiles.set_disclosure/4` still asks first, and the two are
+  not redundant: the check is what produces `{:error, :not_found}` instead of a
+  foreign-key violation, and the key is what makes the check's absence not a
+  hole. It is also not a second crossing — `attested_entry_disclosures` is
+  person zone and already holds a foreign key to `people` through
+  `audience_person_id`, and `person_id` references `engagements`, not `people`.
+
   ## The audience venue is an employer key on a person-zone table
 
   The first in this tree, and it is deliberate rather than an oversight. The
@@ -111,6 +129,7 @@ defmodule HospitalityComs.Repo.Migrations.CreateProfiles do
 
   @correction_engagement_fkey "correction_requests_engagement_fkey"
   @correction_resolved_by_fkey "correction_requests_resolved_by_grant_fkey"
+  @disclosure_engagement_fkey "attested_entry_disclosures_engagement_fkey"
 
   def up do
     create_declared_entries()
@@ -118,11 +137,15 @@ defmodule HospitalityComs.Repo.Migrations.CreateProfiles do
     create_correction_requests()
   end
 
-  # In dependency order, which is the reverse of `up`.
+  # In dependency order, which is the reverse of `up`. The index on
+  # `engagements` is the composite key's target and belongs to this migration
+  # rather than to `create_engagements`, which is on `main`; it comes off last
+  # because the key that needs it does not exist by then.
   def down do
     drop(table(:correction_requests))
     drop(table(:attested_entry_disclosures))
     drop(table(:declared_entries))
+    drop(unique_index(:engagements, [:id, :person_id]))
   end
 
   ## The half the worker owns
@@ -175,13 +198,35 @@ defmodule HospitalityComs.Repo.Migrations.CreateProfiles do
   ## The override
 
   defp create_attested_entry_disclosures do
+    # The composite key's target. `engagements` is U5's table and U5's migration
+    # is on `main`, so the index that makes `(id, person_id)` referenceable is
+    # created here — the same relationship every employer-zone table has to
+    # `engagements (id, venue_id)`, one zone over.
+    create unique_index(:engagements, [:id, :person_id])
+
     create table(:attested_entry_disclosures, primary_key: false) do
       add :id, :binary_id, primary_key: true
 
       # The subject, named as the engagement rather than as the attested entry.
-      # See the moduledoc.
-      add :engagement_id, references(:engagements, type: :binary_id, on_delete: :restrict),
-        null: false
+      # See the moduledoc. Paired with `person_id` so the composite foreign key
+      # below can say *whose* engagement it is; the reference itself is added
+      # after the table, because Ecto's `references/2` writes a single-column
+      # key and this one is two.
+      add :engagement_id, :binary_id, null: false
+
+      # **The owner, and the whole reason it is a column.** Whether a worker may
+      # decide about an engagement is an ownership rule, and every other
+      # ownership rule in this tree is a composite foreign key rather than an
+      # `exists?` in Elixir — `attested_entries`, `roster_entries`,
+      # `room_messages` and `correction_requests` all key into
+      # `engagements (id, venue_id)` for exactly that reason. This is the same
+      # discipline with the person zone's key instead of the employer zone's.
+      #
+      # `HospitalityComs.Profiles.set_disclosure/4` still asks first, and that
+      # is not redundancy: the check is what produces `{:error, :not_found}`
+      # rather than a foreign-key violation, and this is what makes the check's
+      # absence not a hole.
+      add :person_id, :binary_id, null: false
 
       # Exactly one of these two. See the moduledoc for why the venue is a
       # column here at all.
@@ -207,6 +252,32 @@ defmodule HospitalityComs.Repo.Migrations.CreateProfiles do
              where: "audience_person_id IS NOT NULL",
              name: :attested_entry_disclosures_one_per_person
            )
+
+    # The peer read's own index. `HospitalityComs.Profiles.Records` asks
+    # `audience_person_id = ? AND disclosed = ?` twice per peer profile read and
+    # twice again for the correction requests — the partial index above leads on
+    # `engagement_id`, so it cannot serve a predicate that names neither. It is
+    # also the index `audience_person_id` needs in its own right: the column is
+    # `ON DELETE RESTRICT` to `people`, and an unindexed restricting key makes
+    # every deletion of a person a sequential scan of this table, which is U10's
+    # problem the day it arrives.
+    create index(:attested_entry_disclosures, [:audience_person_id, :disclosed])
+
+    # And the worker's own read of the ledger, which is ordered by
+    # `decided_at` and reached through the engagement.
+    create index(:attested_entry_disclosures, [:engagement_id, :decided_at, :id])
+
+    # MATCH FULL: neither column of the key is nullable, so a row either names
+    # one of this person's own engagements or is refused. There is no half
+    # reference and no way to decide about somebody else's employment.
+    execute("""
+    ALTER TABLE attested_entry_disclosures
+      ADD CONSTRAINT #{@disclosure_engagement_fkey}
+      FOREIGN KEY (engagement_id, person_id)
+      REFERENCES engagements (id, person_id)
+      MATCH FULL
+      ON DELETE RESTRICT
+    """)
 
     # Exactly one audience. Both operands of `<>` are non-null booleans, so this
     # is NULL-proof by construction: both null is `TRUE <> TRUE`, both set is

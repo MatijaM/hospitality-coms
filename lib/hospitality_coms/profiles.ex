@@ -22,9 +22,17 @@ defmodule HospitalityComs.Profiles do
   The hidden-entry rule is **per row**, and a table grant cannot express a
   per-row rule. So `employer_role` holds no privilege on `attested_entries` at
   all — since U5, asserted in `HospitalityComs.BoundaryTest` — and every
-  employer read in this module goes through
+  employer read *of an attested entry* goes through
   `employer_visible_attested_entries`, a view owned by the role that owns the
   base tables, granted `SELECT` and nothing else.
+
+  **That is a claim about `attested_entries` and not about employer reads in
+  general.** `list_venue_corrections/1` and `resolve_correction/3` read and
+  write `correction_requests` through `EmployerRepo` on the base table, under
+  the row-level security policy on `venue_id` and a column-scoped `UPDATE` —
+  because a venue's own inbox is its own data, and confining it needs tenancy
+  rather than a per-row disclosure rule. The rule KTD3 is about is the one a
+  grant cannot express; a `WHERE venue_id = ?` is one a policy can.
 
   Row-level security was not merely the less tidy option here. `HospitalityComs.Repo`
   connects as a **superuser** on this deployment, and a superuser bypasses
@@ -118,10 +126,12 @@ defmodule HospitalityComs.Profiles do
   @typedoc """
   A profile as one reader sees it.
 
-  The same three lists whoever is asking, so the unit's verification — an
-  employer session and the same human's person session returning different entry
-  sets for one worker — is a comparison of two of these rather than of two
-  different shapes.
+  The same three lists whoever is asking — `own_profile/1` and
+  `fetch_peer_profile/2` both build one — so the unit's verification compares
+  `list_visible_entries/2`'s `[VisibleEntry.t()]` against the
+  `:attested_entries` of one of these, which is the same struct in both
+  positions. The employer's answer is a list rather than a profile because an
+  employer never sees a declared entry at all.
 
   There is deliberately **no** `hidden_entries` count and no `complete?` flag.
   See `incompleteness_notice/0`.
@@ -273,6 +283,12 @@ defmodule HospitalityComs.Profiles do
   An engagement that is not this person's is `:not_found`, identically to an id
   that names nothing. An audience that names no venue and no person is a
   changeset error from the foreign key.
+
+  The ownership check in front of the write is what produces that `:not_found`,
+  and `attested_entry_disclosures_engagement_fkey` is what makes its absence not
+  a hole: the row carries `(engagement_id, person_id)` as a MATCH FULL composite
+  key into `engagements (id, person_id)`, so a decision about somebody else's
+  employment is refused by Postgres too.
   """
   @spec set_disclosure(PersonScope.t(), Ecto.UUID.t(), Disclosure.audience(), boolean()) ::
           {:ok, Disclosure.t()} | {:error, :not_found | Ecto.Changeset.t(Disclosure.t())}
@@ -286,16 +302,24 @@ defmodule HospitalityComs.Profiles do
     person_id
     |> Records.own_engagement(engagement_id)
     |> Repo.exists?()
-    |> decide(engagement_id, audience, disclosed, now)
+    |> decide(engagement_id, person_id, audience, disclosed, now)
   end
 
-  @spec decide(boolean(), Ecto.UUID.t(), Disclosure.audience(), boolean(), DateTime.t()) ::
+  @spec decide(
+          boolean(),
+          Ecto.UUID.t(),
+          Ecto.UUID.t(),
+          Disclosure.audience(),
+          boolean(),
+          DateTime.t()
+        ) ::
           {:ok, Disclosure.t()} | {:error, :not_found | Ecto.Changeset.t(Disclosure.t())}
-  defp decide(false, _engagement_id, _audience, _disclosed, _now), do: {:error, :not_found}
+  defp decide(false, _engagement_id, _person_id, _audience, _disclosed, _now),
+    do: {:error, :not_found}
 
-  defp decide(true, engagement_id, audience, disclosed, now) do
+  defp decide(true, engagement_id, person_id, audience, disclosed, now) do
     engagement_id
-    |> Disclosure.decide_changeset(audience, disclosed, now)
+    |> Disclosure.decide_changeset(person_id, audience, disclosed, now)
     |> Repo.insert(
       on_conflict: {:replace, Disclosure.replaceable_fields()},
       conflict_target: Disclosure.conflict_target(audience),
@@ -358,22 +382,35 @@ defmodule HospitalityComs.Profiles do
   engagement either of them holds. A gate on visibility alone would take the
   profile away from somebody they are still in conversation with.
 
-  Attested entries come back subject to the worker's peer-audience decisions —
-  disclosed unless the worker named this peer and said otherwise — and are
-  independent of what any employer can see. Declared entries come back whole:
-  writing one is publishing it, which is why the ledger governs attested entries
-  alone.
+  Attested entries come back subject to the worker's peer-audience decisions and
+  to **the concurrency rule of every venue this peer works at**, which is the
+  same rule `employer_visible_attested_entries` applies and is here for a reason
+  that is structural rather than defensive: an employer session is a person
+  session plus a venue, so a venue's manager necessarily holds an engagement
+  there, is co-rostered with every worker at that venue, and is therefore a
+  visible peer. A peer default of "disclosed" made the employer view's default
+  recoverable by asking the same question through this door — no grant, nothing
+  manufactured, and no consent step, since the gate is visible **or** connected.
+  So a colleague at venue A learns no more about a worker's other jobs than
+  venue A does, a peer whose venues the worker never worked at is unaffected,
+  and a `set_disclosure/4` row still overrides in either direction.
+
+  Declared entries come back whole: writing one is publishing it, which is why
+  the ledger governs attested entries alone.
 
   `:not_a_peer` covers a person who is neither visible nor connected, an id that
   names nobody, and the caller themselves, identically.
   """
   @spec fetch_peer_profile(PersonScope.t(), Ecto.UUID.t()) ::
           {:ok, profile()} | {:error, :not_a_peer}
-  def fetch_peer_profile(%PersonScope{person: %Person{id: person_id}} = scope, other_person_id)
+  def fetch_peer_profile(
+        %PersonScope{person: %Person{id: person_id}, now: now} = scope,
+        other_person_id
+      )
       when is_binary(person_id) and is_binary(other_person_id) do
     scope
     |> peer?(other_person_id)
-    |> peer_profile(person_id, other_person_id)
+    |> peer_profile(person_id, other_person_id, now)
   end
 
   @spec peer?(PersonScope.t(), Ecto.UUID.t()) :: boolean()
@@ -381,20 +418,20 @@ defmodule HospitalityComs.Profiles do
     Peers.visible?(scope, other_person_id) or Peers.connected?(scope, other_person_id)
   end
 
-  @spec peer_profile(boolean(), Ecto.UUID.t(), Ecto.UUID.t()) ::
+  @spec peer_profile(boolean(), Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) ::
           {:ok, profile()} | {:error, :not_a_peer}
-  defp peer_profile(false, _person_id, _other_person_id), do: {:error, :not_a_peer}
+  defp peer_profile(false, _person_id, _other_person_id, _now), do: {:error, :not_a_peer}
 
-  defp peer_profile(true, person_id, other_person_id) do
+  defp peer_profile(true, person_id, other_person_id, now) do
     attested =
       other_person_id
-      |> Records.attested_entries_disclosed_to(person_id)
+      |> Records.attested_entries_disclosed_to(person_id, now)
       |> Repo.all()
       |> Enum.map(&VisibleEntry.new/1)
 
     corrections =
       other_person_id
-      |> Records.correction_requests_disclosed_to(person_id)
+      |> Records.correction_requests_disclosed_to(person_id, now)
       |> Repo.all()
       |> Enum.map(&VisibleCorrection.new/1)
 
@@ -483,19 +520,28 @@ defmodule HospitalityComs.Profiles do
   `venue_id`. `list_visible_corrections/2` is "requests attached to entries
   somebody disclosed to me", which needs the disclosure rule and therefore the
   view.
+
+  Renders `VisibleCorrection` like the other three reads, so `resolution` is the
+  atom here as it is everywhere. It used to hand back the schema struct, which
+  made this the one caller matching on `"declined"` while three others matched
+  on `:declined`.
   """
   @spec list_venue_corrections(EmployerScope.t()) ::
-          {:ok, [CorrectionRequest.t()]} | {:error, :no_grant}
+          {:ok, [VisibleCorrection.t()]} | {:error, :no_grant}
   def list_venue_corrections(%EmployerScope{grant_id: grant_id} = scope)
       when is_binary(grant_id) do
     EmployerRepo.scoped_transaction(scope, &read_venue_corrections/1)
   end
 
   @spec read_venue_corrections(EmployerScope.t()) ::
-          {:ok, [CorrectionRequest.t()]} | {:error, :no_grant}
+          {:ok, [VisibleCorrection.t()]} | {:error, :no_grant}
   defp read_venue_corrections(scope) do
     with {:ok, _grant} <- Venues.fetch_acting_grant(scope) do
-      {:ok, EmployerRepo.all(Records.venue_corrections(scope.venue_id))}
+      {:ok,
+       scope.venue_id
+       |> Records.venue_corrections()
+       |> EmployerRepo.all()
+       |> Enum.map(&VisibleCorrection.new/1)}
     end
   end
 
@@ -515,6 +561,12 @@ defmodule HospitalityComs.Profiles do
   matches. `:already_resolved` is a statement about this venue's own row, so
   disclosing it enumerates nothing; another venue's request and an id that names
   nothing are both `:not_found`.
+
+  A scope whose instant is *before* the request was raised is `:not_found` too,
+  and that is the same predicate rather than a fourth rule: an `update_all`
+  carries no changeset, so
+  `correction_requests_resolved_after_requested` would otherwise arrive as a raw
+  `Postgrex.Error` from a function whose spec enumerates three atoms.
   """
   @spec resolve_correction(EmployerScope.t(), Ecto.UUID.t(), CorrectionRequest.resolution()) ::
           {:ok, CorrectionRequest.t()}
@@ -530,7 +582,7 @@ defmodule HospitalityComs.Profiles do
   defp resolve(scope, request_id, resolution) do
     with {:ok, grant} <- Venues.fetch_acting_grant(scope) do
       scope.venue_id
-      |> Records.resolvable_correction(request_id)
+      |> Records.resolvable_correction(request_id, scope.now)
       |> EmployerRepo.update_all(
         set: CorrectionRequest.resolution_set(resolution, grant.id, scope.now)
       )
@@ -548,7 +600,7 @@ defmodule HospitalityComs.Profiles do
 
   defp resolved({0, _rows}, scope, request_id) do
     scope.venue_id
-    |> Records.correction_at_venue(request_id)
+    |> Records.correction_at_venue(request_id, scope.now)
     |> EmployerRepo.exists?()
     |> diagnose()
   end

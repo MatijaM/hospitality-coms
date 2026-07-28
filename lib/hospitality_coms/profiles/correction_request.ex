@@ -106,12 +106,6 @@ defmodule HospitalityComs.Profiles.CorrectionRequest do
   def max_body_length, do: @max_body_length
 
   @doc """
-  The answers a resolution may carry.
-  """
-  @spec resolutions() :: [resolution()]
-  def resolutions, do: @resolutions
-
-  @doc """
   A worker's contest of one of their own engagements' attested entries.
 
   `venue_id` and `engagement_id` are put rather than cast, both taken from an

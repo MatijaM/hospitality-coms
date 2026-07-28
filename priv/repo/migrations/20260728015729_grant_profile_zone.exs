@@ -54,8 +54,16 @@ defmodule HospitalityComs.Repo.Migrations.GrantProfileZone do
 
   ## What this costs, and where it is accounted for
 
-  A `pg_shdepend` row per granted object — three of them, one of which is a table
-  and two of which are **views**. Roles are cluster-global while grants are
+  A `pg_shdepend` row per granted object, and **seven of them, not three** —
+  measured, because a column-scoped grant writes one row per column rather than
+  one for the statement. The inventory is `table correction_requests`, the four
+  columns `resolved_at`, `resolution`, `resolved_by_grant_id` and `updated_at`
+  on it, and the two **views**. `HospitalityComs.BoundaryTest` collapses the
+  columns by asking `pg_describe_object(classid, objid, 0)`, which is why the
+  test's expected list is three entries while the catalogue holds seven; the
+  count that matters for `DROP ROLE` is that it is greater than nought.
+
+  Roles are cluster-global while grants are
   database-local, so a row in any database on the cluster makes
   `DROP ROLE employer_role` fail in every other; `HospitalityComs.PostgresRolesTest`
   therefore rolls this migration back before it rolls the roles migration back,

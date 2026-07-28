@@ -610,6 +610,16 @@ defmodule HospitalityComs.BoundaryTest do
       # The control for the inventory above, and the reason the migration
       # exposes its list: an inventory swept over a list somebody transcribed is
       # an inventory that can miss the view nobody transcribed.
+      #
+      # **Three-way, because the names are literals in three modules.**
+      # `CreateEmployerVisibleView.views/0` is the record of what was created,
+      # `GrantProfileZone.granted_views/0` of what was granted on, and
+      # `Zones.employer_views/0` of what the classification permits. Any two
+      # agreeing while the third drifts is a view that exists and is granted on
+      # and is in no zone, or one that is classified and was never made — and
+      # both of those are the kind of gap the totality check below cannot see
+      # because it compares the database against only one of the three.
+      assert Enum.sort(CreateEmployerVisibleView.views()) == Enum.sort(Zones.employer_views())
       assert Enum.sort(GrantProfileZone.granted_views()) == Enum.sort(Zones.employer_views())
     end
 
@@ -966,8 +976,15 @@ defmodule HospitalityComs.BoundaryTest do
       # The inventory the rule above is derived over, so a new key is noticed
       # rather than absorbed. It is also the control: a rule quantified over an
       # empty set holds for any rule at all.
+      # `attested_entry_disclosures_engagement_fkey` is the first composite key
+      # in the tree whose second column is `person_id` rather than `venue_id`,
+      # and the rule is the same rule: an ownership question answered by
+      # Postgres rather than by an `exists?` in Elixir. It is in the *person*
+      # zone, so it is not KTD2's "no employer-zone table may name a person"
+      # being bent — it is that discipline read from the other side.
       assert Map.new(composite_foreign_keys(), &{&1.name, {&1.match_type, &1.nullable?}}) == %{
                "attested_entries_engagement_fkey" => {"f", false},
+               "attested_entry_disclosures_engagement_fkey" => {"f", false},
                "correction_requests_engagement_fkey" => {"f", false},
                "correction_requests_resolved_by_grant_fkey" => {"s", true},
                "employer_grants_granted_by_fkey" => {"s", true},
@@ -1271,7 +1288,7 @@ defmodule HospitalityComs.BoundaryTest do
       assert Enum.sort(database_views()) == Enum.sort(Zones.employer_views())
 
       rolled_back =
-        round_trip_profile_zone(fn ->
+        rolled_back_profile_zone(fn ->
           %{
             tables: MapSet.intersection(MapSet.new(@profile_tables), database_tables()),
             views: database_views()
@@ -1309,9 +1326,27 @@ defmodule HospitalityComs.BoundaryTest do
       # its *caller*, and `employer_role` holds none on `attested_entries` — so
       # the view would refuse every read. That fails closed and it fails: KTD3's
       # whole shape is the owner's privilege standing behind a filter.
+      #
+      # **Asserted as the option's value rather than its absence.** The previous
+      # spelling refused any `security_invoker` reloption at all, which fails on
+      # an explicit `security_invoker = false` — behaviourally identical to the
+      # default and a perfectly reasonable thing for a later migration to write
+      # down. It fired on the real regression, so it worked; it could not tell
+      # "off" from "not set", and only one of those is a defect.
       Enum.each(Zones.employer_views(), fn view ->
-        refute Enum.any?(relation_options(view), &String.starts_with?(&1, "security_invoker"))
+        refute security_invoker?(view)
       end)
+    end
+
+    test "is what that assertion would report if one were turned on" do
+      # The control, and the whole reason the assertion above reads a value.
+      # Rolled back with the sandbox transaction, like every other DDL here.
+      Repo.query!("CREATE VIEW invoker_view WITH (security_invoker = true) AS SELECT 1 AS x")
+
+      Repo.query!("CREATE VIEW definer_view WITH (security_invoker = false) AS SELECT 1 AS x")
+
+      assert security_invoker?("invoker_view")
+      refute security_invoker?("definer_view")
     end
 
     test "is a security_barrier, so a caller's own predicate cannot be pushed under it" do
@@ -1379,6 +1414,11 @@ defmodule HospitalityComs.BoundaryTest do
       # that answers "is this worker concealing something". The standing
       # incompleteness notice is a UI constant; a computed flag would make every
       # employer read carry an oracle.
+      # And no spare columns. Every one of these has a reader in
+      # `HospitalityComs.Profiles.Records`; `viewer_venue_id` and the
+      # corrections view's `attested_entry_id` had none and are gone, because a
+      # column pinned here is a surface that survives by default rather than by
+      # decision.
       assert view_columns("employer_visible_attested_entries") == [
                "attested_at",
                "attested_entry_id",
@@ -1388,12 +1428,10 @@ defmodule HospitalityComs.BoundaryTest do
                "entry_venue_name",
                "role_label",
                "starts_at",
-               "viewer_engagement_id",
-               "viewer_venue_id"
+               "viewer_engagement_id"
              ]
 
       assert view_columns("employer_visible_correction_requests") == [
-               "attested_entry_id",
                "body",
                "correction_request_id",
                "entry_engagement_id",
@@ -1401,8 +1439,7 @@ defmodule HospitalityComs.BoundaryTest do
                "requested_at",
                "resolution",
                "resolved_at",
-               "viewer_engagement_id",
-               "viewer_venue_id"
+               "viewer_engagement_id"
              ]
     end
 
@@ -2283,8 +2320,6 @@ defmodule HospitalityComs.BoundaryTest do
     result
   end
 
-  defp round_trip_profile_zone(between), do: rolled_back_profile_zone(between)
-
   # Partial unique indexes on a table, by name. A partial index is what makes
   # "at most one row per pair *in this state*" expressible at all, and the name
   # is what lets a changeset turn its violation into an error tuple.
@@ -2819,6 +2854,18 @@ defmodule HospitalityComs.BoundaryTest do
 
     options
   end
+
+  # Whether a view resolves its base-table permissions as its caller. Absent and
+  # `=false` are the same answer, which is the distinction the assertion above
+  # needs and the reason this reads the value rather than the key.
+  defp security_invoker?(name) do
+    name
+    |> relation_options()
+    |> Enum.find_value(false, &invoker_option/1)
+  end
+
+  defp invoker_option("security_invoker=" <> value), do: value in ~w(on true yes 1)
+  defp invoker_option(_option), do: nil
 
   defp view_columns(name) do
     %{rows: rows} =

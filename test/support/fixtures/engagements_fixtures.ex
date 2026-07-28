@@ -120,11 +120,81 @@ defmodule HospitalityComs.EngagementsFixtures do
   first: `employer_grants.revoked_by_grant_id` and `granted_by_grant_id` are both
   `ON DELETE RESTRICT`, so a single statement removing a lineage is refused row
   by row rather than reconciled at the end of the statement.
+
+  ## An aborted run leaves rows behind, and this is what says so
+
+  A non-sandboxed file that stops in the middle — `--max-failures`, an
+  interrupt, an exception raised inside a fixture — has already committed what
+  it wrote and never reaches its `on_exit`. The next run then fails **inside
+  this function**, on an `ON DELETE RESTRICT` violation, in every module that
+  takes real connections: eleven files, a hundred and fifty failures, and a
+  stack trace pointing at cleanup rather than at anything under test. Two
+  reviewers read that as a regression and bisected for it independently.
+
+  So the residue is named rather than left to be inferred. There is nothing to
+  fix in the tree when this fires; the database is dirty and the message says
+  how to empty it.
   """
   @spec purge() :: :ok
   def purge do
     {:ok, :purged} = Repo.transaction(&purge_committed/0)
-    :ok
+    confirm_purged()
+  rescue
+    error in [Postgrex.Error, Ecto.ConstraintError] ->
+      reraise residue(Exception.message(error)), __STACKTRACE__
+  end
+
+  # The other half: a purge that *succeeded* and left prefixed rows standing
+  # would be a table this function has never heard of, which is the same
+  # failure one unit later and is worth catching where it is cheap.
+  @spec confirm_purged() :: :ok
+  defp confirm_purged do
+    venues =
+      Repo.one(
+        from venue in Venue,
+          where: like(venue.name, ^"#{@venue_prefix}%"),
+          select: count(venue.id)
+      )
+
+    people =
+      Repo.one(
+        from person in Person,
+          where: like(person.email, ^"#{@person_prefix}%"),
+          select: count(person.id)
+      )
+
+    settled(venues + people)
+  end
+
+  @spec settled(non_neg_integer()) :: :ok
+  defp settled(0), do: :ok
+
+  defp settled(remaining) do
+    raise residue("#{remaining} prefixed rows were still standing after the purge committed")
+  end
+
+  @spec residue(String.t()) :: RuntimeError.t()
+  defp residue(detail) do
+    %RuntimeError{
+      message: """
+      The test database holds rows an earlier non-sandboxed run left behind.
+
+      #{detail}
+
+      This is not a regression in the tree. `#{@venue_prefix}` / `#{@person_prefix}` \
+      rows survive a run that stopped before its `on_exit` — an interrupt, \
+      `--max-failures`, or an exception inside a fixture — and every later run \
+      of every non-sandboxed file fails here rather than where the residue is.
+
+      Empty it and run again:
+
+          MIX_ENV=test mix ecto.drop && MIX_ENV=test mix ecto.create && MIX_ENV=test mix ecto.migrate
+
+      Do **not** run those against hospitality_coms_dev: its grants make \
+      DROP ROLE employer_role fail in the test database, which is a different \
+      failure with the same shape.
+      """
+    }
   end
 
   @spec purge_committed() :: :purged

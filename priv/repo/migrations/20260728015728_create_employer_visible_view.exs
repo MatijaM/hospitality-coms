@@ -10,7 +10,7 @@ defmodule HospitalityComs.Repo.Migrations.CreateEmployerVisibleView do
 
   ## The measurement that makes the decision stronger than its own argument
 
-  `HospitalityComs.Repo` connects as `postgres`, for which `pg_authid.usesuper`
+  `HospitalityComs.Repo` connects as `postgres`, for which `pg_authid.rolsuper`
   is true. **A superuser bypasses row-level security whether or not a policy is
   `FORCE`d.** So on this deployment an RLS-based hidden-entry rule would not
   merely be a switch somebody could forget — it would read as a tier in the
@@ -81,6 +81,23 @@ defmodule HospitalityComs.Repo.Migrations.CreateEmployerVisibleView do
   `engagements.person_id`: the id is globally stable and two venues comparing
   ids out of band can determine the same human works at both, which is precisely
   the concurrency this default hides. This view does not hand one out.
+
+  ## Every column is a permanent employer-facing surface, so there are no spares
+
+  Two were dropped before this shipped and the argument is the same for both:
+  neither had a reader, and a column on these views is pinned by
+  `HospitalityComs.BoundaryTest`'s column list, so it survives every later unit
+  by default.
+
+    * `viewer_venue_id` was `app_current_employer_id()` restated. The view's own
+      `WHERE` fixes it to the value the caller opened the scope with, so it
+      could only ever hand back what the caller already knew — and a second
+      spelling of a value is a thing that drifts from the first if the `WHERE`
+      ever moves.
+    * `attested_entry_id` on the **corrections** view was a unique function of
+      `entry_engagement_id`, which is beside it, because
+      `attested_entries.engagement_id` is unique. It stays on the entries view,
+      where it names the row the entry *is*.
 
   **Which entries?** The venue's own, always — it wrote the assertion, and
   hiding a venue's record from itself is not a thing disclosure means. Every
@@ -171,7 +188,6 @@ defmodule HospitalityComs.Repo.Migrations.CreateEmployerVisibleView do
     WITH (security_barrier = true) AS
     SELECT
       viewer.id            AS viewer_engagement_id,
-      viewer.venue_id      AS viewer_venue_id,
       entry.id             AS attested_entry_id,
       entry.attested_at    AS attested_at,
       subject.id           AS entry_engagement_id,
@@ -220,8 +236,6 @@ defmodule HospitalityComs.Repo.Migrations.CreateEmployerVisibleView do
     WITH (security_barrier = true) AS
     SELECT
       visible.viewer_engagement_id  AS viewer_engagement_id,
-      visible.viewer_venue_id       AS viewer_venue_id,
-      visible.attested_entry_id     AS attested_entry_id,
       visible.entry_engagement_id   AS entry_engagement_id,
       visible.entry_venue_id        AS entry_venue_id,
       request.id                    AS correction_request_id,

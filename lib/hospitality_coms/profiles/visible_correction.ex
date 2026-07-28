@@ -12,11 +12,20 @@ defmodule HospitalityComs.Profiles.VisibleCorrection do
   R16 makes a correction request visible to any viewer of the entry, so its
   visibility is not a rule of its own — it is the entry's rule, applied to a
   join. `*_create_employer_visible_view.exs` builds the second view on the first
-  for exactly that reason.
+  for exactly that reason, and `HospitalityComs.Profiles.Records`'
+  `peer_disclosure/4` composes over both of the peer's reads for the same one.
 
   `resolution` is the atom rather than the column's string, so a caller matches
-  on `:declined` rather than on `"declined"` and the enumerated set is the one
-  `HospitalityComs.Profiles.CorrectionRequest.resolutions/0` names.
+  on `:declined` rather than on `"declined"` and the enumerated set is
+  `HospitalityComs.Profiles.CorrectionRequest.resolution/0`.
+
+  **"Four readers, one shape" was a claim rather than a fact until U9's review.**
+  `Records.venue_corrections/1` — the attesting venue's own inbox — had no
+  `select:` and handed back `CorrectionRequest` structs, so `resolution` was
+  `"declined"` on that path and `:declined` on the other three, and the id
+  arrived under `id` rather than `correction_request_id`.
+  `HospitalityComs.ProfilesTest` had asserted both spellings two lines apart.
+  Both paths now select the field list this struct renders.
   """
 
   alias HospitalityComs.Profiles.CorrectionRequest
@@ -52,6 +61,10 @@ defmodule HospitalityComs.Profiles.VisibleCorrection do
 
   @typedoc """
   The row a `Records` query selects, before it becomes a struct.
+
+  Kept, unlike `HospitalityComs.Profiles.VisibleEntry`'s, because it is not a
+  restatement of `t()`: `resolution` is the column's `String.t()` here and the
+  atom there, which is the conversion `new/1` exists to make.
   """
   @type row() :: %{
           correction_request_id: Ecto.UUID.t(),

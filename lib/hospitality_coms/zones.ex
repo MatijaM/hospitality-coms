@@ -6,16 +6,25 @@ defmodule HospitalityComs.Zones do
   The product's central claim is that an employer-scoped session can never
   resolve a peer conversation or a hidden profile entry. Standard multi-tenancy
   would make that a question about filters — did anyone forget a
-  `WHERE venue_id = ?`. It is not that question here, because the forbidden
-  tables carry no employer key at all: there is no filter to forget. What
-  replaces it is a privilege question, which Postgres answers rather than the
-  codebase promising (KTD1).
+  `WHERE venue_id = ?`. It is not that question here, because almost every
+  forbidden table carries no employer key at all: there is no filter to forget.
+  What replaces it is a privilege question, which Postgres answers rather than
+  the codebase promising (KTD1).
 
   Three zones, and the classification is total:
 
-    * **person zone** — tables with no employer key and none coming. The
-      employer role holds no privilege on any of them. A forgotten `where`
-      surfaces as `permission denied for table peer_messages`.
+    * **person zone** — tables the employer role holds no privilege on. A
+      forgotten `where` surfaces as `permission denied for table peer_messages`
+      rather than as a row that should not have been returned.
+
+      Every one of them but `attested_entry_disclosures` carries no employer key
+      at all, and that is what makes the Problem Frame's inversion literal:
+      there is no filter to forget because there is no column to filter on.
+      U9's disclosure ledger is the exception and it is a deliberate one — the
+      audience of an employer disclosure *is* a venue, so
+      `audience_venue_id` is there and an employer-scoped query over it would
+      mean something. Which is exactly why it is in this zone: see the U9
+      section below.
     * **employer zone** — every row carries `venue_id`, and no row may carry
       `person_id`. Messages, roster entries, and attested entries reference
       `engagements(id, venue_id)` instead, so no worker's name is ever stored
@@ -207,8 +216,8 @@ defmodule HospitalityComs.Zones do
   @typedoc "Which side of the boundary a schema sits on."
   @type zone() :: :person | :employer | :shared
 
-  @typedoc "A privilege `employer_role` holds on a table it must not hold one on."
-  @type offence() :: {table :: String.t(), privilege :: String.t()}
+  @typedoc "A privilege `employer_role` holds on a relation it must not hold one on."
+  @type offence() :: {relation :: String.t(), privilege :: String.t()}
 
   @person_zone [
     Person,
@@ -280,13 +289,17 @@ defmodule HospitalityComs.Zones do
   def shared, do: @shared
 
   @doc """
-  Views the employer role reads through, by name.
+  Every view in the database, by name, and they are the employer's.
+
+  **A totality list rather than a description of a use.** Views get one bucket
+  and it is the permissive one, so `HospitalityComs.BoundaryTest` fails on any
+  view in `public` that is not named here — including one no employer ever
+  reads. Adding a view means deciding about it, and the decision this list
+  records is "`employer_role` may hold privilege on exactly these relations",
+  which is the same thing the three zones record about tables.
 
   Names rather than schemas, because a view has no rows and therefore no zone in
-  the storage sense — see the moduledoc. What the list means is the same thing
-  the zones mean: `employer_role` may hold privilege on exactly these relations,
-  and `HospitalityComs.BoundaryTest` fails on a view that is in the database and
-  not here.
+  the storage sense — see the moduledoc.
   """
   @spec employer_views() :: [String.t()]
   def employer_views, do: @employer_views
@@ -476,35 +489,41 @@ defmodule HospitalityComs.Zones do
   def employer_privileges(repo), do: privileges(repo, person_zone_tables())
 
   @doc """
-  Every privilege the employer role effectively holds on the given tables.
+  Every privilege the employer role effectively holds on the given relations.
 
-  The same sweep `employer_privileges/1` runs, over a table list the caller
-  chooses. On the person zone an empty result is the boundary holding; on the
-  employer zone the result is the *inventory* — what the zone's own grants
-  actually confer, which is worth pinning as exactly as the absence is, since
-  the grants are what U4 spent a cluster-wide `pg_shdepend` dependency on.
+  The same sweep `employer_privileges/1` runs, over a list the caller chooses.
+  On the person zone an empty result is the boundary holding; on the employer
+  zone the result is the *inventory* — what the zone's own grants actually
+  confer, which is worth pinning as exactly as the absence is, since the grants
+  are what U4 spent a cluster-wide `pg_shdepend` dependency on.
+
+  **Relations rather than tables, since U9.** `has_table_privilege` and
+  `has_any_column_privilege` answer about a view as readily as about a table, so
+  the same sweep is what `HospitalityComs.BoundaryTest` runs over
+  `employer_views/0` to pin those to `SELECT` and nothing else. Nothing in the
+  query is table-specific; only the name of the parameter was.
 
   Sharing one implementation is deliberate. If the sweep ever stops seeing a
   kind of grant, the employer-zone inventory goes short at the same moment the
   person-zone audit goes quiet, and one of the two is a test that fails.
   """
   @spec privileges(Ecto.Repo.t(), [String.t()]) :: [offence()]
-  def privileges(repo, tables) do
+  def privileges(repo, relations) do
     %{rows: rows} =
       repo.query!(
         """
-        SELECT t.name, p.privilege
-        FROM unnest($1::text[]) WITH ORDINALITY AS t(name, tord)
+        SELECT r.name, p.privilege
+        FROM unnest($1::text[]) WITH ORDINALITY AS r(name, rord)
         CROSS JOIN unnest($2::text[]) WITH ORDINALITY AS p(privilege, pord)
-        WHERE has_table_privilege($3, t.name, p.privilege)
+        WHERE has_table_privilege($3, r.name, p.privilege)
            OR (p.privilege = ANY($4::text[])
-               AND has_any_column_privilege($3, t.name, p.privilege))
-        ORDER BY t.tord, p.pord
+               AND has_any_column_privilege($3, r.name, p.privilege))
+        ORDER BY r.rord, p.pord
         """,
-        [tables, @table_privileges, @employer_role, @column_privileges]
+        [relations, @table_privileges, @employer_role, @column_privileges]
       )
 
-    Enum.map(rows, fn [table, privilege] -> {table, privilege} end)
+    Enum.map(rows, fn [relation, privilege] -> {relation, privilege} end)
   end
 
   @spec schema?(module()) :: boolean()

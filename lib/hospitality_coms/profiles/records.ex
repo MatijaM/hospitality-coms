@@ -59,18 +59,6 @@ defmodule HospitalityComs.Profiles.Records do
   @entries_view "employer_visible_attested_entries"
   @corrections_view "employer_visible_correction_requests"
 
-  @doc """
-  The name of the view an employer session reads attested entries through.
-  """
-  @spec entries_view() :: String.t()
-  def entries_view, do: @entries_view
-
-  @doc """
-  The name of the view an employer session reads correction requests through.
-  """
-  @spec corrections_view() :: String.t()
-  def corrections_view, do: @corrections_view
-
   ## The person's own engagements
 
   @doc """
@@ -126,31 +114,119 @@ defmodule HospitalityComs.Profiles.Records do
   end
 
   @doc """
-  The attested entries of `person_id` that `viewer_id` may see as a peer.
+  The attested entries of `person_id` that `viewer_id` may see as a peer at
+  `instant`.
 
-  **The peer default is disclosed**, which is not the employer default and is
-  deliberately not it. A peer was co-rostered with this worker; the venue room's
-  roll already told them the venue and the employer-authored role label
-  (KTD15b), so a default that hid what they can already infer would be
-  ceremony. The worker's override is what takes an entry away from one named
-  peer, and it takes it from that peer alone.
+  **The peer default is disclosed for the venues the peer has nothing to do
+  with, and is the viewing venue's own concurrency rule for the ones they work
+  at.** Those are two halves of one predicate and neither is the whole of it:
+
+    * A peer was co-rostered with this worker and the venue room's roll already
+      told them the venue and the employer-authored role label (KTD15b), so a
+      default that hid what they can already infer would be ceremony. That is
+      why an entry from a venue their own venues know nothing about reaches
+      them.
+    * An employer session is a person session plus a venue, so a venue's
+      manager necessarily holds an engagement there — which makes them
+      co-rostered with every worker at that venue, which makes them a visible
+      peer. Left at "disclosed", the concurrency default the employer view
+      enforces was recoverable by asking the same question through the peer
+      door, with no grant, nothing manufactured, and no consent step. So the
+      viewing venue's rule follows the person who works there.
+
+  `peer_disclosure/4` is the whole of it, and the override is layered on top in
+  both directions: a `false` row takes an entry away, a `true` row hands one
+  over, and only where there is no row does the computed default decide.
   """
-  @spec attested_entries_disclosed_to(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.Query.t()
-  def attested_entries_disclosed_to(person_id, viewer_id)
+  @spec attested_entries_disclosed_to(Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) ::
+          Ecto.Query.t()
+  def attested_entries_disclosed_to(person_id, viewer_id, %DateTime{} = instant)
       when is_binary(person_id) and is_binary(viewer_id) do
-    from [engagement: engagement] in attested_entries_of(person_id),
-      where: engagement.id not in subquery(hidden_from(viewer_id))
+    person_id
+    |> attested_entries_of()
+    |> peer_disclosure(person_id, viewer_id, instant)
+  end
+
+  # `COALESCE(the worker's row, the computed default)`, spelled as two `where`
+  # clauses because Ecto has no `COALESCE` over a subquery and the view's own
+  # spelling is not available here. The first kills an explicit `false`; the
+  # second admits an explicit `true` or, failing that, asks the default.
+  #
+  # Composes over any query that names the `:engagement` binding, which is both
+  # of the peer's two reads — R16 makes a correction request visible to any
+  # viewer of the entry it contests, so there is one rule and one place it is
+  # written.
+  @spec peer_disclosure(Ecto.Query.t(), Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) ::
+          Ecto.Query.t()
+  defp peer_disclosure(query, person_id, viewer_id, instant) do
+    from [engagement: engagement] in query,
+      where: engagement.id not in subquery(hidden_from(viewer_id)),
+      where:
+        engagement.id in subquery(disclosed_to(viewer_id)) or
+          engagement.id not in subquery(concealed_from(person_id, viewer_id, instant))
   end
 
   # The engagements one viewer has been shut out of, as ids. A subquery rather
   # than a join, so the outer query's row count cannot depend on how many
   # decisions happen to exist.
   @spec hidden_from(Ecto.UUID.t()) :: Ecto.Query.t()
-  defp hidden_from(viewer_id) do
+  defp hidden_from(viewer_id), do: peer_decisions(viewer_id, false)
+
+  # And the ones they have been let into by name, which is what makes the
+  # override beat the computed default rather than only the open one.
+  @spec disclosed_to(Ecto.UUID.t()) :: Ecto.Query.t()
+  defp disclosed_to(viewer_id), do: peer_decisions(viewer_id, true)
+
+  @spec peer_decisions(Ecto.UUID.t(), boolean()) :: Ecto.Query.t()
+  defp peer_decisions(viewer_id, disclosed) when is_boolean(disclosed) do
     from disclosure in Disclosure,
       where: disclosure.audience_person_id == ^viewer_id,
-      where: disclosure.disclosed == false,
+      where: disclosure.disclosed == ^disclosed,
       select: disclosure.engagement_id
+  end
+
+  # The subject's engagements a venue the viewer works at would hide, as ids.
+  #
+  # `employer_visible_attested_entries` says the same thing about one venue and
+  # this says it about every venue the viewer holds an engagement at that is
+  # active at `instant`. Read the three joins as the view's three roles:
+  # `subject` is the engagement whose entry is being asked about, `stint` is
+  # another engagement of the same person somewhere else, and `post` is the
+  # viewer's own engagement at the venue `stint` is at.
+  #
+  # The overlap is the view's, clause for clause, including the two
+  # non-emptiness comparisons — `HospitalityComs.Engagements.end_engagement/2`
+  # can produce `ends_at == starts_at`, and the endpoint form without them
+  # reports an overlap for the empty range.
+  #
+  # `stint.venue_id != subject.venue_id` is the view's own-venue branch: an
+  # entry a venue itself attested is always visible to the people who work
+  # there, because that is exactly what its roll already discloses. A viewer
+  # holding posts at two venues is bound by both, so what they see is what every
+  # venue they work at would show them.
+  #
+  # **`post` must be active and the residual is on the record.** Visibility
+  # outlives an engagement by thirty days (R13), so for that window an
+  # ex-colleague is a peer holding no post and no venue's rule applies to them.
+  # `HospitalityComs.ProfilesTest` asserts that rather than leaving it to be
+  # discovered. The alternative — every venue they have *ever* worked at —
+  # applies a venue's rule for ever to somebody who left it years ago.
+  @spec concealed_from(Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  defp concealed_from(person_id, viewer_id, %DateTime{} = instant) do
+    from subject in Engagement,
+      join: stint in Engagement,
+      on: stint.person_id == subject.person_id and stint.venue_id != subject.venue_id,
+      join: post in Engagement,
+      on: post.venue_id == stint.venue_id,
+      where: subject.person_id == ^person_id,
+      where: post.person_id == ^viewer_id,
+      where: post.starts_at <= ^instant,
+      where: post.ends_at > ^instant,
+      where: stint.starts_at < stint.ends_at,
+      where: subject.starts_at < subject.ends_at,
+      where: subject.starts_at < stint.ends_at,
+      where: stint.starts_at < subject.ends_at,
+      select: subject.id
   end
 
   ## Declared entries
@@ -227,13 +303,19 @@ defmodule HospitalityComs.Profiles.Records do
   R16 makes a request visible to any viewer of the entry it contests, so this is
   the entry's rule applied to a join rather than a rule of its own — the same
   relationship `employer_visible_correction_requests` has to
-  `employer_visible_attested_entries`.
+  `employer_visible_attested_entries`. It is literally the same function:
+  `peer_disclosure/4` composes over both, so a change to the rule cannot reach
+  one read and miss the other. A request carries `venue_id`,
+  `entry_engagement_id` and the worker's own free text, so a rule that reached
+  the entry and not the request would hand back what it had just withheld.
   """
-  @spec correction_requests_disclosed_to(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.Query.t()
-  def correction_requests_disclosed_to(person_id, viewer_id)
+  @spec correction_requests_disclosed_to(Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) ::
+          Ecto.Query.t()
+  def correction_requests_disclosed_to(person_id, viewer_id, %DateTime{} = instant)
       when is_binary(person_id) and is_binary(viewer_id) do
-    from [engagement: engagement] in correction_requests_of(person_id),
-      where: engagement.id not in subquery(hidden_from(viewer_id))
+    person_id
+    |> correction_requests_of()
+    |> peer_disclosure(person_id, viewer_id, instant)
   end
 
   ## The employer's reads, which go through the views and nowhere else
@@ -302,45 +384,83 @@ defmodule HospitalityComs.Profiles.Records do
   confines. `employer_visible_corrections/1` is "requests attached to entries
   somebody disclosed to me", which needs the disclosure rule and therefore the
   view.
+
+  Selects the field list `HospitalityComs.Profiles.VisibleCorrection` renders,
+  like the other three reads. It did not, and the divergence had been asserted
+  into the suite: this path handed back raw `CorrectionRequest` structs, so
+  `resolution` was `"declined"` here and `:declined` on the other three, and the
+  id arrived under `id` rather than `correction_request_id`. **That is the
+  third time this shape has drifted in this tree** — U8's `sent_at`/`at` was
+  the second — and it is why the render struct exists.
   """
   @spec venue_corrections(Ecto.UUID.t()) :: Ecto.Query.t()
   def venue_corrections(venue_id) when is_binary(venue_id) do
     from request in CorrectionRequest,
       where: request.venue_id == ^venue_id,
-      order_by: [desc: request.requested_at, asc: request.id]
+      order_by: [desc: request.requested_at, asc: request.id],
+      select: %{
+        correction_request_id: request.id,
+        entry_engagement_id: request.engagement_id,
+        venue_id: request.venue_id,
+        body: request.body,
+        requested_at: request.requested_at,
+        resolved_at: request.resolved_at,
+        resolution: request.resolution
+      }
   end
 
   @doc """
-  One unresolved correction request at one venue, selected so that the statement
-  which resolves it also reports what it resolved.
+  One unresolved correction request at one venue that `instant` can answer,
+  selected so that the statement which resolves it also reports what it
+  resolved.
 
   `HospitalityComs.Profiles.resolve_correction/3` composes `update_all` over
   this. Read and write in one statement, so two managers answering at once
   resolve to one answer: the loser's predicate no longer matches, and the
   refusal is `:already_resolved` rather than an overwrite.
+
+  **`requested_at <= instant` is in the predicate rather than left to the
+  database**, and that is a refusal rather than a nicety.
+  `correction_requests_resolved_after_requested` refuses a resolution stamped
+  before its request, and an `update_all` carries no changeset, so the CHECK
+  arrived as a raw `Postgrex.Error` out of a function whose spec enumerates
+  three atoms. Reachable through `HospitalityComs.Clock.Offset`, which U11's
+  demo controls drive. Filtered here, the statement matches nothing and
+  `diagnose/1` answers `:already_resolved` or `:not_found` — a refusal in the
+  shape the caller was promised.
   """
-  @spec resolvable_correction(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.Query.t()
-  def resolvable_correction(venue_id, request_id)
+  @spec resolvable_correction(Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  def resolvable_correction(venue_id, request_id, %DateTime{} = instant)
       when is_binary(venue_id) and is_binary(request_id) do
     from request in CorrectionRequest,
       where: request.venue_id == ^venue_id,
       where: request.id == ^request_id,
       where: is_nil(request.resolved_at),
+      where: request.requested_at <= ^instant,
       select: request
   end
 
   @doc """
-  One correction request at one venue, resolved or not.
+  One correction request at one venue that existed by `instant`, resolved or
+  not.
 
   Only ever used to say *why* a resolve matched no row. It runs on the failure
   path alone, so it cannot turn a refusal into a success — the worst it can do
   is name the wrong one of two refusals, and both are refusals.
+
+  It carries `requested_at <= instant` for the reason `resolvable_correction/3`
+  does, and here the reason is the answer's honesty rather than the statement's:
+  a request raised after the asking instant has not been raised yet, so
+  `:already_resolved` would be a claim about a row that does not exist at the
+  time being asked about. `:not_found` is what an id naming nothing gets, which
+  is what this is (AE1).
   """
-  @spec correction_at_venue(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.Query.t()
-  def correction_at_venue(venue_id, request_id)
+  @spec correction_at_venue(Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  def correction_at_venue(venue_id, request_id, %DateTime{} = instant)
       when is_binary(venue_id) and is_binary(request_id) do
     from request in CorrectionRequest,
       where: request.venue_id == ^venue_id,
-      where: request.id == ^request_id
+      where: request.id == ^request_id,
+      where: request.requested_at <= ^instant
   end
 end

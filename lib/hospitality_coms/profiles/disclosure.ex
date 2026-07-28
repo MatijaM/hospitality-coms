@@ -18,6 +18,13 @@ defmodule HospitalityComs.Profiles.Disclosure do
   `attested_entries.engagement_id` is unique, so naming the engagement names
   exactly one entry.
 
+  It is named as `(engagement_id, person_id)` rather than as `engagement_id`
+  alone, a MATCH FULL composite key into `engagements (id, person_id)`. Deciding
+  about somebody else's employment is then refused by Postgres and not only by
+  the `exists?` in `HospitalityComs.Profiles.set_disclosure/4` — which is the
+  discipline every employer-zone table already has through
+  `engagements (id, venue_id)`, applied on this side of the bridge.
+
   ## Exactly one audience, and one of the two is a venue
 
   `audience_venue_id` is the first employer key on a person-zone table in this
@@ -70,6 +77,7 @@ defmodule HospitalityComs.Profiles.Disclosure do
     field :decided_at, :utc_datetime
 
     belongs_to :engagement, Engagement
+    belongs_to :person, Person
     belongs_to :audience_venue, Venue
     belongs_to :audience_person, Person
 
@@ -81,6 +89,8 @@ defmodule HospitalityComs.Profiles.Disclosure do
           id: Ecto.UUID.t() | nil,
           engagement_id: Ecto.UUID.t() | nil,
           engagement: Engagement.t() | Ecto.Association.NotLoaded.t() | nil,
+          person_id: Ecto.UUID.t() | nil,
+          person: Person.t() | Ecto.Association.NotLoaded.t() | nil,
           audience_venue_id: Ecto.UUID.t() | nil,
           audience_venue: Venue.t() | Ecto.Association.NotLoaded.t() | nil,
           audience_person_id: Ecto.UUID.t() | nil,
@@ -99,20 +109,19 @@ defmodule HospitalityComs.Profiles.Disclosure do
   """
   @type audience() :: {:venue, Ecto.UUID.t()} | {:person, Ecto.UUID.t()}
 
+  # The two partial unique indexes, named so `declare_constraints/1` and
+  # `conflict_target/1` agree. Not exported: nothing outside this module has
+  # ever needed the names, and the declarations they feed cannot fire today —
+  # `HospitalityComs.Profiles.set_disclosure/4` always passes a
+  # `:conflict_target`, so the index resolves the collision before a changeset
+  # could. They are kept as the declaration a writer that did not upsert would
+  # need.
   @venue_constraint :attested_entry_disclosures_one_per_venue
   @person_constraint :attested_entry_disclosures_one_per_person
 
-  @doc """
-  The name of the partial unique index that keeps one row per (entry, venue).
-  """
-  @spec venue_constraint() :: atom()
-  def venue_constraint, do: @venue_constraint
-
-  @doc """
-  The name of the partial unique index that keeps one row per (entry, person).
-  """
-  @spec person_constraint() :: atom()
-  def person_constraint, do: @person_constraint
+  # The composite key into `engagements (id, person_id)`. Named, because Ecto's
+  # derived name is for the single-column key it did not write.
+  @engagement_constraint :attested_entry_disclosures_engagement_fkey
 
   @doc """
   A decision about one entry and one audience.
@@ -121,16 +130,23 @@ defmodule HospitalityComs.Profiles.Disclosure do
   `HospitalityComs.Profiles.set_disclosure/4`, which has already established
   that the engagement is the caller's own — a caller that could choose the
   engagement could publish somebody else's employment.
+
+  `person_id` is the caller's own, and `attested_entry_disclosures_engagement_fkey`
+  is what makes the pair mean something: `(engagement_id, person_id)` is a
+  MATCH FULL composite key into `engagements (id, person_id)`, so a row naming
+  somebody else's engagement is refused by Postgres rather than only by the
+  check in front of it.
   """
-  @spec decide_changeset(Ecto.UUID.t(), audience(), boolean(), DateTime.t()) ::
+  @spec decide_changeset(Ecto.UUID.t(), Ecto.UUID.t(), audience(), boolean(), DateTime.t()) ::
           Ecto.Changeset.t(t())
-  def decide_changeset(engagement_id, audience, disclosed, %DateTime{} = now)
-      when is_binary(engagement_id) and is_boolean(disclosed) do
+  def decide_changeset(engagement_id, person_id, audience, disclosed, %DateTime{} = now)
+      when is_binary(engagement_id) and is_binary(person_id) and is_boolean(disclosed) do
     stamped_at = DateTime.truncate(now, :second)
 
     %__MODULE__{}
     |> change(
       engagement_id: engagement_id,
+      person_id: person_id,
       disclosed: disclosed,
       decided_at: stamped_at,
       inserted_at: stamped_at,
@@ -186,7 +202,7 @@ defmodule HospitalityComs.Profiles.Disclosure do
     )
     |> unique_constraint([:engagement_id, :audience_venue_id], name: @venue_constraint)
     |> unique_constraint([:engagement_id, :audience_person_id], name: @person_constraint)
-    |> foreign_key_constraint(:engagement_id)
+    |> foreign_key_constraint(:engagement_id, name: @engagement_constraint)
     |> foreign_key_constraint(:audience_venue_id)
     |> foreign_key_constraint(:audience_person_id)
   end
