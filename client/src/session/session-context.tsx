@@ -21,7 +21,15 @@
  */
 
 import type { ReactNode } from "react";
-import { createContext, use, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  use,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import type { ApiClient } from "../api/client";
 import type { RequestFailure } from "../api/errors";
@@ -91,10 +99,31 @@ export function useSession(): SessionContextValue {
 export type SessionProviderProps = {
   readonly api: ApiClient;
   readonly tokenStore: TokenStore;
+  /**
+   * Called after the token has been dropped, for everything **else** this
+   * device remembers about the person who was signed in.
+   *
+   * A callback rather than a list of stores, so `src/session/` does not have to
+   * import `features/rooms/` — and so U8's peer surface can add to it in
+   * `main.tsx` without touching this file. It runs on both paths that end a
+   * session, which is the point: an explicit log out and a 401 leave the same
+   * terminal in front of the same next person.
+   *
+   * Hospitality is a shared-terminal industry. The room list is bookmarks
+   * rather than content, and a re-join is refused server-side — but it names
+   * which venues and shifts that person worked, which is the class of thing
+   * this product exists to keep from leaking sideways.
+   */
+  readonly onSessionEnded?: () => void;
   readonly children: ReactNode;
 };
 
-export function SessionProvider({ api, tokenStore, children }: SessionProviderProps) {
+export function SessionProvider({
+  api,
+  tokenStore,
+  onSessionEnded,
+  children,
+}: SessionProviderProps) {
   // The first state is computed rather than assigned in an effect: a stored
   // token means `resolving` from the very first render, and no token means
   // `anonymous` without a render in between. Setting it from an effect instead
@@ -103,6 +132,22 @@ export function SessionProvider({ api, tokenStore, children }: SessionProviderPr
     tokenStore.read() === null ? { status: "anonymous" } : { status: "resolving" },
   );
   const [attempt, setAttempt] = useState(0);
+
+  // Held in a ref rather than in the effect's dependencies below: a caller that
+  // rebuilds the callback on every render would otherwise re-ask
+  // `GET /api/me` on every render.
+  const sessionEnded = useRef(onSessionEnded);
+
+  useEffect(() => {
+    sessionEnded.current = onSessionEnded;
+  });
+
+  // Every path that drops the token goes through here, so "the token went" and
+  // "the device forgot the rest" cannot come apart.
+  const endSession = useCallback(() => {
+    forget(tokenStore);
+    sessionEnded.current?.();
+  }, [tokenStore]);
 
   useEffect(() => {
     const token = tokenStore.read();
@@ -133,7 +178,7 @@ export function SessionProvider({ api, tokenStore, children }: SessionProviderPr
       }
 
       if (isSessionExpired(result.failure)) {
-        tokenStore.clear();
+        endSession();
         setState({ status: "anonymous" });
 
         return;
@@ -145,7 +190,9 @@ export function SessionProvider({ api, tokenStore, children }: SessionProviderPr
     return () => {
       abandoned = true;
     };
-  }, [api, tokenStore, attempt]);
+    // `endSession` is a `useCallback` over `tokenStore`, which is already here,
+    // so naming it changes nothing about how often this runs.
+  }, [api, tokenStore, endSession, attempt]);
 
   const redeem = useCallback(
     async (linkToken: string): Promise<RedeemOutcome> => {
@@ -178,9 +225,9 @@ export function SessionProvider({ api, tokenStore, children }: SessionProviderPr
     // one thing that is certainly right. The row it leaves behind expires.
     if (state.status === "authenticated") await api.logOut(state.token);
 
-    forget(tokenStore);
+    endSession();
     setState({ status: "anonymous" });
-  }, [api, tokenStore, state]);
+  }, [api, endSession, state]);
 
   const retry = useCallback(() => {
     // Asked here rather than in the effect, where a synchronous `setState`

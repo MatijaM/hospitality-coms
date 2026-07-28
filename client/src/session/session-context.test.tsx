@@ -52,9 +52,17 @@ function deferred<T>() {
   return { promise, settle };
 }
 
-function renderSession(api: ApiClient, tokenStore: TokenStore) {
+function renderSession(
+  api: ApiClient,
+  tokenStore: TokenStore,
+  onSessionEnded?: () => void,
+) {
   return render(
-    <SessionProvider api={api} tokenStore={tokenStore}>
+    <SessionProvider
+      api={api}
+      tokenStore={tokenStore}
+      {...(onSessionEnded === undefined ? {} : { onSessionEnded })}
+    >
       <Probe />
     </SessionProvider>,
   );
@@ -280,6 +288,68 @@ describe("logging out", () => {
 
     expect(await screen.findByText("status: anonymous")).toBeInTheDocument();
     expect(store.read()).toBeNull();
+  });
+});
+
+describe("what the device forgets when a session ends", () => {
+  // Hospitality is a shared-terminal industry: the next person to sign in on
+  // this machine must not find the last one's rooms. The list is bookmarks
+  // rather than content and a re-join is refused server-side, but it names
+  // which venues and shifts that person worked.
+
+  it("forgets it on an explicit log out", async () => {
+    const onSessionEnded = vi.fn();
+    const store = createMemoryTokenStore("c2Vzc2lvbg");
+
+    renderSession(
+      createFakeApi({ currentPerson: () => Promise.resolve(ok(somePerson)) }),
+      store,
+      onSessionEnded,
+    );
+
+    await screen.findByText("person: worker@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "log out" }));
+
+    await screen.findByText("status: anonymous");
+    expect(onSessionEnded).toHaveBeenCalledOnce();
+    expect(store.read()).toBeNull();
+  });
+
+  it("forgets it when the server says the session is gone", async () => {
+    // The other path that drops the token, and the one easiest to forget: a
+    // 401 leaves the same terminal in front of the same next person, and this
+    // branch used to clear the token and nothing else.
+    const onSessionEnded = vi.fn();
+    const store = createMemoryTokenStore("c2Vzc2lvbg");
+
+    renderSession(
+      createFakeApi({
+        currentPerson: () => Promise.resolve(fails<Person>(unauthorized())),
+      }),
+      store,
+      onSessionEnded,
+    );
+
+    expect(await screen.findByText("status: anonymous")).toBeInTheDocument();
+    expect(onSessionEnded).toHaveBeenCalledOnce();
+    expect(store.read()).toBeNull();
+  });
+
+  it("does not forget it for a failure that is not a log out", async () => {
+    // `unavailable` keeps the session on purpose — a request that failed must
+    // not log a worker out — so it must not throw the room list away either.
+    const onSessionEnded = vi.fn();
+    const store = createMemoryTokenStore("c2Vzc2lvbg");
+
+    renderSession(
+      createFakeApi({ currentPerson: () => Promise.resolve(fails<Person>(offline())) }),
+      store,
+      onSessionEnded,
+    );
+
+    expect(await screen.findByText("status: unavailable")).toBeInTheDocument();
+    expect(onSessionEnded).not.toHaveBeenCalled();
+    expect(store.read()).toBe("c2Vzc2lvbg");
   });
 });
 

@@ -105,6 +105,26 @@ describe("what survives a reload", () => {
     expect(store.read()).toEqual(entries);
   });
 
+  it("forgets the list outright when the session ends", () => {
+    // Not "writes an empty array": the key goes, so a shared terminal is left
+    // with nothing of the previous worker's on disk at all. `SessionProvider`
+    // calls this wherever it drops the token.
+    const storage = memoryStorage();
+    const store = createLocalStorageRoomStore(storage);
+
+    store.write([entry(VENUE), entry(SHIFT, "room_closed")]);
+    store.clear();
+
+    expect(store.read()).toEqual([]);
+    expect(storage.getItem("hospitality-coms.rooms")).toBeNull();
+  });
+
+  it("does not throw when storage refuses to forget", () => {
+    expect(() => {
+      createLocalStorageRoomStore(refusingStorage()).clear();
+    }).not.toThrow();
+  });
+
   it("starts empty rather than throwing when storage refuses", () => {
     // Same contract `TokenStore` has, for the same reason: a store that throws
     // takes the whole surface down with it.
@@ -132,6 +152,22 @@ describe("what survives a reload", () => {
 
       expect(store.read()).toEqual([]);
     }
+  });
+
+  it("holds the same rule about ids that the form does", () => {
+    // `AddRoomForm` requires a uuid; this path took any string at all. Two
+    // paths disagreeing about one rule means the loose one is reachable — a
+    // list written by an older build, or edited by hand in devtools — and it
+    // ends up as a topic suffix the server can only answer with the same
+    // refusal it gives an unknown room.
+    expect(decodeRoomEntries([{ kind: "venue", id: "not-an-id" }])).toBeNull();
+
+    // Carries hex letters on purpose: the other ids here are all digits, where
+    // `toUpperCase()` would make the normalisation half of this vacuous.
+    const mixed = "a1a1a1a1-b2b2-4c3c-8d4d-e5e5e5e5e5e5";
+    expect(decodeRoomEntries([{ kind: "venue", id: mixed.toUpperCase() }])).toEqual([
+      entry({ kind: "venue", id: mixed }),
+    ]);
   });
 
   it("reads a missing `barred` as no bar, so an older list still loads", () => {

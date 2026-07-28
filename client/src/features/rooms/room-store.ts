@@ -30,6 +30,23 @@
  * inferred. That is the honest shape for a fact that was learned rather than
  * fetched.
  *
+ * ## It is emptied when the session ends, and it is not keyed per person
+ *
+ * Hospitality is a shared-terminal industry. The list is bookmarks rather than
+ * content and a re-join is refused server-side, but it still names **which
+ * venues and shifts that person worked**, which is the class of thing this
+ * product exists to keep from leaking sideways. So `SessionProvider` clears it
+ * wherever it drops the token — the explicit log-out and the 401 alike.
+ *
+ * Keying it per person instead — `hospitality-coms.rooms.<personId>` — was
+ * considered and **rejected**. It would let two people share a terminal without
+ * overwriting each other's lists, which is a convenience, but it does so by
+ * *retaining* the previous worker's list on the device, which is the exact
+ * thing clearing it is for. It would move the disclosure out of the surface
+ * and leave it in storage, where anything that can run script on this origin
+ * still reads it. A shared terminal wants less on disk, not more of it filed
+ * by owner.
+ *
  * ## The storage contract
  *
  * `read`, `write` and `clear` must not throw, exactly as `TokenStore`'s do not
@@ -45,11 +62,16 @@
 
 import { isRecord } from "../../api/decode";
 import type { RoomEntry, RoomKind, RoomRef, SendBar } from "./room";
-import { roomKey, sameRoom } from "./room";
+import { normaliseRoomId, roomKey, sameRoom } from "./room";
 
 export type RoomStore = {
   read(): readonly RoomEntry[];
   write(entries: readonly RoomEntry[]): void;
+  /**
+   * Forgets everything this device remembers about the person who was signed
+   * in. Called when a session ends — see `SessionProvider`.
+   */
+  clear(): void;
 };
 
 export const ROOM_LIST_KEY = "hospitality-coms.rooms";
@@ -64,14 +86,21 @@ function decodeEntry(value: unknown): RoomEntry | null {
   const kind = ROOM_KINDS.find((candidate) => candidate === value.kind);
   if (kind === undefined) return null;
 
+  // The same rule `AddRoomForm` applies, through the same function. These two
+  // paths used to disagree — the form required a uuid and this took any string
+  // at all — so a list from an older build, or one edited by hand in devtools,
+  // took the loose path and put whatever it held on a socket.
+  const id = normaliseRoomId(value.id);
+  if (id === null) return null;
+
   if (value.barred === null || value.barred === undefined) {
-    return { ref: { kind, id: value.id }, barred: null };
+    return { ref: { kind, id }, barred: null };
   }
 
   const barred = SEND_BARS.find((candidate) => candidate === value.barred);
   if (barred === undefined) return null;
 
-  return { ref: { kind, id: value.id }, barred };
+  return { ref: { kind, id }, barred };
 }
 
 export function decodeRoomEntries(value: unknown): readonly RoomEntry[] | null {
@@ -122,6 +151,13 @@ export function createLocalStorageRoomStore(
         // The list lives for this page load only. Documented above.
       }
     },
+    clear: () => {
+      try {
+        storage.removeItem(key);
+      } catch {
+        // Nothing was persisted, so there is nothing to remove.
+      }
+    },
   };
 }
 
@@ -147,6 +183,9 @@ export function createMemoryRoomStore(initial: readonly RoomEntry[] = []): RoomS
     read: () => entries,
     write: (next) => {
       entries = next;
+    },
+    clear: () => {
+      entries = [];
     },
   };
 }

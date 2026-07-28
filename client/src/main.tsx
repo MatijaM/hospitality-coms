@@ -29,7 +29,15 @@ if (container === null) throw new Error("index.html has no #root element");
 createRoot(container).render(
   <StrictMode>
     <BrowserRouter>
-      <SessionProvider api={api} tokenStore={tokenStore}>
+      <SessionProvider
+        api={api}
+        tokenStore={tokenStore}
+        onSessionEnded={() => {
+          // Everything else this device remembers about whoever was signed in.
+          // U8's peer surface adds to this list here, not inside the session.
+          roomStore.clear();
+        }}
+      >
         <SocketProvider>
           <App roomStore={roomStore} />
         </SocketProvider>
