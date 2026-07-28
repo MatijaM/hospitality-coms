@@ -114,9 +114,10 @@ or individually: `npm run typecheck`, `npm run lint`, `npm run format:check`,
 `npm test`, `npm run build`.
 
 **A React test must synchronise on the fact it asserts, not on a render that
-precedes it.** This project has no CI (#26), so every green suite is somebody's
-local run and a one-in-ten failure is a coin flip that eventually lands on
-someone with no context. One such flake has already been found and fixed:
+precedes it.** A one-in-ten failure is a coin flip that eventually lands on
+someone with no context — before #26 that was whoever ran the suite next, and
+now that CI runs it is whichever pull request happens to be open. One such flake
+has already been found and fixed:
 `socket-context.test.tsx` waited for the rendered tree to say the transport was
 up and then asserted a counter that an **effect** increments. React commits the
 DOM and flushes passive effects as two separate steps, so `waitFor`'s
@@ -126,6 +127,18 @@ first. `FakeSocket.opened` and `.closed` are the fix: promises that resolve when
 timeout to lengthen. Await those. Do not raise a timeout, and note that
 `act(async () => await p)` deadlocks — `act` awaits its callback before draining
 the queue, so the effect that would resolve `p` never runs.
+
+**A test must establish the environment it depends on, never assert what the
+runner happens to provide.** CI's first run caught the one instance of this:
+`token-store.test.ts` asserted `globalThis.localStorage` was `undefined` before
+exercising the fallback, which held on a machine whose Node was started without
+`--localstorage-file` and did not on CI's. The failing assertion was the smaller
+half — the real cost was that `createBrowserTokenStore()` has two branches and
+each runner could only ever reach one, so a green suite anywhere proved half a
+function and read as though it proved all of it. `vi.stubGlobal` with a
+`vi.unstubAllGlobals()` in `afterEach` is how both branches get a test; the same
+applies to anything else ambient — `navigator`, `window.*`, the time zone, the
+locale.
 
 `npm test` skips `src/api/client.integration.test.ts`, which runs the whole
 log-in flow against a live server and reads the magic link out of
@@ -138,8 +151,9 @@ HOSPITALITY_COMS_API_URL=http://localhost:4001 npm run test:integration
 
 It is one of two tests here that check this client's idea of the API against the
 API rather than against a stub this project also wrote, so run it whenever the
-API changes. Nothing runs it automatically — this repository has no CI — so it
-is on whoever changes `SessionController` or `ErrorEnvelope` to remember.
+API changes. Nothing runs it automatically — CI stands no server up, so the file
+skips itself there — so it is on whoever changes `SessionController` or
+`ErrorEnvelope` to remember.
 
 The other is `npm run test:socket`, which does the same for the **transport**:
 the topic prefixes, the credential's route onto the connection, the shape of a
@@ -311,8 +325,12 @@ than in a convention: both callers are event handlers that `void` the promise,
 so a throw becomes an unhandled rejection and a surface that never moves again.
 `createBrowserTokenStore()` picks storage if the browser has it and memory if
 not — private-mode Safari throws on write, storage switched off throws on
-everything, and `window.localStorage` is plainly `undefined` in this project's
-own test environment.
+everything, and a runtime with no web storage at all leaves
+`window.localStorage` `undefined`, which makes reading `.getItem` off it a
+TypeError at module scope. Node is such a runtime unless it is started with
+`--localstorage-file`, so the suite meets both sides of that depending on the
+machine; `token-store.test.ts` stubs the global rather than inheriting it, and
+tests each branch.
 
 **Known gap: the `unavailable` surface keeps the token and offers no way to
 drop it.** That is right for the case it was built for — a request that failed

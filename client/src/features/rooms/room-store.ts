@@ -51,9 +51,9 @@
  *
  * `read`, `write` and `clear` must not throw, exactly as `TokenStore`'s do not
  * and for the same reason: private-mode Safari throws on write, storage
- * switched off throws on everything, and `window.localStorage` is plainly
- * `undefined` in this project's own test environment. A store that throws would
- * take the room list down with a blank page.
+ * switched off throws on everything, and a runtime with no web storage at all
+ * leaves `window.localStorage` `undefined`. A store that throws would take the
+ * room list down with a blank page.
  *
  * A stored value that is not the shape this module writes is **discarded, not
  * repaired**. It is a bookmark list; losing it costs a paste, and half-reading

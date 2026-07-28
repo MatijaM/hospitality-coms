@@ -72,10 +72,12 @@ export function createLocalStorageTokenStore(
  * What the application actually runs on: storage if the browser has it, memory
  * if it does not.
  *
- * `window.localStorage` is typed as always present and is not. Reading the
- * property throws `SecurityError` where storage is blocked, and it is plainly
- * `undefined` under this project's own test environment, where jsdom defers to
- * Node's experimental implementation. Both of those are a TypeError at module
+ * `window.localStorage` is typed as always present and is not. Where storage is
+ * blocked, touching it throws `SecurityError`. Where the runtime has no web
+ * storage at all it is `undefined`, and reading `.getItem` off that is a
+ * TypeError — Node is one such runtime unless it is started with
+ * `--localstorage-file`, which is why the test suite can meet either side of
+ * this depending on the machine it runs on. Uncaught, both happen at module
  * scope in `main.tsx`, which is a blank page and no error the worker can act on.
  */
 export function createBrowserTokenStore(): TokenStore {

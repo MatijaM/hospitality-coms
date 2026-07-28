@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   SESSION_TOKEN_KEY,
@@ -90,14 +90,54 @@ describe("the localStorage store", () => {
   });
 });
 
+/**
+ * Each of these says what `localStorage` is rather than inheriting whatever the
+ * runner happens to provide, and that is the point of the block rather than
+ * tidiness. Node exposes web storage only when started with
+ * `--localstorage-file`, so a test that read the ambient global exercised the
+ * fallback on a developer's machine and the storage path on CI — one branch
+ * each, neither runner both, and a green suite on either that proved only where
+ * it ran.
+ */
 describe("choosing a store for the browser", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the session in the browser's storage, so it survives a page load", () => {
+    const storage = workingStorage();
+    vi.stubGlobal("localStorage", storage);
+
+    createBrowserTokenStore().write("c2Vzc2lvbg");
+
+    expect(storage.getItem(SESSION_TOKEN_KEY)).toBe("c2Vzc2lvbg");
+
+    // Building it a second time against the same storage is what the next page
+    // load does — `main.tsx` calls this at module scope — and the worker is
+    // still signed in.
+    expect(createBrowserTokenStore().read()).toBe("c2Vzc2lvbg");
+  });
+
   it("falls back to memory when there is no localStorage to reach", () => {
-    // Not hypothetical, and not only a privacy setting: `window.localStorage`
-    // is `undefined` in this very test environment, because jsdom now defers
-    // to Node's experimental implementation and Node wants a
-    // `--localstorage-file`. Reading `.getItem` off that is a TypeError at
-    // module scope, which renders the whole application as a blank page.
-    expect(globalThis.localStorage).toBeUndefined();
+    // `window.localStorage` is typed as always present and is not: a runtime
+    // with no web storage leaves it `undefined`, and reading `.getItem` off
+    // that is a TypeError. `main.tsx` builds the store at module scope, so
+    // without this fallback that TypeError is the whole application rendering
+    // as a blank page with nothing the worker can act on.
+    vi.stubGlobal("localStorage", undefined);
+
+    const store = createBrowserTokenStore();
+
+    store.write("c2Vzc2lvbg");
+
+    expect(store.read()).toBe("c2Vzc2lvbg");
+  });
+
+  it("falls back to memory when the browser refuses storage", () => {
+    // A different answer from `createLocalStorageTokenStore(blockedStorage())`,
+    // which has to report null to every read: the probe fails once, and what
+    // comes back holds the token for this page load.
+    vi.stubGlobal("localStorage", blockedStorage());
 
     const store = createBrowserTokenStore();
 
