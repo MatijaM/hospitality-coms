@@ -68,6 +68,10 @@ defmodule HospitalityComs.BoundaryTest do
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.EnableRoomRowLevelSecurity}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreatePeerGraph}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantPeerZone}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreateProfiles}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.EnableProfileRowLevelSecurity}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreateEmployerVisibleView}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantProfileZone}
 
   import Ecto.Query
   import ExUnit.CaptureLog
@@ -83,18 +87,22 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Peers.Connection, as: PeerConnection
   alias HospitalityComs.Peers.ConnectionRequest
   alias HospitalityComs.Repo
+  alias HospitalityComs.Repo.Migrations.CreateEmployerVisibleView
   alias HospitalityComs.Repo.Migrations.CreateEngagements
   alias HospitalityComs.Repo.Migrations.CreatePeerGraph
+  alias HospitalityComs.Repo.Migrations.CreateProfiles
   alias HospitalityComs.Repo.Migrations.CreateRooms
   alias HospitalityComs.Repo.Migrations.CreateRosterEntries
   alias HospitalityComs.Repo.Migrations.CreateVenues
   alias HospitalityComs.Repo.Migrations.EnableBtreeGist
   alias HospitalityComs.Repo.Migrations.EnableEmployerZoneRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.EnableEngagementRowLevelSecurity
+  alias HospitalityComs.Repo.Migrations.EnableProfileRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.EnableRoomRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
   alias HospitalityComs.Repo.Migrations.GrantPeerZone
+  alias HospitalityComs.Repo.Migrations.GrantProfileZone
   alias HospitalityComs.Repo.Migrations.GrantRoomZone
   alias HospitalityComs.Repo.Migrations.GrantZones
   alias HospitalityComs.Rooms.VenueRoomSuspension
@@ -122,6 +130,10 @@ defmodule HospitalityComs.BoundaryTest do
   @room_row_security_migration "enable_room_row_level_security"
   @peer_tables_migration "create_peer_graph"
   @peer_zone_migration "grant_peer_zone"
+  @profile_tables_migration "create_profiles"
+  @profile_row_security_migration "enable_profile_row_level_security"
+  @employer_view_migration "create_employer_visible_view"
+  @profile_zone_migration "grant_profile_zone"
 
   # The employer-zone table U5 added that `employer_role` deliberately holds no
   # privilege on. KTD3: hidden attested entries are a per-row rule, which grants
@@ -151,6 +163,10 @@ defmodule HospitalityComs.BoundaryTest do
   # U8's three. Written out here rather than derived, because this file's job is
   # to disagree with the classification when the classification is wrong.
   @peer_tables ~w(connection_requests peer_connections peer_messages)
+
+  # U9's three, written out for the same reason.
+  @profile_tables ~w(declared_entries attested_entry_disclosures correction_requests)
+  @profile_person_tables ~w(declared_entries attested_entry_disclosures)
 
   @now ~U[2026-03-01 12:00:00.000000Z]
 
@@ -188,6 +204,15 @@ defmodule HospitalityComs.BoundaryTest do
     load_migration(@room_row_security_migration, Code.ensure_loaded?(EnableRoomRowLevelSecurity))
     load_migration(@peer_tables_migration, Code.ensure_loaded?(CreatePeerGraph))
     load_migration(@peer_zone_migration, Code.ensure_loaded?(GrantPeerZone))
+    load_migration(@profile_tables_migration, Code.ensure_loaded?(CreateProfiles))
+
+    load_migration(
+      @profile_row_security_migration,
+      Code.ensure_loaded?(EnableProfileRowLevelSecurity)
+    )
+
+    load_migration(@employer_view_migration, Code.ensure_loaded?(CreateEmployerVisibleView))
+    load_migration(@profile_zone_migration, Code.ensure_loaded?(GrantProfileZone))
 
     :ok
   end
@@ -353,7 +378,8 @@ defmodule HospitalityComs.BoundaryTest do
       # person-zone table covered by no migration still fails here.
       revoked =
         GrantZones.person_zone_tables() ++
-          GrantRoomZone.person_zone_tables() ++ GrantPeerZone.person_zone_tables()
+          GrantRoomZone.person_zone_tables() ++
+          GrantPeerZone.person_zone_tables() ++ GrantProfileZone.person_zone_tables()
 
       assert Enum.sort(revoked) == Enum.sort(Zones.person_zone_tables())
     end
@@ -412,7 +438,9 @@ defmodule HospitalityComs.BoundaryTest do
                {"shift_rooms", "INSERT"},
                {"roster_entries", "SELECT"},
                {"roster_entries", "INSERT"},
-               {"roster_entries", "UPDATE"}
+               {"roster_entries", "UPDATE"},
+               {"correction_requests", "SELECT"},
+               {"correction_requests", "UPDATE"}
              ]
     end
 
@@ -556,10 +584,43 @@ defmodule HospitalityComs.BoundaryTest do
       granted =
         GrantEmployerZone.granted_tables() ++
           GrantEngagementZone.granted_tables() ++
-          GrantRoomZone.granted_tables() ++ GrantPeerZone.granted_tables()
+          GrantRoomZone.granted_tables() ++
+          GrantPeerZone.granted_tables() ++ GrantProfileZone.granted_tables()
 
       assert Enum.sort(granted ++ @ungranted_tables) ==
                Enum.sort(Zones.employer_zone_tables() ++ Zones.shared_tables())
+    end
+
+    test "grant SELECT and only SELECT on each of the employer's views" do
+      # KTD3's other half, as an inventory. `employer_role` reads a worker's
+      # record through these two and through nothing else, so what it holds on
+      # them is the whole of what an employer session can do with a profile.
+      #
+      # A view can be updatable in Postgres when it is simple enough. These two
+      # are multi-way joins and are not, but the grant says `SELECT` rather than
+      # relying on that: "not auto-updatable" is a property of the view's shape,
+      # and the shape is a thing a later unit edits.
+      assert Zones.privileges(Repo, Zones.employer_views()) == [
+               {"employer_visible_attested_entries", "SELECT"},
+               {"employer_visible_correction_requests", "SELECT"}
+             ]
+    end
+
+    test "grant on the views the migration says it granted on" do
+      # The control for the inventory above, and the reason the migration
+      # exposes its list: an inventory swept over a list somebody transcribed is
+      # an inventory that can miss the view nobody transcribed.
+      #
+      # **Three-way, because the names are literals in three modules.**
+      # `CreateEmployerVisibleView.views/0` is the record of what was created,
+      # `GrantProfileZone.granted_views/0` of what was granted on, and
+      # `Zones.employer_views/0` of what the classification permits. Any two
+      # agreeing while the third drifts is a view that exists and is granted on
+      # and is in no zone, or one that is classified and was never made — and
+      # both of those are the kind of gap the totality check below cannot see
+      # because it compares the database against only one of the three.
+      assert Enum.sort(CreateEmployerVisibleView.views()) == Enum.sort(Zones.employer_views())
+      assert Enum.sort(GrantProfileZone.granted_views()) == Enum.sort(Zones.employer_views())
     end
 
     test "do not arrive through ALTER DEFAULT PRIVILEGES, which nothing sweeps" do
@@ -915,8 +976,17 @@ defmodule HospitalityComs.BoundaryTest do
       # The inventory the rule above is derived over, so a new key is noticed
       # rather than absorbed. It is also the control: a rule quantified over an
       # empty set holds for any rule at all.
+      # `attested_entry_disclosures_engagement_fkey` is the first composite key
+      # in the tree whose second column is `person_id` rather than `venue_id`,
+      # and the rule is the same rule: an ownership question answered by
+      # Postgres rather than by an `exists?` in Elixir. It is in the *person*
+      # zone, so it is not KTD2's "no employer-zone table may name a person"
+      # being bent — it is that discipline read from the other side.
       assert Map.new(composite_foreign_keys(), &{&1.name, {&1.match_type, &1.nullable?}}) == %{
                "attested_entries_engagement_fkey" => {"f", false},
+               "attested_entry_disclosures_engagement_fkey" => {"f", false},
+               "correction_requests_engagement_fkey" => {"f", false},
+               "correction_requests_resolved_by_grant_fkey" => {"s", true},
                "employer_grants_granted_by_fkey" => {"s", true},
                "employer_grants_revoked_by_fkey" => {"s", true},
                "engagements_grant_fkey" => {"s", true},
@@ -1134,6 +1204,312 @@ defmodule HospitalityComs.BoundaryTest do
 
       assert Enum.filter(names, &String.starts_with?(&1, ~w(connection_requests
                         peer_connections peer_messages))) == []
+    end
+  end
+
+  describe "the profile" do
+    test "puts the declared entries and the disclosure ledger in the person zone" do
+      # `declared_entries` names a person and nothing else. The ledger names a
+      # person *and* a venue, which makes it the first person-zone table in the
+      # tree to carry an employer key — deliberately, because the audience of an
+      # employer disclosure is a venue and every spelling of that reaches one.
+      #
+      # It is exactly why the classification matters more here than elsewhere:
+      # `WHERE audience_venue_id = <me> AND disclosed = false` is the list of
+      # workers concealing something from a venue, which is a strictly worse
+      # disclosure than the entries themselves.
+      Enum.each(@profile_person_tables, fn table ->
+        assert table in Zones.person_zone_tables()
+      end)
+
+      assert Zones.privileges(Repo, @profile_person_tables) == []
+    end
+
+    test "and the sweep would notice if that stopped being true" do
+      # The control. Postgres default-denies on a table owned by another role,
+      # so the assertion above passes on a database where nothing ever revoked
+      # anything. A column grant is chosen deliberately: it is invisible to
+      # `has_table_privilege` and is the shape the sweep exists to also catch.
+      Repo.query!("GRANT SELECT (disclosed) ON attested_entry_disclosures TO employer_role")
+
+      assert {"attested_entry_disclosures", "SELECT"} in Zones.employer_privileges(Repo)
+    end
+
+    test "adds no second crossing: the ledger names a person and stays person zone" do
+      # The positive half. `attested_entry_disclosures` *does* hold a foreign key
+      # to `people` — `audience_person_id` — so this is a statement about its
+      # classification rather than about an absence, and "engagements is the only
+      # crossing" has to survive it.
+      referencing = tables_referencing_people()
+
+      assert "declared_entries" in referencing
+      assert "attested_entry_disclosures" in referencing
+      refute "correction_requests" in referencing
+
+      assert MapSet.to_list(
+               MapSet.difference(referencing, MapSet.new(Zones.person_zone_tables()))
+             ) == ["engagements"]
+    end
+
+    test "keeps the contest in the employer zone, keyed on the bridge" do
+      # KTD2 in its usual form: the venue answers the request, so the row is
+      # employer zone — and an employer-zone row may not name a human, so it
+      # names `engagements (id, venue_id)` instead.
+      columns = columns("correction_requests")
+
+      assert "correction_requests" in Zones.employer_zone_tables()
+      assert "venue_id" in columns
+      assert "engagement_id" in columns
+      refute "person_id" in columns
+      assert "correction_requests" in tables_with_composite_key()
+    end
+
+    test "gives the employer no INSERT on the contest, and UPDATE on four columns" do
+      # A session that could write a complaint could then resolve it, so the
+      # worker writes it through `HospitalityComs.Repo` as the application's own
+      # role — the same manoeuvre the claim makes for an attested entry. What
+      # the employer may write is the answer and nothing else.
+      refute table_privilege?("correction_requests", "INSERT")
+      refute table_privilege?("correction_requests", "UPDATE")
+
+      assert updatable_columns("correction_requests") == [
+               "resolution",
+               "resolved_at",
+               "resolved_by_grant_id",
+               "updated_at"
+             ]
+    end
+
+    test "is removed by its own migrations' downs and restored by their ups" do
+      # The half of "reversible" only a rollback proves, and here it covers a
+      # kind of object no earlier unit had: a view, which has to come off before
+      # the tables it selects from.
+      assert MapSet.subset?(MapSet.new(@profile_tables), database_tables())
+      assert Enum.sort(database_views()) == Enum.sort(Zones.employer_views())
+
+      rolled_back =
+        rolled_back_profile_zone(fn ->
+          %{
+            tables: MapSet.intersection(MapSet.new(@profile_tables), database_tables()),
+            views: database_views()
+          }
+        end)
+
+      assert MapSet.to_list(rolled_back.tables) == []
+      assert rolled_back.views == []
+
+      assert MapSet.subset?(MapSet.new(@profile_tables), database_tables())
+      assert Enum.sort(database_views()) == Enum.sort(Zones.employer_views())
+      assert Zones.privileges(Repo, @profile_person_tables) == []
+      assert "correction_requests_engagement_fkey" in foreign_keys("correction_requests")
+    end
+  end
+
+  describe "the employer-visible view" do
+    # KTD3, asserted rather than described. Three properties have to hold
+    # together and each of them is a way the mechanism silently stops working:
+    # an owner without privilege makes the view return `permission denied`,
+    # `security_invoker` makes it resolve as the caller and refuse
+    # `employer_role`, and a missing `WHERE` makes it return every venue's rows
+    # because the owner bypasses row-level security.
+
+    test "is owned by the role that owns the base table it reads" do
+      owner = relation_owner("attested_entries")
+
+      Enum.each(Zones.employer_views(), fn view ->
+        assert relation_owner(view) == owner
+      end)
+    end
+
+    test "is not security_invoker, which would invert the mechanism" do
+      # With `security_invoker = on` the view resolves base-table permissions as
+      # its *caller*, and `employer_role` holds none on `attested_entries` — so
+      # the view would refuse every read. That fails closed and it fails: KTD3's
+      # whole shape is the owner's privilege standing behind a filter.
+      #
+      # **Asserted as the option's value rather than its absence.** The previous
+      # spelling refused any `security_invoker` reloption at all, which fails on
+      # an explicit `security_invoker = false` — behaviourally identical to the
+      # default and a perfectly reasonable thing for a later migration to write
+      # down. It fired on the real regression, so it worked; it could not tell
+      # "off" from "not set", and only one of those is a defect.
+      Enum.each(Zones.employer_views(), fn view ->
+        refute security_invoker?(view)
+      end)
+    end
+
+    test "is what that assertion would report if one were turned on" do
+      # The control, and the whole reason the assertion above reads a value.
+      # Rolled back with the sandbox transaction, like every other DDL here.
+      Repo.query!("CREATE VIEW invoker_view WITH (security_invoker = true) AS SELECT 1 AS x")
+
+      Repo.query!("CREATE VIEW definer_view WITH (security_invoker = false) AS SELECT 1 AS x")
+
+      assert security_invoker?("invoker_view")
+      refute security_invoker?("definer_view")
+    end
+
+    test "is a security_barrier, so a caller's own predicate cannot be pushed under it" do
+      # Postgres may otherwise evaluate a caller's `WHERE` below the view's
+      # qualifiers when it looks cheaper. `employer_role` holds no CREATE on any
+      # schema and so cannot define a leaky function today; this is the one
+      # property of a view that has to be decided when it is created, and it is
+      # decided.
+      Enum.each(Zones.employer_views(), fn view ->
+        assert "security_barrier=true" in relation_options(view)
+      end)
+    end
+
+    test "reads the scope the wrapper writes, and raises when there is none" do
+      # The guarantee U3 built `app_current_employer_id()` to give, now with a
+      # real relation behind it. A NULL here would make the view return no rows,
+      # which is indistinguishable from a worker who has disclosed nothing —
+      # the failure would look like an answer.
+      # Either setting will do and the pattern says so: the view calls both
+      # scoping functions and Postgres is free to evaluate them in whichever
+      # order the planner chooses — measured as `app.now` first today. Pinning
+      # one of the two would be pinning a plan.
+      assert_raise Postgrex.Error, ~r/app\.(employer_id|now) is not set on this connection/, fn ->
+        EmployerRepo.query!("SELECT * FROM employer_visible_attested_entries", [])
+      end
+    end
+
+    test "is readable by the employer role inside the wrapper" do
+      # The control for the refusal above and for every privilege assertion in
+      # this block: a view nobody can read satisfies every negative claim about
+      # it. Empty because this file's two sandbox transactions cannot see each
+      # other's rows — `HospitalityComs.ProfilesTest` populates one.
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert {:ok, []} =
+               EmployerRepo.scoped_transaction(scope, fn _scope ->
+                 {:ok,
+                  EmployerRepo.all(from(v in "employer_visible_attested_entries", select: 1))}
+               end)
+    end
+
+    test "cannot be reached by the employer role through the base table instead" do
+      # The other half of KTD3: the view is only a tier if the table under it is
+      # closed. Asserted as the privilege bit above and as the refusal here,
+      # because a raw statement goes through neither of the BEAM guards.
+      scope = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert_raise Postgrex.Error, ~r/permission denied for table attested_entries/, fn ->
+        EmployerRepo.scoped_transaction(scope, fn _scope ->
+          {:ok, EmployerRepo.query!("SELECT id FROM attested_entries", [])}
+        end)
+      end
+    end
+
+    test "carries exactly these columns, and none of them names a person" do
+      # Two claims in one assertion, and the second is the load-bearing one.
+      #
+      # No `person_id`: the key is a globally stable UUID that `employer_role`
+      # can already read off the bridge, so two venues comparing ids out of band
+      # could determine that the same human works at both — which is precisely
+      # the concurrency this view's default hides. The employer names a worker by
+      # their own engagement at their own venue instead.
+      #
+      # And no `hidden_count`, no `has_hidden_entries`, no column of any kind
+      # that answers "is this worker concealing something". The standing
+      # incompleteness notice is a UI constant; a computed flag would make every
+      # employer read carry an oracle.
+      # And no spare columns. Every one of these has a reader in
+      # `HospitalityComs.Profiles.Records`; `viewer_venue_id` and the
+      # corrections view's `attested_entry_id` had none and are gone, because a
+      # column pinned here is a surface that survives by default rather than by
+      # decision.
+      assert view_columns("employer_visible_attested_entries") == [
+               "attested_at",
+               "attested_entry_id",
+               "ends_at",
+               "entry_engagement_id",
+               "entry_venue_id",
+               "entry_venue_name",
+               "role_label",
+               "starts_at",
+               "viewer_engagement_id"
+             ]
+
+      assert view_columns("employer_visible_correction_requests") == [
+               "body",
+               "correction_request_id",
+               "entry_engagement_id",
+               "entry_venue_id",
+               "requested_at",
+               "resolution",
+               "resolved_at",
+               "viewer_engagement_id"
+             ]
+    end
+
+    test "does its own tenancy, because its owner bypasses row-level security" do
+      # The measurement that makes KTD3 stronger than its own argument. `Repo`
+      # connects as a superuser, and a superuser bypasses row-level security
+      # whether or not a policy is FORCEd — so the policies on `attested_entries`
+      # and `engagements` do nothing for a view owned by that role, and
+      # `viewer.venue_id = app_current_employer_id()` inside the view is the
+      # only thing confining a read to one venue.
+      #
+      # Asserted as the two facts rather than as a behaviour, because a
+      # behavioural test needs rows both repos can see and this file's sandbox
+      # cannot produce them. `HospitalityComs.ProfilesTest` runs the behaviour.
+      assert superuser?()
+      assert view_definition("employer_visible_attested_entries") =~ "app_current_employer_id()"
+      assert view_definition("employer_visible_attested_entries") =~ "app_current_instant()"
+    end
+
+    test "computes its concurrency default from periods and never from the instant" do
+      # The distinction the unit turns on, asserted against the view's own text
+      # because it is the only place the rule exists.
+      #
+      # The overlap predicate compares `starts_at` and `ends_at` against each
+      # other. It does *not* compare either against `app_current_instant()` —
+      # that comparison appears exactly twice, and both are about the viewer's
+      # engagement being active rather than about concurrency. A default written
+      # as "concurrent at this instant" would re-disclose a second job the moment
+      # it ended, which is the leak the default exists to prevent.
+      definition = view_definition("employer_visible_attested_entries")
+
+      assert definition =~ "NOT (EXISTS"
+      assert length(String.split(definition, "app_current_instant()")) - 1 == 2
+    end
+  end
+
+  describe "the views, against the classification that has to name them" do
+    test "every view in the database is classified" do
+      # Neither totality check reaches a view. `HospitalityComs.ZonesTest`
+      # quantifies over Ecto schemas and there is no schema behind these;
+      # `database_tables/0` above asks for `relkind IN ('r','p','m')` and
+      # excludes them deliberately, because they hold no rows. So the decision
+      # "may the employer role hold privilege on this relation" needs a check of
+      # its own, and this is it.
+      unclassified = database_views() -- Zones.employer_views()
+
+      assert unclassified == [],
+             """
+             These views exist in the database and are in no zone: \
+             #{inspect(unclassified)}
+
+             A view holds no rows, so neither totality check sees it — and a \
+             view the employer role can read is exactly as much of a disclosure \
+             as a table it can read. Name it in HospitalityComs.Zones.employer_views/0 \
+             and assert what employer_role holds on it.
+             """
+    end
+
+    test "an unclassified view is what the check above would report" do
+      # The control. Rolled back with the sandbox transaction, like every other
+      # DDL in this file.
+      Repo.query!("CREATE VIEW stowaway_view AS SELECT 1 AS x")
+
+      assert "stowaway_view" in database_views()
+    end
+
+    test "the classification names views the database actually has" do
+      # And the other direction: a name nobody migrated would make the privilege
+      # inventory raise, but nothing said so out loud.
+      assert Zones.employer_views() -- database_views() == []
     end
   end
 
@@ -1922,6 +2298,28 @@ defmodule HospitalityComs.BoundaryTest do
     result
   end
 
+  # U9's four, in the order they were applied. Every one of them has to come off
+  # before U5's do, and the views are why it is not merely the ordinary
+  # `ON DELETE RESTRICT` growth: `employer_visible_attested_entries` selects from
+  # `engagements` and `attested_entries`, so `DROP TABLE engagements` fails while
+  # it exists — a dependency of a kind no earlier unit created.
+  @profile_migrations [
+    {@profile_tables_migration, CreateProfiles},
+    {@profile_row_security_migration, EnableProfileRowLevelSecurity},
+    {@employer_view_migration, CreateEmployerVisibleView},
+    {@profile_zone_migration, GrantProfileZone}
+  ]
+
+  defp rolled_back_profile_zone(between) do
+    @profile_migrations |> Enum.reverse() |> Enum.each(&migrate_engagement_zone(&1, :down))
+
+    result = between.()
+
+    capture_log(fn -> Enum.each(@profile_migrations, &migrate_engagement_zone(&1, :up)) end)
+
+    result
+  end
+
   # Partial unique indexes on a table, by name. A partial index is what makes
   # "at most one row per pair *in this state*" expressible at all, and the name
   # is what lets a changeset turn its violation into an error tuple.
@@ -1987,16 +2385,23 @@ defmodule HospitalityComs.BoundaryTest do
   # this file that used to reach a table or a function now has to come through
   # here first. That is the same growth U4 forced on U3, one unit further along,
   # and the list is a record of what the bridge depends on.
+  # Three units deep now, so the steps are named rather than nested: U9's come
+  # off first, then U6's, then U5's own, and each goes back on in reverse.
   defp rolled_back_engagement_zone(between) do
-    rolled_back_room_zone(fn ->
-      @engagement_migrations |> Enum.reverse() |> Enum.each(&migrate_engagement_zone(&1, :down))
+    engagement_step = fn -> engagement_zone_down(between) end
+    room_step = fn -> rolled_back_room_zone(engagement_step) end
 
-      result = between.()
+    rolled_back_profile_zone(room_step)
+  end
 
-      capture_log(fn -> Enum.each(@engagement_migrations, &migrate_engagement_zone(&1, :up)) end)
+  defp engagement_zone_down(between) do
+    @engagement_migrations |> Enum.reverse() |> Enum.each(&migrate_engagement_zone(&1, :down))
 
-      result
-    end)
+    result = between.()
+
+    capture_log(fn -> Enum.each(@engagement_migrations, &migrate_engagement_zone(&1, :up)) end)
+
+    result
   end
 
   # U6's migrations rolled off and put back, around `between`. Outermost,
@@ -2166,16 +2571,27 @@ defmodule HospitalityComs.BoundaryTest do
   # not the same list any more and the difference is the point: the employer
   # role depends on what it was *granted*, and `attested_entries` is an
   # employer-zone table it was granted nothing on.
+  # U9's grants are the first the employer role holds on something that is not a
+  # table, and `pg_describe_object` says `view x` rather than `table x` — so the
+  # expected list is built in two halves rather than by mapping one prefix over
+  # everything. A test that assumed the prefix would have passed while reporting
+  # the wrong objects.
   defp dependent_zone_tables do
-    (GrantEmployerZone.granted_tables() ++
-       GrantEngagementZone.granted_tables() ++
-       GrantRoomZone.granted_tables() ++ GrantPeerZone.granted_tables())
-    |> Enum.map(&"table #{&1}")
-    |> Enum.sort()
+    tables =
+      GrantEmployerZone.granted_tables() ++
+        GrantEngagementZone.granted_tables() ++
+        GrantRoomZone.granted_tables() ++
+        GrantPeerZone.granted_tables() ++ GrantProfileZone.granted_tables()
+
+    Enum.sort(
+      Enum.map(tables, &"table #{&1}") ++
+        Enum.map(GrantProfileZone.granted_views(), &"view #{&1}")
+    )
   end
 
-  # Both grant migrations rolled off, in the order Ecto uses.
+  # Every grant migration rolled off, in the order Ecto uses.
   defp revoke_zone_grants do
+    migrate_engagement_zone({@profile_zone_migration, GrantProfileZone}, :down)
     migrate_engagement_zone({@room_zone_migration, GrantRoomZone}, :down)
     migrate_engagement_zone({@engagement_zone_migration, GrantEngagementZone}, :down)
     migrate_employer_zone(:down)
@@ -2185,6 +2601,7 @@ defmodule HospitalityComs.BoundaryTest do
     migrate_employer_zone(:up)
     migrate_engagement_zone({@engagement_zone_migration, GrantEngagementZone}, :up)
     migrate_engagement_zone({@room_zone_migration, GrantRoomZone}, :up)
+    migrate_engagement_zone({@profile_zone_migration, GrantProfileZone}, :up)
   end
 
   # The same sweep the person zone is audited with, pointed at the employer
@@ -2395,6 +2812,92 @@ defmodule HospitalityComs.BoundaryTest do
       )
 
     rows |> Enum.map(&hd/1) |> MapSet.new()
+  end
+
+  # Every plain view in `public`. Deliberately the complement of
+  # `database_tables/0`'s `relkind` filter: a view holds no rows, so it is not a
+  # zone question in the storage sense — and it is exactly as much of a
+  # disclosure as a table when the employer role can read it.
+  defp database_views do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'v'
+        ORDER BY 1
+        """,
+        []
+      )
+
+    Enum.map(rows, &hd/1)
+  end
+
+  defp relation_owner(name) do
+    %{rows: [[owner]]} =
+      Repo.query!("SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = to_regclass($1)", [
+        name
+      ])
+
+    owner
+  end
+
+  # `reloptions` is NULL for a relation with none, which is a different thing
+  # from an empty list and would make `in/2` raise.
+  defp relation_options(name) do
+    %{rows: [[options]]} =
+      Repo.query!(
+        "SELECT coalesce(reloptions, '{}') FROM pg_class WHERE oid = to_regclass($1)",
+        [name]
+      )
+
+    options
+  end
+
+  # Whether a view resolves its base-table permissions as its caller. Absent and
+  # `=false` are the same answer, which is the distinction the assertion above
+  # needs and the reason this reads the value rather than the key.
+  defp security_invoker?(name) do
+    name
+    |> relation_options()
+    |> Enum.find_value(false, &invoker_option/1)
+  end
+
+  defp invoker_option("security_invoker=" <> value), do: value in ~w(on true yes 1)
+  defp invoker_option(_option), do: nil
+
+  defp view_columns(name) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT a.attname
+        FROM pg_attribute a
+        WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped
+        ORDER BY a.attname
+        """,
+        [name]
+      )
+
+    Enum.map(rows, &hd/1)
+  end
+
+  defp view_definition(name) do
+    %{rows: [[definition]]} =
+      Repo.query!("SELECT pg_get_viewdef(to_regclass($1), true)", [name])
+
+    definition
+  end
+
+  # `HospitalityComs.Repo` connects as a role that bypasses row-level security
+  # regardless of FORCE, which is what makes the view the only available tier
+  # for a per-row rule. Asserted rather than assumed, because if it ever stops
+  # being true the reasoning in KTD3's implementation notes changes.
+  defp superuser? do
+    %{rows: [[super?]]} =
+      Repo.query!("SELECT rolsuper FROM pg_authid WHERE rolname = current_user", [])
+
+    super?
   end
 
   defp tables_referencing_people do

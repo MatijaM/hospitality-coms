@@ -39,21 +39,34 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
   person is the person zone doing what the person zone is for — but it is one
   more thing standing between this migration and a droppable `people`, and the
   list is where that is recorded.
+
+  U9 adds four, and one of them is a kind the chain had never carried.
+  `declared_entries.person_id` and `attested_entry_disclosures.audience_person_id`
+  are the ordinary sort — person-zone foreign keys with `ON DELETE RESTRICT`.
+  The two **views** are not: `employer_visible_attested_entries` selects from
+  `engagements` and `attested_entries`, so `DROP TABLE engagements` fails while
+  it exists, one link further down a chain that already had to reach that far.
+  Rolling `create_employer_visible_view` back is therefore part of unwinding to
+  a droppable `people`, and its own `down` is exercised here as a consequence.
   """
 
   use HospitalityComs.DataCase, async: false
 
   import ExUnit.CaptureLog
 
+  alias HospitalityComs.Repo.Migrations.CreateEmployerVisibleView
   alias HospitalityComs.Repo.Migrations.CreateEngagements
   alias HospitalityComs.Repo.Migrations.CreatePeerGraph
   alias HospitalityComs.Repo.Migrations.CreatePeopleAuthTables
+  alias HospitalityComs.Repo.Migrations.CreateProfiles
   alias HospitalityComs.Repo.Migrations.CreateRooms
   alias HospitalityComs.Repo.Migrations.CreateRosterEntries
   alias HospitalityComs.Repo.Migrations.EnableEngagementRowLevelSecurity
+  alias HospitalityComs.Repo.Migrations.EnableProfileRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.EnableRoomRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
   alias HospitalityComs.Repo.Migrations.GrantPeerZone
+  alias HospitalityComs.Repo.Migrations.GrantProfileZone
   alias HospitalityComs.Repo.Migrations.GrantRoomZone
 
   @migration_name "create_people_auth_tables"
@@ -69,7 +82,11 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
     {"grant_room_zone", GrantRoomZone},
     {"enable_room_row_level_security", EnableRoomRowLevelSecurity},
     {"create_peer_graph", CreatePeerGraph},
-    {"grant_peer_zone", GrantPeerZone}
+    {"grant_peer_zone", GrantPeerZone},
+    {"create_profiles", CreateProfiles},
+    {"enable_profile_row_level_security", EnableProfileRowLevelSecurity},
+    {"create_employer_visible_view", CreateEmployerVisibleView},
+    {"grant_profile_zone", GrantProfileZone}
   ]
 
   # Migration files are not compiled into the application, so the modules have
@@ -135,6 +152,26 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
       assert table_exists?("peer_messages")
       assert constraint_exists?("peer_connections_pair_ordered")
       assert index_exists?("connection_requests_one_current_per_pair")
+    end
+
+    test "restores the profile and the views that were rolled back with it" do
+      # U9's four are the far end of the chain, and the two views are the first
+      # dependents in it that are not tables. A `people` restored without them
+      # is an application where no employer can read a worker's record at all,
+      # and nothing else in the suite would notice until the next file that
+      # asked one to.
+      rolled_back(fn ->
+        refute table_exists?("declared_entries")
+        refute view_exists?("employer_visible_attested_entries")
+      end)
+
+      assert table_exists?("declared_entries")
+      assert table_exists?("attested_entry_disclosures")
+      assert table_exists?("correction_requests")
+      assert view_exists?("employer_visible_attested_entries")
+      assert view_exists?("employer_visible_correction_requests")
+      assert constraint_exists?("attested_entry_disclosures_one_audience")
+      assert index_exists?("attested_entry_disclosures_one_per_venue")
     end
 
     test "restores the bridge that was rolled back with it" do
@@ -218,6 +255,21 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
       [
         name
       ]
+    )
+  end
+
+  # `information_schema.tables` lists views too, so `table_exists?/1` cannot
+  # answer this. `relkind = 'v'` is the distinction, and it matters here: U9's
+  # dependents include two relations that hold no rows.
+  defp view_exists?(name) do
+    exists?(
+      """
+      SELECT 1
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind = 'v' AND c.relname = $1
+      """,
+      [name]
     )
   end
 

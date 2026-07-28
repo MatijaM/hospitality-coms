@@ -302,15 +302,26 @@ defmodule HospitalityComs.TestDatabaseGuard do
   defp note([], _text), do: :skip
   defp note(_residue, text), do: "  #{String.duplicate(" ", 32)}#{text}"
 
-  # The first line only. A `Postgrex.Error` message carries the constraint, the
-  # table and the offending key across a dozen lines, and none of it says
-  # anything the reader of a banner needs: what matters is that the tree's own
-  # cleanup could not run, which is why the section below it is so long.
+  # Two lines: the summary, and the database error under it.
+  #
+  # `EngagementsFixtures.purge/0` rescues the `Postgrex.Error` and re-raises a
+  # message written for a reader — a one-line summary, then the underlying
+  # error, then the remedy. The remedy is the banner's own job, so it is
+  # dropped; the underlying error is not. Taking the first line alone was right
+  # while the raise was a raw `Postgrex.Error`, whose first line *was* the
+  # constraint and whose remaining dozen said nothing; against a curated
+  # message it strips the diagnosis and keeps only the headline, and the banner
+  # stops naming what actually went wrong.
   @spec purge_note(purge_outcome()) :: String.t() | :skip
   defp purge_note(:purged), do: :skip
 
   defp purge_note({:failed, message}) do
-    [first | _rest] = String.split(message, "\n")
-    "  #{String.pad_trailing("the purge itself raised", 32)}#{first}"
+    [summary | rest] = String.split(message, "\n")
+    heading = "  #{String.pad_trailing("the purge itself raised", 32)}#{summary}"
+
+    case Enum.find(rest, &(String.trim(&1) != "")) do
+      nil -> heading
+      cause -> heading <> "\n" <> note([:cause], String.trim(cause))
+    end
   end
 end

@@ -241,6 +241,30 @@ defmodule HospitalityComs.Peers do
     person_id |> Records.visible_between(other_person_id, now) |> Repo.exists?()
   end
 
+  @doc """
+  Whether this person and another hold a live connection.
+
+  The counterpart of `visible?/2` and deliberately not the same question. A
+  connection is permanent: it outlives the visibility that produced it and every
+  engagement either party holds, which is R13 and what makes the plan's payoff
+  moment reachable. So a surface that gated on visibility alone would take
+  something away from two people who are still in conversation.
+
+  Takes no instant, because a connection has no term — it is live until one of
+  them ends it. False after a disconnect, false for an id that names nobody, and
+  false for the caller's own id.
+
+  Added for `HospitalityComs.Profiles.fetch_peer_profile/2`, which needs "is
+  this a peer" to mean *visible or connected*. Nothing here authorises on its
+  own: a conversation still resolves through `fetch_conversation/2`, which
+  matches on the connection rather than on this.
+  """
+  @spec connected?(PersonScope.t(), Ecto.UUID.t()) :: boolean()
+  def connected?(%PersonScope{person: %Person{id: person_id}}, other_person_id)
+      when is_binary(person_id) and is_binary(other_person_id) do
+    person_id |> Records.live_connection(other_person_id) |> Repo.exists?()
+  end
+
   ## Requests
 
   @doc """
