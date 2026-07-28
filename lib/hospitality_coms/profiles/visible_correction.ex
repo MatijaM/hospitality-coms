@@ -9,6 +9,16 @@ defmodule HospitalityComs.Profiles.VisibleCorrection do
   that asserted it, and out of the same table for the worker and their peers.
   Four readers, one shape.
 
+  **Six callers now, and the two outside that claim were the writers.**
+  `HospitalityComs.Profiles.request_correction/3` and `resolve_correction/3` both
+  answered the `HospitalityComs.Profiles.CorrectionRequest` schema, so one entity
+  was `correction_request_id` carrying `resolution: :declined` when read and `id`
+  carrying `resolution: "declined"` when written. That is the divergence the note
+  at the bottom of this moduledoc records against `venue_corrections/1`,
+  surviving on the write path because "four readers, one shape" was a claim about
+  readers and the writers were never counted. `of_request/1` is what the two go
+  through now.
+
   R16 makes a correction request visible to any viewer of the entry, so its
   visibility is not a rule of its own — it is the entry's rule, applied to a
   join. `*_create_employer_visible_view.exs` builds the second view on the first
@@ -90,6 +100,34 @@ defmodule HospitalityComs.Profiles.VisibleCorrection do
       resolved_at: row.resolved_at,
       resolution: resolution(row.resolution)
     }
+  end
+
+  @doc """
+  The struct one stored request becomes.
+
+  The writers' door. `new/1` takes a row a `Records` query selected and this
+  takes the schema struct an `insert` or a `RETURNING` hands back — the same
+  split `HospitalityComs.Peers` has between `Visibility.new/1` and
+  `Conversation.of_connection/2`.
+
+  It builds the row and delegates rather than mapping the fields a second time,
+  so the string-to-atom conversion and the field list have one spelling each. A
+  `select:` on `Records.resolvable_correction/3` was the alternative and would
+  have rendered `resolve_correction/3` alone, leaving `request_correction/3` —
+  which writes through `HospitalityComs.Repo` and has no query to put a `select:`
+  on — as the one caller still handing back the schema.
+  """
+  @spec of_request(CorrectionRequest.t()) :: t()
+  def of_request(%CorrectionRequest{} = request) do
+    new(%{
+      correction_request_id: request.id,
+      entry_engagement_id: request.engagement_id,
+      venue_id: request.venue_id,
+      body: request.body,
+      requested_at: request.requested_at,
+      resolved_at: request.resolved_at,
+      resolution: request.resolution
+    })
   end
 
   # The column is `NULL`, `'accepted'` or `'declined'` and a CHECK says so, so

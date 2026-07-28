@@ -494,7 +494,7 @@ defmodule HospitalityComs.LifecycleTest do
       assert {:ok, %{declared_entries_deleted: 1}} =
                Lifecycle.erase_person(person_at(person, @now))
 
-      assert Repo.get(DeclaredEntry, entry.id) == nil
+      assert Repo.get(DeclaredEntry, entry.declared_entry_id) == nil
     end
 
     test "keeps the disclosure ledger, as subject and as audience" do
@@ -526,8 +526,8 @@ defmodule HospitalityComs.LifecycleTest do
 
       assert {:ok, _} = Lifecycle.erase_person(person_at(person, @now))
 
-      assert Repo.get(Disclosure, own.id)
-      assert Repo.get(Disclosure, theirs.id)
+      assert Repo.get(Disclosure, own.disclosure_id)
+      assert Repo.get(Disclosure, theirs.disclosure_id)
     end
 
     test "withdraws the rows that hand an entry over, and only those" do
@@ -551,13 +551,13 @@ defmodule HospitalityComs.LifecycleTest do
       assert {:ok, %{disclosures_withdrawn: 1}} =
                Lifecycle.erase_person(person_at(person, @now))
 
-      assert Repo.get(Disclosure, narrowing.id)
-      assert Repo.get(Disclosure, widening.id) == nil
+      assert Repo.get(Disclosure, narrowing.disclosure_id)
+      assert Repo.get(Disclosure, widening.disclosure_id) == nil
 
       # The audience half, from the `true` side: a row naming the erased person
       # as the audience is somebody else's decision about their own entries, and
       # a sweep keyed on `disclosed = true` alone would take it.
-      assert Repo.get(Disclosure, somebody_elses.id)
+      assert Repo.get(Disclosure, somebody_elses.disclosure_id)
     end
 
     test "so the peer it had been handed to stops seeing that entry" do

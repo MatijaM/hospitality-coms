@@ -106,6 +106,24 @@ defmodule HospitalityComs.Profiles do
   nothing — identically. The employer's reads take a `viewer_engagement_id` and
   answer `{:ok, []}` for one that names nothing, because a refusal there would
   confirm which engagements exist at which venue.
+
+  ## Nothing here answers an Ecto schema
+
+  Every function that answers a record answers a **render struct** —
+  `VisibleEntry`, `VisibleCorrection`, `VisibleDeclaration`, `VisibleDisclosure`
+  — and every render struct names its entity `<entity>_id`. That is one rule with
+  no exceptions rather than four modules that happen to agree, and it is a rule
+  because this tree has now had the same defect three times: U8's peer message
+  said `id` in a reply and `message_id` in a push; U9's `venue_corrections/1`
+  handed back a schema so `resolution` was `"declined"` on one path and
+  `:declined` on three others; and U9 left three shapes with no render struct at
+  all plus two writers answering the schema whose four readers answered a struct.
+
+  Ecto schemas remain in the **error** half of every spec, because a changeset is
+  about the row a write failed to make and its field names are the schema's. A
+  caller matches `{:ok, %VisibleDeclaration{}}` and
+  `{:error, %Ecto.Changeset{data: %DeclaredEntry{}}}`, and those are different
+  things rather than one thing spelled two ways.
   """
 
   alias HospitalityComs.Accounts.EmployerScope
@@ -119,6 +137,8 @@ defmodule HospitalityComs.Profiles do
   alias HospitalityComs.Profiles.Disclosure
   alias HospitalityComs.Profiles.Records
   alias HospitalityComs.Profiles.VisibleCorrection
+  alias HospitalityComs.Profiles.VisibleDeclaration
+  alias HospitalityComs.Profiles.VisibleDisclosure
   alias HospitalityComs.Profiles.VisibleEntry
   alias HospitalityComs.Repo
   alias HospitalityComs.Venues
@@ -138,7 +158,7 @@ defmodule HospitalityComs.Profiles do
   """
   @type profile() :: %{
           attested_entries: [VisibleEntry.t()],
-          declared_entries: [DeclaredEntry.t()],
+          declared_entries: [VisibleDeclaration.t()],
           correction_requests: [VisibleCorrection.t()]
         }
 
@@ -175,10 +195,13 @@ defmodule HospitalityComs.Profiles do
   @doc """
   Every declared entry this person has written, oldest term first.
   """
-  @spec list_declared_entries(PersonScope.t()) :: [DeclaredEntry.t()]
+  @spec list_declared_entries(PersonScope.t()) :: [VisibleDeclaration.t()]
   def list_declared_entries(%PersonScope{person: %Person{id: person_id}})
       when is_binary(person_id) do
-    person_id |> Records.declared_entries_of() |> Repo.all()
+    person_id
+    |> Records.declared_entries_of()
+    |> Repo.all()
+    |> Enum.map(&VisibleDeclaration.of_entry/1)
   end
 
   @doc """
@@ -200,9 +223,12 @@ defmodule HospitalityComs.Profiles do
   employer-facing counterpart would tell a venue which of its workers is
   concealing something.
   """
-  @spec list_disclosures(PersonScope.t()) :: [Disclosure.t()]
+  @spec list_disclosures(PersonScope.t()) :: [VisibleDisclosure.t()]
   def list_disclosures(%PersonScope{person: %Person{id: person_id}}) when is_binary(person_id) do
-    person_id |> Records.disclosures_of() |> Repo.all()
+    person_id
+    |> Records.disclosures_of()
+    |> Repo.all()
+    |> Enum.map(&VisibleDisclosure.of_decision/1)
   end
 
   @doc """
@@ -226,12 +252,18 @@ defmodule HospitalityComs.Profiles do
   `attrs` carries `:role_label`, `:organisation_name`, `:starts_at` and
   `:ends_at`. The owner is taken from the scope and is not castable: a caller
   that could choose it could write history into somebody else's record.
+
+  Answers the same `VisibleDeclaration` `list_declared_entries/1` does, so the
+  entry a client gets back from writing one is the entry it will read back.
   """
   @spec declare_entry(PersonScope.t(), map()) ::
-          {:ok, DeclaredEntry.t()} | {:error, Ecto.Changeset.t(DeclaredEntry.t())}
+          {:ok, VisibleDeclaration.t()} | {:error, Ecto.Changeset.t(DeclaredEntry.t())}
   def declare_entry(%PersonScope{person: %Person{id: person_id}, now: now}, attrs)
       when is_binary(person_id) and is_map(attrs) do
-    person_id |> DeclaredEntry.declare_changeset(attrs, now) |> Repo.insert()
+    person_id
+    |> DeclaredEntry.declare_changeset(attrs, now)
+    |> Repo.insert()
+    |> declared()
   end
 
   @doc """
@@ -242,7 +274,7 @@ defmodule HospitalityComs.Profiles do
   statement is not re-declaring it.
   """
   @spec amend_declared_entry(PersonScope.t(), Ecto.UUID.t(), map()) ::
-          {:ok, DeclaredEntry.t()}
+          {:ok, VisibleDeclaration.t()}
           | {:error, :not_found | Ecto.Changeset.t(DeclaredEntry.t())}
   def amend_declared_entry(
         %PersonScope{person: %Person{id: person_id}, now: now},
@@ -257,13 +289,20 @@ defmodule HospitalityComs.Profiles do
   end
 
   @spec amend(DeclaredEntry.t() | nil, map(), DateTime.t()) ::
-          {:ok, DeclaredEntry.t()}
+          {:ok, VisibleDeclaration.t()}
           | {:error, :not_found | Ecto.Changeset.t(DeclaredEntry.t())}
   defp amend(nil, _attrs, _now), do: {:error, :not_found}
 
   defp amend(%DeclaredEntry{} = entry, attrs, now) do
-    entry |> DeclaredEntry.amend_changeset(attrs, now) |> Repo.update()
+    entry |> DeclaredEntry.amend_changeset(attrs, now) |> Repo.update() |> declared()
   end
+
+  # Both writes go through one renderer, so the shape of a written entry cannot
+  # come to differ from the shape of an amended one.
+  @spec declared({:ok, DeclaredEntry.t()} | {:error, Ecto.Changeset.t(DeclaredEntry.t())}) ::
+          {:ok, VisibleDeclaration.t()} | {:error, Ecto.Changeset.t(DeclaredEntry.t())}
+  defp declared({:ok, %DeclaredEntry{} = entry}), do: {:ok, VisibleDeclaration.of_entry(entry)}
+  defp declared({:error, %Ecto.Changeset{} = changeset}), do: {:error, changeset}
 
   ## Disclosure
 
@@ -291,7 +330,7 @@ defmodule HospitalityComs.Profiles do
   employment is refused by Postgres too.
   """
   @spec set_disclosure(PersonScope.t(), Ecto.UUID.t(), Disclosure.audience(), boolean()) ::
-          {:ok, Disclosure.t()} | {:error, :not_found | Ecto.Changeset.t(Disclosure.t())}
+          {:ok, VisibleDisclosure.t()} | {:error, :not_found | Ecto.Changeset.t(Disclosure.t())}
   def set_disclosure(
         %PersonScope{person: %Person{id: person_id}, now: now},
         engagement_id,
@@ -313,7 +352,7 @@ defmodule HospitalityComs.Profiles do
           boolean(),
           DateTime.t()
         ) ::
-          {:ok, Disclosure.t()} | {:error, :not_found | Ecto.Changeset.t(Disclosure.t())}
+          {:ok, VisibleDisclosure.t()} | {:error, :not_found | Ecto.Changeset.t(Disclosure.t())}
   defp decide(false, _engagement_id, _person_id, _audience, _disclosed, _now),
     do: {:error, :not_found}
 
@@ -326,10 +365,20 @@ defmodule HospitalityComs.Profiles do
       # Without this the struct that comes back carries the id this insert
       # *attempted* rather than the id of the row `ON CONFLICT` updated, because
       # a `binary_id` primary key is generated in Elixir and Ecto has no reason
-      # to read one back.
+      # to read one back. It is also what makes the render below total: the
+      # audience column an `ON CONFLICT` matched on is read back rather than
+      # assumed.
       returning: true
     )
+    |> decided()
   end
+
+  @spec decided({:ok, Disclosure.t()} | {:error, Ecto.Changeset.t(Disclosure.t())}) ::
+          {:ok, VisibleDisclosure.t()} | {:error, Ecto.Changeset.t(Disclosure.t())}
+  defp decided({:ok, %Disclosure{} = disclosure}),
+    do: {:ok, VisibleDisclosure.of_decision(disclosure)}
+
+  defp decided({:error, %Ecto.Changeset{} = changeset}), do: {:error, changeset}
 
   ## Correction requests, from the worker's side
 
@@ -346,9 +395,13 @@ defmodule HospitalityComs.Profiles do
   complaint could then resolve it — and no person session holds a privilege on
   the employer zone at all. That is the same shape
   `HospitalityComs.Engagements.claim_invitation/2` has.
+
+  Answers the `VisibleCorrection` all four reads answer. It used to answer the
+  schema, so the one entity was `id` with `resolution: "declined"` when written
+  and `correction_request_id` with `resolution: :declined` when read.
   """
   @spec request_correction(PersonScope.t(), Ecto.UUID.t(), map()) ::
-          {:ok, CorrectionRequest.t()}
+          {:ok, VisibleCorrection.t()}
           | {:error, :not_found | Ecto.Changeset.t(CorrectionRequest.t())}
   def request_correction(
         %PersonScope{person: %Person{id: person_id}, now: now},
@@ -363,13 +416,26 @@ defmodule HospitalityComs.Profiles do
   end
 
   @spec contest(Engagement.t() | nil, map(), DateTime.t()) ::
-          {:ok, CorrectionRequest.t()}
+          {:ok, VisibleCorrection.t()}
           | {:error, :not_found | Ecto.Changeset.t(CorrectionRequest.t())}
   defp contest(nil, _attrs, _now), do: {:error, :not_found}
 
   defp contest(%Engagement{} = engagement, attrs, now) do
-    engagement |> CorrectionRequest.request_changeset(attrs, now) |> Repo.insert()
+    engagement
+    |> CorrectionRequest.request_changeset(attrs, now)
+    |> Repo.insert()
+    |> contested()
   end
+
+  @spec contested(
+          {:ok, CorrectionRequest.t()}
+          | {:error, Ecto.Changeset.t(CorrectionRequest.t())}
+        ) ::
+          {:ok, VisibleCorrection.t()} | {:error, Ecto.Changeset.t(CorrectionRequest.t())}
+  defp contested({:ok, %CorrectionRequest{} = request}),
+    do: {:ok, VisibleCorrection.of_request(request)}
+
+  defp contested({:error, %Ecto.Changeset{} = changeset}), do: {:error, changeset}
 
   ## The peer's read
 
@@ -453,10 +519,16 @@ defmodule HospitalityComs.Profiles do
       |> Repo.all()
       |> Enum.map(&VisibleCorrection.new/1)
 
+    declared =
+      other_person_id
+      |> Records.declared_entries_of()
+      |> Repo.all()
+      |> Enum.map(&VisibleDeclaration.of_entry/1)
+
     {:ok,
      %{
        attested_entries: attested,
-       declared_entries: Repo.all(Records.declared_entries_of(other_person_id)),
+       declared_entries: declared,
        correction_requests: corrections
      }}
   end
@@ -585,9 +657,16 @@ defmodule HospitalityComs.Profiles do
   carries no changeset, so
   `correction_requests_resolved_after_requested` would otherwise arrive as a raw
   `Postgrex.Error` from a function whose spec enumerates three atoms.
+
+  Answers the `VisibleCorrection` `list_venue_corrections/1` answers, so this
+  venue's inbox reads the same shape whether it is listing a request or has just
+  answered one. **The acting grant is deliberately not on it**: `resolved_by_grant_id`
+  is not a field of the render struct, because that struct is also what a worker
+  and their peers read, and which of a venue's grants answered a complaint is the
+  venue's business.
   """
   @spec resolve_correction(EmployerScope.t(), Ecto.UUID.t(), CorrectionRequest.resolution()) ::
-          {:ok, CorrectionRequest.t()}
+          {:ok, VisibleCorrection.t()}
           | {:error, :no_grant | :not_found | :already_resolved}
   def resolve_correction(%EmployerScope{grant_id: grant_id} = scope, request_id, resolution)
       when is_binary(grant_id) and is_binary(request_id) do
@@ -595,7 +674,7 @@ defmodule HospitalityComs.Profiles do
   end
 
   @spec resolve(EmployerScope.t(), Ecto.UUID.t(), CorrectionRequest.resolution()) ::
-          {:ok, CorrectionRequest.t()}
+          {:ok, VisibleCorrection.t()}
           | {:error, :no_grant | :not_found | :already_resolved}
   defp resolve(scope, request_id, resolution) do
     with {:ok, grant} <- Venues.fetch_acting_grant(scope) do
@@ -613,8 +692,9 @@ defmodule HospitalityComs.Profiles do
           EmployerScope.t(),
           Ecto.UUID.t()
         ) ::
-          {:ok, CorrectionRequest.t()} | {:error, :not_found | :already_resolved}
-  defp resolved({1, [request]}, _scope, _request_id), do: {:ok, request}
+          {:ok, VisibleCorrection.t()} | {:error, :not_found | :already_resolved}
+  defp resolved({1, [request]}, _scope, _request_id),
+    do: {:ok, VisibleCorrection.of_request(request)}
 
   defp resolved({0, _rows}, scope, request_id) do
     scope.venue_id
