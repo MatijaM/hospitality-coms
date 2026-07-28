@@ -361,9 +361,25 @@ The sections above are not edited to agree with what shipped.
    token and the aged-out horizon are asserted. Both files pass unchanged; the claim in the brief
    was pointed at the wrong one.
 
-6. **Baseline arithmetic.** 1047 tests on `main`; 1057 here (ten new bodies in
-   `person_zone_test.exs`), with the same three `PostgresRolesTest` failures issue #20 owns and
-   nothing else red.
+6. **The tree moved underneath this branch, as it did for #15.** It was cut from `origin/main` at
+   `0e86221`; four pull requests landed there during implementation, #44 among them — which is
+   issue **#17**, the one this issue's "Related" section names, giving `EmployerRepo` a login role
+   of its own and closing the `RESET ROLE` escape. The branch is rebased onto `acee453`. Three
+   files overlapped (`CLAUDE.md`, `boundary_test.exs`,
+   `session_controller_test.exs`) and all three merged without conflict; nothing was rewritten
+   beyond the rebase itself.
+
+   It changes one sentence's weight rather than its truth. "What closes the person zone is the
+   grant on `EmployerRepo`'s role" was, until #17, a claim with a hole in it — `RESET ROLE` put the
+   connection back on a role that owned every table, so the grant tier was defeatable from the same
+   code position as the BEAM-side guards. It is not any more, which makes the thing this branch
+   deliberately does *not* claim to be a stronger tier than it was when the brief was written.
+
+7. **Baseline arithmetic.** 1047 tests when the ticket was written, 1066 on `origin/main` after
+   those four merges, 1076 here — ten new bodies in `person_zone_test.exs`. Four
+   `PostgresRolesTest` failures rather than three: #17 added a fourth test to that file and it
+   fails for the same documented reason as the other three, naming `hospitality_coms_dev`
+   (issue #20). Nothing else is red.
 
 ## Mutation record
 
