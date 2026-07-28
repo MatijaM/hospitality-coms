@@ -109,11 +109,21 @@ defmodule HospitalityComs.Repo.Migrations.CreateEmployerLoginRole do
   Putting them on `employer_login` is what would make them effective, and that
   is a behaviour change #17 did not ask for with real risk attached — a
   ten-second idle-in-transaction cap on a sandbox connection that holds a
-  transaction open for the length of a test is a flake generator, and three
-  test files park real connections on real locks deliberately. The finding is
+  transaction open for the length of a test is a flake generator, and four test
+  files park real connections on real locks deliberately. The finding is
   recorded in `CLAUDE.md`; acting on it is its own ticket. This migration sets
-  no role-level setting, and `HospitalityComs.BoundaryTest` asserts that, so it
-  cannot be enabled as a side effect.
+  no role-level setting, and `HospitalityComs.BoundaryTest` asserted that, so it
+  could not be enabled as a side effect.
+
+  **That ticket is issue #45 and it has landed**, in
+  `*_bound_employer_login_connections.exs`, which is the migration that puts
+  both caps on this role. The flake risk was measured rather than reasoned about
+  — twenty consecutive runs of the four parking files with the caps live, and no
+  statement cancelled — and the assertion named above is inverted there, against
+  a live connection rather than against `pg_roles`. This migration still sets no
+  role-level setting, and still should not: a credential's attributes and a
+  connection's budget are two changes with two reasons, and #45's `down` has to
+  be able to lift the budget without dropping the credential.
   """
 
   use Ecto.Migration
