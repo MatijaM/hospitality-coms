@@ -28,9 +28,9 @@ defmodule HospitalityComs.Peers do
       an employer session could add that would make such a query mean anything —
       which is the Problem Frame's inversion of ordinary multi-tenancy, stated
       as a table.
-    * **The transport.** `HospitalityComsWeb.EmployerSocket` routes no `"peer"`
-      topic, so a join is refused in Phoenix's dispatch with no application code
-      running (KTD9).
+    * **The transport.** `HospitalityComsWeb.EmployerSocket` routes no
+      `"peer:*"` topic, so a join is refused in Phoenix's dispatch with no
+      application code running (KTD9).
     * **This module.** Every function heads on a
       `HospitalityComs.Accounts.PersonScope`, so an employer scope is a
       `FunctionClauseError` before the body runs.
@@ -105,6 +105,31 @@ defmodule HospitalityComs.Peers do
   What is *not* hidden is the caller's own history: `:blocked`,
   `:already_requested` and `:already_connected` are all statements about
   something the caller was party to.
+
+  ## What is not here, and what U10 will have to add
+
+  **There is no `withdraw_request/2`.** A requester cannot take an outstanding
+  approach back without the addressee declining it, which blocks them. The row
+  stays pending and reports `:pending` again years later if the pair is
+  co-rostered afresh. The shape is obvious — one conditional `update_all`
+  setting `superseded_at` and writing no block, leaving the pair at zero current
+  rows, which `permitted/3`'s `nil` clause already accepts — and it is left out
+  deliberately, because withdraw-and-resend defeats the one-outstanding-request
+  throttle and turns "may this person approach again" into a rate-limiting
+  question rather than a state-machine one. Issue #15 is where that lives.
+
+  **Nothing caps how many requests one person may have outstanding.** One actor
+  at a large venue can approach every other worker there once. A decline stops
+  them permanently for that pair, so the graph self-heals, but the fan-out is
+  unbounded. Also issue #15.
+
+  **`disconnect/2` takes a live `PersonScope` acting for itself, and U10 will
+  need one that does not.** Its stated approach for a peer conversation is a
+  disconnect plus deletion of the erased person's own messages, and an erasure
+  has no such scope to hand this. `block_counterpart/4` is the other half of
+  that note: it asserts `{1, _}` on its update, which cannot fail while
+  `peer_connections.request_id` is `NOT NULL` with `ON DELETE RESTRICT`, and
+  becomes a `MatchError` the moment something deletes request rows.
   """
 
   import Ecto.Query
@@ -162,9 +187,31 @@ defmodule HospitalityComs.Peers do
   Every counterpart this person can see at their scope's instant, with the venue
   they share and the interval it runs over.
 
-  One entry per overlapping pair of engagements, so two separate stints at one
-  venue are two entries and are not merged. Ordered by venue name, then by the
-  counterpart, then by when the interval opened.
+  **One entry per counterpart per venue**, ordered by venue name and then by the
+  counterpart. Two venues are two entries; two separate stints at one venue are
+  one, and this is where the shape was decided rather than inherited.
+
+  ## Why per venue, and why the stints merge
+
+  Per venue, because the venue is what the entry is *about*: it carries
+  `venue_id`, `venue_name` and the counterpart's employer-authored `role_label`,
+  which is "where you know them from" and is the disclosure U9 governs. Folding
+  two venues into one person would have to drop all three.
+
+  The stints merge because every row this query returns is an interval that
+  contains the asking instant, and **a set of intervals with a common point has
+  a union that is itself an interval** — `[min(from), max(until))`, with no gap
+  to lose. `HospitalityComs.Peers.Visibility`'s "the union of two intervals is
+  not an interval" is about arbitrary intervals and is why the *predicate*
+  keeps them separate; it does not reach a list of currently-live ones.
+
+  Nothing is weakened by merging, because nothing authorises off this list.
+  `visible?/2` and `request_connection/2` both ask
+  `HospitalityComs.Peers.Records.visible_between/3`, which ranges over every
+  engagement pair and is untouched. This is the rendering, and a rendering that
+  returned the same `person_id` twice with two `visible_until` values — and
+  possibly two role labels — is one a client keying on the counterpart cannot
+  hold.
 
   Nothing is stored. Advancing the clock past `visible_until` removes an entry
   with no job having run, which is this unit's verification condition.
@@ -178,6 +225,7 @@ defmodule HospitalityComs.Peers do
     |> Records.visible_peers(now)
     |> Repo.all()
     |> Enum.map(&Visibility.new/1)
+    |> Visibility.merge_stints()
   end
 
   @doc """
@@ -198,22 +246,41 @@ defmodule HospitalityComs.Peers do
   @doc """
   Asks another person to connect.
 
-  Four steps, and the first two are refusals rather than writes:
+  Three steps, and the first two are refusals rather than writes:
 
     1. `:visible` — the pair can see each other at this instant. An id that
        names nobody, a person who is not co-rostered, and the caller themselves
        all fail here identically (AE1).
-    2. `:permitted` — the pair's current request row, taken under `FOR UPDATE`,
-       does not stop this approach. See the module's table.
-    3. `:supersede` — the previous current row stops being current, so the pair
-       has exactly one again.
-    4. `:request` — the row, with the partial unique index underneath it as the
+    2. `:permitted` — the pair's current request row is superseded and the
+       decision is made from what that statement returned. See the module's
+       table.
+    3. `:request` — the row, with the partial unique index underneath it as the
        half that is safe when two people ask at once.
 
-  The lock in step 2 is what makes step 3 mean something: without it two
-  requesters both read the same declined row, both supersede it, and both
-  insert — which the index refuses anyway, but with a constraint error where a
-  considered refusal was available.
+  ## Why the decision and the supersede are one step
+
+  They used to be two, and KTD19 was defeatable by racing them. The read took
+  the current row under `FOR UPDATE` and decided; the supersede then re-selected
+  **by pair**. Under `READ COMMITTED` a reader that parks on a row another
+  transaction is superseding re-evaluates *that row* when the lock releases and
+  correctly finds it no longer current — but the replacement the other
+  transaction inserted was never in the reader's snapshot. So a blocked party
+  read "this pair has nothing current", was permitted, and the following
+  `update_all` — a new statement with a new snapshot — found the replacement and
+  superseded it. The block was consulted against a row that had already been
+  answered, and the request the block exists to stop landed.
+
+  One statement that supersedes and returns closes it, because the two answers
+  can no longer come from two snapshots. Whatever is invisible to the decision
+  is equally invisible to the supersede, so the insert meets
+  `connection_requests_one_current_per_pair` and is refused. A refusal rolls the
+  supersede back with the transaction, so nothing else about the semantics
+  changed: the pair still has exactly one current row, and it is still the one a
+  successful request wrote.
+
+  `HospitalityComs.PeersConcurrencyTest` races a blocked party against the
+  party who blocked them and asserts the *reply*, not only the row count — a
+  lost request reported as `{:ok, …}` is the failure mode this shape removes.
   """
   @spec request_connection(PersonScope.t(), Ecto.UUID.t()) ::
           {:ok, ConnectionRequest.t()} | request_failure()
@@ -224,10 +291,7 @@ defmodule HospitalityComs.Peers do
       co_rostered(repo, person_id, addressee_id, now)
     end)
     |> Multi.run(:permitted, fn repo, _changes ->
-      may_initiate(repo, person_id, addressee_id)
-    end)
-    |> Multi.run(:supersede, fn repo, _changes ->
-      supersede_current(repo, person_id, addressee_id, now)
+      may_initiate(repo, person_id, addressee_id, now)
     end)
     # `mode: :savepoint` explicit, because `ecto_sql` opens a savepoint only
     # when asked. The unique-index violation this can meet is turned into a
@@ -254,17 +318,40 @@ defmodule HospitalityComs.Peers do
   defp visible_or_refuse(true), do: {:ok, :co_rostered}
   defp visible_or_refuse(false), do: {:error, :not_visible}
 
-  # The pair's current row and whether they are connected right now, decided
-  # together because the two answers are one question about one pair.
-  @spec may_initiate(Ecto.Repo.t(), Ecto.UUID.t(), Ecto.UUID.t()) ::
+  # The pair's current row stops being current, and the decision is made from
+  # the row that statement handed back. One statement, so the row the decision
+  # sees and the row the write moved are the same row under one snapshot — see
+  # `request_connection/2` for the race that shape closes.
+  #
+  # Its outcome and its block are left exactly as they were: the row is the
+  # pair's history and this only says it is no longer the pair's present. A
+  # refusal below rolls the supersede back with the transaction.
+  #
+  # Whether the pair is connected right now is asked in the same step, and after
+  # the supersede rather than before it: a concurrent acceptance holds the
+  # request row until it commits, so the statement above is what makes the
+  # connection it inserted visible to the read below.
+  @spec may_initiate(Ecto.Repo.t(), Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) ::
           {:ok, :may_initiate}
           | {:error, :already_requested | :already_connected | :blocked}
-  defp may_initiate(repo, person_id, addressee_id) do
-    current = person_id |> Records.locked_current_request(addressee_id) |> repo.one()
+  defp may_initiate(repo, person_id, addressee_id, now) do
+    stamped_at = DateTime.truncate(now, :second)
+
+    {_count, rows} =
+      person_id
+      |> Records.supersede_current_request(addressee_id)
+      |> repo.update_all(set: [superseded_at: stamped_at, updated_at: stamped_at])
+
     connected? = person_id |> Records.live_connection(addressee_id) |> repo.exists?()
 
-    permitted(current, connected?, person_id)
+    rows |> superseded() |> permitted(connected?, person_id)
   end
+
+  # At most one, because `connection_requests_one_current_per_pair` permits at
+  # most one — so this is the index restated rather than a defensive `hd/1`.
+  @spec superseded([ConnectionRequest.t()]) :: ConnectionRequest.t() | nil
+  defp superseded([]), do: nil
+  defp superseded([%ConnectionRequest{} = request]), do: request
 
   @spec permitted(ConnectionRequest.t() | nil, boolean(), Ecto.UUID.t()) ::
           {:ok, :may_initiate}
@@ -277,29 +364,13 @@ defmodule HospitalityComs.Peers do
   end
 
   defp permitted(%ConnectionRequest{} = current, false, _person_id) do
-    current |> ConnectionRequest.outstanding?() |> outstanding_or_permitted()
+    current |> ConnectionRequest.answered?() |> answered_or_permitted()
   end
 
-  @spec outstanding_or_permitted(boolean()) ::
+  @spec answered_or_permitted(boolean()) ::
           {:ok, :may_initiate} | {:error, :already_requested}
-  defp outstanding_or_permitted(true), do: {:error, :already_requested}
-  defp outstanding_or_permitted(false), do: {:ok, :may_initiate}
-
-  # The previous current row, if there is one, stops being current. Its outcome
-  # and its block are left exactly as they were: the row is the pair's history
-  # and this only says it is no longer the pair's present.
-  @spec supersede_current(Ecto.Repo.t(), Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) ::
-          {:ok, non_neg_integer()}
-  defp supersede_current(repo, person_id, addressee_id, now) do
-    stamped_at = DateTime.truncate(now, :second)
-
-    {superseded, _rows} =
-      person_id
-      |> Records.current_request(addressee_id)
-      |> repo.update_all(set: [superseded_at: stamped_at, updated_at: stamped_at])
-
-    {:ok, superseded}
-  end
+  defp answered_or_permitted(false), do: {:error, :already_requested}
+  defp answered_or_permitted(true), do: {:ok, :may_initiate}
 
   @spec requested({:ok, map()} | request_failure()) ::
           {:ok, ConnectionRequest.t()} | request_failure()
@@ -516,8 +587,13 @@ defmodule HospitalityComs.Peers do
   @doc """
   One request this person is a party to, by id, with its derived state.
 
-  `:not_found` for a request between two other people and for an id that names
-  nothing, identically.
+  `:not_found` for a request between two other people, for an id that names
+  nothing, and for a row a later request has **superseded** — identically. The
+  last of those is what makes this reader agree with the other three: a
+  superseded row is not the pair's current one, `accept_request/2` and
+  `decline_request/2` already answer `:not_found` for it, and a `fetch` that
+  reported `:pending` for a row nobody can answer would be the pair's state
+  depending on which function asked.
   """
   @spec fetch_request(PersonScope.t(), Ecto.UUID.t()) ::
           {:ok, ConnectionRequest.t()} | {:error, :not_found}
@@ -620,30 +696,77 @@ defmodule HospitalityComs.Peers do
   Not gated on visibility or on any engagement: a connection is permanent, and a
   person holding no engagements at all can still talk to the people they
   connected with.
+
+  ## The disconnect it races is the remedy, so the race is closed
+
+  An unlocked read followed by an insert stores a message that arrives while the
+  other party's `disconnect/2` is committing — and then pushes it to them,
+  after they cut contact, into a history their own `list_messages/2` will never
+  show them. R15 makes disconnection the origin document's only stated remedy
+  for harm in a peer conversation; one more message getting through is the
+  specific thing the remedy exists to stop.
+
+  So `:open` re-resolves the conversation under `FOR SHARE`, which conflicts
+  with the `FOR NO KEY UPDATE` a disconnect's `UPDATE` takes. A send arriving
+  in that window parks, the disconnect commits, and the send re-evaluates the
+  row it was waiting on and matches nothing — `{:error, :disconnected}`, the
+  same answer it would get a second later. Several sends hold `FOR SHARE`
+  together, so two people typing at each other are not serialised; only the
+  disconnect is. The announcement moves after the commit for
+  `HospitalityComs.Engagements.end_engagement/2`'s reason: nothing is announced
+  that a rollback could take back.
+
+  **`HospitalityComs.Rooms.send_venue_room_message/3` has the same read-then-write
+  shape and is deliberately left alone.** The convention is the tree's rather
+  than this unit's, and there the losing case is a message landing in a venue
+  room a moment after an engagement ended — a stale message in a room the sender
+  was in, with no remedy semantics attached to the boundary and a sweeper behind
+  it. Here the boundary *is* the remedy, which is the whole of the asymmetry.
   """
   @spec send_message(PersonScope.t(), Ecto.UUID.t(), String.t()) ::
           {:ok, PeerMessage.t()}
           | {:error, :not_found | :disconnected | Ecto.Changeset.t(PeerMessage.t())}
-  def send_message(%PersonScope{} = scope, connection_id, body)
+  def send_message(
+        %PersonScope{person: %Person{id: person_id}, now: now} = scope,
+        connection_id,
+        body
+      )
       when is_binary(connection_id) and is_binary(body) do
-    with {:ok, connection} <- fetch_connection(scope, connection_id),
-         {:ok, open} <- still_open(connection) do
-      open
-      |> PeerMessage.sent_changeset(scope.person.id, body, scope.now)
-      |> Repo.insert()
-      |> sent(open)
+    with {:ok, _connection} <- fetch_connection(scope, connection_id) do
+      Multi.new()
+      |> Multi.run(:open, fn repo, _changes -> locked_open(repo, person_id, connection_id) end)
+      |> Multi.insert(:message, &message(&1, person_id, body, now), mode: :savepoint)
+      |> Repo.transaction()
+      |> sent()
     end
   end
 
-  @spec still_open(Connection.t()) :: {:ok, Connection.t()} | {:error, :disconnected}
-  defp still_open(%Connection{disconnected_at: nil} = connection), do: {:ok, connection}
-  defp still_open(%Connection{}), do: {:error, :disconnected}
+  # Matching nothing here is `:disconnected` and never `:not_found`: the caller
+  # has already resolved the connection without a lock, so "this person is a
+  # party to it" has been answered and the only thing this predicate adds is
+  # whether it is still open.
+  @spec locked_open(Ecto.Repo.t(), Ecto.UUID.t(), Ecto.UUID.t()) ::
+          {:ok, Connection.t()} | {:error, :disconnected}
+  defp locked_open(repo, person_id, connection_id) do
+    person_id
+    |> Records.locked_open_connection_of(connection_id)
+    |> repo.one()
+    |> still_open()
+  end
 
-  @spec sent(
-          {:ok, PeerMessage.t()} | {:error, Ecto.Changeset.t(PeerMessage.t())},
-          Connection.t()
-        ) :: {:ok, PeerMessage.t()} | {:error, Ecto.Changeset.t(PeerMessage.t())}
-  defp sent({:ok, %PeerMessage{} = message} = result, connection) do
+  @spec still_open(Connection.t() | nil) :: {:ok, Connection.t()} | {:error, :disconnected}
+  defp still_open(%Connection{} = connection), do: {:ok, connection}
+  defp still_open(nil), do: {:error, :disconnected}
+
+  @spec message(map(), Ecto.UUID.t(), String.t(), DateTime.t()) ::
+          Ecto.Changeset.t(PeerMessage.t())
+  defp message(%{open: %Connection{} = connection}, person_id, body, now) do
+    PeerMessage.sent_changeset(connection, person_id, body, now)
+  end
+
+  @spec sent({:ok, map()} | {:error, atom(), term(), map()}) ::
+          {:ok, PeerMessage.t()} | {:error, :disconnected | Ecto.Changeset.t(PeerMessage.t())}
+  defp sent({:ok, %{open: %Connection{} = connection, message: %PeerMessage{} = message}}) do
     announce(
       Connection.parties(connection),
       {:peer_message,
@@ -656,10 +779,12 @@ defmodule HospitalityComs.Peers do
        }}
     )
 
-    result
+    {:ok, message}
   end
 
-  defp sent({:error, %Ecto.Changeset{}} = failure, _connection), do: failure
+  defp sent({:error, :open, :disconnected, _changes}), do: {:error, :disconnected}
+
+  defp sent({:error, :message, %Ecto.Changeset{} = changeset, _changes}), do: {:error, changeset}
 
   @doc """
   Ends a conversation, from either side.
@@ -747,9 +872,15 @@ defmodule HospitalityComs.Peers do
     stamped_at = DateTime.truncate(now, :second)
     blocked = Connection.counterpart(connection, person_id)
 
+    # `{1, _}` and not a softer match: `peer_connections.request_id` is `NOT
+    # NULL` and references `connection_requests` with `ON DELETE RESTRICT`, so
+    # the row cannot be absent while the connection exists. **U10 is where that
+    # stops being true** — an erasure that deletes request rows would turn this
+    # into a `MatchError` that crashes the transaction rather than refusing it.
+    # See `HospitalityComs.Peers`' note on what U10 inherits.
     {1, _rows} =
       repo.update_all(
-        from(request in ConnectionRequest, where: request.id == ^connection.request_id),
+        Records.request_by_id(connection.request_id),
         set: [blocked_initiator_id: blocked, updated_at: stamped_at]
       )
 
@@ -802,6 +933,10 @@ defmodule HospitalityComs.Peers do
   and a channel are looking at the same string. Naming a topic is scope-free;
   *subscribing* to one is what `HospitalityComs.PubSub.subscribe/2` pins to the
   caller's own person.
+
+  It is also `HospitalityComsWeb.PeerChannel`'s channel topic, which is what
+  makes a stray `broadcast/3` from that channel reach one person rather than
+  everybody — see its moduledoc.
   """
   @spec topic(Ecto.UUID.t()) :: String.t()
   def topic(person_id) when is_binary(person_id), do: PubSub.topic({:peer, person_id})
@@ -828,20 +963,31 @@ defmodule HospitalityComs.Peers do
     Enum.each(person_ids, &broadcast(&1, message))
   end
 
+  # `Phoenix.PubSub.broadcast/3`'s failure is the adapter's, whose contract is
+  # `term()`. It is collapsed to the one reason the `:pg` adapter can actually
+  # name **before** it reaches `announced/2`, so that this module's own
+  # enumeration is a closed set rather than `AGENTS.md`'s named BAD example
+  # wearing a private-function badge. The same manoeuvre
+  # `HospitalityComsWeb.Presence.tracked/1` makes.
   @spec broadcast(Ecto.UUID.t(), tuple()) :: :ok
   defp broadcast(person_id, message) do
     HospitalityComs.PubSub
     |> Phoenix.PubSub.broadcast(topic(person_id), message)
+    |> undelivered()
     |> announced(elem(message, 0))
   end
 
-  @spec announced(:ok | {:error, term()}, atom()) :: :ok
+  @spec undelivered(:ok | {:error, term()}) :: :ok | {:error, :no_such_group}
+  defp undelivered(:ok), do: :ok
+  defp undelivered({:error, _reason}), do: {:error, :no_such_group}
+
+  @spec announced(:ok | {:error, :no_such_group}, atom()) :: :ok
   defp announced(:ok, _event), do: :ok
 
   defp announced({:error, reason}, event) do
     Logger.warning(
       "peer announcement was not delivered " <>
-        "event=#{event} reason_code=#{inspect(reason)}"
+        "event=#{event} reason_code=#{reason}"
     )
 
     :ok

@@ -207,17 +207,30 @@ defmodule HospitalityComs.Peers.Records do
   end
 
   @doc """
-  The pair's current request, taken under `FOR UPDATE`.
+  The pair's current request, superseded in the same statement that reads it.
 
-  What `HospitalityComs.Peers.request_connection/2` reads before it decides, so
-  that the decision and the supersede that follows it see the same row. Without
-  the lock two requesters both read a declined row, both supersede it, and both
-  insert — which the unique index refuses anyway, but with a constraint error
-  where a considered refusal was available.
+  `HospitalityComs.Peers.request_connection/2` composes `update_all` over this
+  and decides from what `RETURNING` hands back, which is one statement rather
+  than a read followed by a write.
+
+  **That is not a tidiness preference, it is KTD19.** Under `READ COMMITTED` a
+  `SELECT … FOR UPDATE` that parks on a row another transaction is superseding
+  re-evaluates *that row* when the lock is released and finds it no longer
+  current — but the replacement row the other transaction inserted was not in
+  the statement's snapshot, so the read answers "this pair has nothing current"
+  while a following `update_all`, taking a snapshot of its own, sees the
+  replacement and supersedes it. A blocked party's request landed that way: the
+  decision was made from one snapshot and the write from another.
+
+  Read and write in one statement removes the second snapshot. Whatever is
+  invisible to the decision is equally invisible to the supersede, so the
+  partial unique index `connection_requests_one_current_per_pair` refuses the
+  insert that follows rather than a superseded predecessor letting it through.
+  `HospitalityComs.PeersConcurrencyTest` races exactly that interleaving.
   """
-  @spec locked_current_request(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.Query.t()
-  def locked_current_request(person_id, other_person_id) do
-    person_id |> current_request(other_person_id) |> lock("FOR UPDATE")
+  @spec supersede_current_request(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.Query.t()
+  def supersede_current_request(person_id, other_person_id) do
+    person_id |> current_request(other_person_id) |> select([request], request)
   end
 
   @doc """
@@ -270,12 +283,36 @@ defmodule HospitalityComs.Peers.Records do
 
   A request between two other people and an id that names nothing match
   identically, so a refusal built on this enumerates nothing (AE1).
+
+  **`superseded_at IS NULL` is part of it**, and it has to be. Without that
+  clause a superseded-but-unanswered row comes back here reporting `:pending`
+  while `answerable/2` — which every write goes through — matches nothing for
+  the same id, so the pair's state would depend on which function asked. The
+  four places that derive a state now agree about *superseded* as well as about
+  *lapsed*: a row that is not the pair's current one is not a row anybody can
+  read a state off.
   """
   @spec request_of(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.Query.t()
   def request_of(person_id, request_id) when is_binary(person_id) and is_binary(request_id) do
     from request in ConnectionRequest,
       where: request.id == ^request_id,
-      where: request.requester_id == ^person_id or request.addressee_id == ^person_id
+      where: request.requester_id == ^person_id or request.addressee_id == ^person_id,
+      where: is_nil(request.superseded_at)
+  end
+
+  @doc """
+  One request by id, with no party predicate at all.
+
+  The one query in this module that authorises nothing, and the only caller is
+  `HospitalityComs.Peers.disconnect/2` writing KTD19's block on the request its
+  connection came out of — an id it read off a `peer_connections` row it had
+  already established the caller is a party to. It is here rather than inline at
+  that call site because "every query the peer graph asks is in this module" is
+  the rule, and a query built at a call site is one the rule cannot see.
+  """
+  @spec request_by_id(Ecto.UUID.t()) :: Ecto.Query.t()
+  def request_by_id(request_id) when is_binary(request_id) do
+    from request in ConnectionRequest, where: request.id == ^request_id
   end
 
   @doc """
@@ -330,6 +367,34 @@ defmodule HospitalityComs.Peers.Records do
   def connection_of(person_id, connection_id)
       when is_binary(person_id) and is_binary(connection_id) do
     Connection |> party_to(person_id) |> where([c], c.id == ^connection_id)
+  end
+
+  @doc """
+  One **open** connection `person_id` is a party to, taken under `FOR SHARE`.
+
+  What `HospitalityComs.Peers.send_message/3` resolves the conversation with
+  before it writes, and the lock mode is the whole of it. `FOR SHARE` conflicts
+  with the `FOR NO KEY UPDATE` an ordinary `UPDATE` takes, so a send that
+  arrives while the other party's disconnect is in flight parks until that
+  disconnect commits — and then re-evaluates the row it was waiting on, finds
+  `disconnected_at` set, and matches nothing.
+
+  Several sends may hold it at once, which is what makes `FOR SHARE` the right
+  mode rather than `FOR UPDATE`: two people typing at each other are not in
+  conflict, and only the disconnect is.
+
+  Matching nothing here means "closed", never "not yours" — the caller has
+  already resolved the connection through `connection_of/2` without a lock, so
+  the two refusals stay distinguishable and `:not_found` keeps meaning what it
+  means everywhere else in this module.
+  """
+  @spec locked_open_connection_of(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.Query.t()
+  def locked_open_connection_of(person_id, connection_id)
+      when is_binary(person_id) and is_binary(connection_id) do
+    person_id
+    |> connection_of(connection_id)
+    |> where([connection], is_nil(connection.disconnected_at))
+    |> lock("FOR SHARE")
   end
 
   @doc """

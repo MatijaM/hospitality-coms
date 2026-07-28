@@ -1,6 +1,6 @@
 defmodule HospitalityComs.PeersConcurrencyTest do
   @moduledoc """
-  The three races U8 adds, and the issue scenario that is only a race.
+  The five races U8 adds, and the issue scenario that is only a race.
 
   ## "Simultaneous crossed requests resolve to one connection, not two"
 
@@ -54,6 +54,16 @@ defmodule HospitalityComs.PeersConcurrencyTest do
   `HospitalityComs.EngagementsConcurrencyTest` measured: `Task.async/1` starts
   the process the moment it is called, so a list built at the call site is
   already running while the barrier is still being acquired.
+
+  ## Two of the five name an *ordering* rather than a collision
+
+  KTD19's block and R15's disconnect are both defeated by one interleaving of
+  two callers and not by the other, so `ordered/2` starts the racers one at a
+  time and waits for each to park before starting the next. Postgres serves the
+  waiters on one tuple in arrival order, which makes "the blocked party arrives
+  second" and "the send arrives behind the disconnect" facts about the test
+  rather than about the scheduler. Raced symmetrically both tests would pass
+  half the time against the bug they name, which is worse than not having them.
   """
 
   use ExUnit.Case, async: false
@@ -230,6 +240,108 @@ defmodule HospitalityComs.PeersConcurrencyTest do
     end
   end
 
+  describe "a blocked party asking while the party who blocked them asks" do
+    test "is still refused, and the pair's current row is the unblocked party's" do
+      # **KTD19 raced.** `first` asked, `second` declined, so `first` is blocked
+      # and `second` keeps the initiative. Sequentially `first` is refused
+      # `:blocked` against the declined row, which is the test in
+      # `HospitalityComs.PeersTest`.
+      #
+      # This is the interleaving where that refusal used to be defeated. The
+      # decision and the supersede were two statements: the blocked party's
+      # `SELECT … FOR UPDATE` parked on the declined row, correctly found it no
+      # longer current when the lock released, and answered "this pair has
+      # nothing current" — because the replacement `second` inserted was never
+      # in that statement's snapshot. The following `update_all`, a new
+      # statement with a new snapshot, then found the replacement and superseded
+      # it, and the blocked party's request landed on a pair with nothing in the
+      # way. Both callers were told `{:ok, …}`, one request was silently lost,
+      # and the block the whole KTD exists for was consulted against a row that
+      # had already been answered.
+      %{first: first, second: second} = co_rostered(@now)
+      declined = request_fixture(first, second)
+      {:ok, _declined} = Peers.decline_request(second, declined.id)
+
+      barrier = hold_row("connection_requests", declined.id)
+
+      # Ordered rather than raced, and that is deliberate: Postgres serves the
+      # waiters on one tuple in arrival order, so starting the unblocked party
+      # first and waiting for it to park puts the blocked party *second* — which
+      # is the one ordering of the two that the old shape got wrong. Raced
+      # symmetrically this test would pass half the time against the bug.
+      [unblocked_result, blocked_result] =
+        ordered(barrier, [
+          fn -> requester(second, first) end,
+          fn -> requester(first, second) end
+        ])
+
+      assert {:ok, %ConnectionRequest{}} = unblocked_result
+
+      # The *reply*, not only the row count. A lost request reported as success
+      # is the failure mode this shape removes, and a caller told `{:ok, …}` for
+      # a request that is not the pair's current row has been told they have an
+      # approach outstanding that nobody can answer.
+      refute match?({:ok, _request}, blocked_result)
+
+      assert [%ConnectionRequest{requester_id: requester_id}] =
+               Repo.all(Records.current_request(first.person.id, second.person.id))
+
+      assert requester_id == second.person.id
+    end
+
+    test "is told apart from the sequential case, which answers :blocked (control)" do
+      # Run one after the other the blocked party never reaches a lock at all,
+      # so the assertion above would pass against an implementation whose only
+      # guard is the friendly read — which is the guard that does not hold when
+      # the row it read is superseded underneath it.
+      %{first: first, second: second} = co_rostered(@now)
+      declined = request_fixture(first, second)
+      {:ok, _declined} = Peers.decline_request(second, declined.id)
+
+      assert {:error, :permitted, :blocked, _changes} =
+               Peers.request_connection(first, second.person.id)
+
+      assert {:ok, %ConnectionRequest{}} = Peers.request_connection(second, first.person.id)
+    end
+  end
+
+  describe "a message sent while the other party is disconnecting" do
+    test "is refused, so nothing is stored and nothing is pushed to them" do
+      # R15 makes disconnection the origin document's only stated remedy for
+      # harm in a peer conversation. An unlocked read followed by an insert let
+      # one more message through it: the send read the conversation as open, the
+      # disconnect committed, and the insert — which waits only on the foreign
+      # key's `FOR KEY SHARE`, satisfied by a row whose id has not changed —
+      # then succeeded. The message was stored, announced, and pushed to the
+      # person who had just cut contact, into a history their own
+      # `list_messages/2` will never show them.
+      %{first: first, second: second} = co_rostered(@now)
+      connection = connection_fixture(first, second)
+
+      barrier = hold_row("peer_connections", connection.id)
+
+      [closed, sent] =
+        ordered(barrier, [
+          fn -> disconnector(second, connection) end,
+          fn -> sender(first, connection, "one more") end
+        ])
+
+      assert {:ok, %Connection{}} = closed
+      assert {:error, :disconnected} = sent
+      assert message_count(connection) == 0
+    end
+
+    test "is told apart from the sequential case, which never reaches a lock (control)" do
+      %{first: first, second: second} = co_rostered(@now)
+      connection = connection_fixture(first, second)
+
+      assert {:ok, _message} = Peers.send_message(first, connection.id, "before")
+      assert {:ok, %Connection{}} = Peers.disconnect(second, connection.id)
+      assert {:error, :disconnected} = Peers.send_message(first, connection.id, "after")
+      assert message_count(connection) == 1
+    end
+  end
+
   ## Racing
 
   # `build` is a function rather than a list for the reason
@@ -267,6 +379,41 @@ defmodule HospitalityComs.PeersConcurrencyTest do
 
   defp disconnector(person, connection) do
     detached(fn -> Peers.disconnect(person, connection.id) end)
+  end
+
+  defp sender(person, connection, body) do
+    detached(fn -> Peers.send_message(person, connection.id, body) end)
+  end
+
+  # Racers started one at a time, each waited for until Postgres reports it
+  # blocked before the next one starts. That is how a test names *which* of two
+  # callers Postgres serves first: waiters on one tuple are served in arrival
+  # order, so a racer already parked when the next one starts wins the lock.
+  #
+  # `race/3` builds its racers together on purpose, because there the claim is
+  # about two callers arriving at once and either order satisfies it. Where the
+  # claim is about **one** ordering — a decision superseded out from under it, a
+  # send arriving behind a disconnect — arriving at once would make the test
+  # pass half the time against the bug it names.
+  #
+  # The barrier is released in an `after` for `race/3`'s reason: never releasing
+  # it leaves its holder inside an open transaction for as long as the VM lives,
+  # and the purge that follows the test blocks on the rows it holds.
+  defp ordered(barrier, builds) when is_list(builds) do
+    tasks =
+      try do
+        Enum.map(builds, &parked/1)
+      after
+        release(barrier)
+      end
+
+    Enum.map(tasks, &Task.await(&1, @barrier_timeout))
+  end
+
+  defp parked(build) when is_function(build, 0) do
+    task = build.()
+    await_blocked(backend_pids(1))
+    task
   end
 
   defp detached(fun) do
@@ -399,6 +546,10 @@ defmodule HospitalityComs.PeersConcurrencyTest do
     first.person.id
     |> Records.connection_between(second.person.id)
     |> Repo.aggregate(:count)
+  end
+
+  defp message_count(connection) do
+    connection.id |> Records.messages_of() |> Repo.aggregate(:count)
   end
 
   defp live_connections(first, second) do

@@ -40,16 +40,18 @@
   {"lib/hospitality_coms/engagements.ex", :call_without_opaque},
 
   # The fourth instance of the same `Ecto.Multi` / `MapSet.t()` false positive,
-  # reported three times in this file — once for each multi-step write the peer
+  # reported four times in this file — once for each multi-step write the peer
   # graph has. Confirmed to be the same one rather than assumed: every warning
   # names `%Ecto.Multi{:names => %MapSet{...}} (with opaque subterms)` in the
   # argument position of a `Multi.run/3` or `Multi.insert/4` call, which is the
   # struct's own field and not anything this module constructs or reads.
   #
-  # None of the three calls can go away. Sending a request supersedes the pair's
-  # previous row and writes a new one; accepting answers the request and opens
-  # the connection; disconnecting closes the connection and writes KTD19's block
-  # on the request it came from. Each is two writes that must not be able to
+  # None of the four calls can go away. Sending a request supersedes the pair's
+  # previous row and decides from what that statement returned before writing a
+  # new one; accepting answers the request and opens the connection;
+  # disconnecting closes the connection and writes KTD19's block on the request
+  # it came from; sending a message takes the conversation under `FOR SHARE` and
+  # then inserts. Each is a decision and a write that must not be able to
   # half-happen, which is exactly the shape AGENTS.md requires `Ecto.Multi` for.
   {"lib/hospitality_coms/peers.ex", :call_without_opaque}
 ]

@@ -146,16 +146,22 @@ defmodule HospitalityComs.Peers.ConnectionRequest do
   end
 
   @doc """
-  Whether this request is still outstanding.
+  Whether this request has an outcome — accepted or declined.
 
-  Answered or superseded means no. This is the shape `accept_request/2` and
-  `decline_request/2` both need before they write, and it is deliberately silent
-  about visibility — an addressee may always decline, whether or not the pair
-  can still see each other.
+  Deliberately silent about `superseded_at`, and that is not an oversight.
+  `HospitalityComs.Peers.request_connection/2` asks this of a row it superseded
+  in the *same statement* it read the row with, so the struct in its hand
+  already carries a `superseded_at` this write has just put there; a predicate
+  that looked at the column would answer about the write rather than about the
+  outcome. Whether the row was the pair's current one is decided by the query
+  that returned it, which is where it belongs.
+
+  Silent about visibility too — an addressee may always decline, whether or not
+  the pair can still see each other.
   """
-  @spec outstanding?(t()) :: boolean()
-  def outstanding?(%__MODULE__{accepted_at: nil, declined_at: nil, superseded_at: nil}), do: true
-  def outstanding?(%__MODULE__{}), do: false
+  @spec answered?(t()) :: boolean()
+  def answered?(%__MODULE__{accepted_at: nil, declined_at: nil}), do: false
+  def answered?(%__MODULE__{}), do: true
 
   @doc """
   What state this request is in, given whether the pair is visible right now.
