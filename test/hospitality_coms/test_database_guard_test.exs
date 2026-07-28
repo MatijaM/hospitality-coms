@@ -103,10 +103,19 @@ defmodule HospitalityComs.TestDatabaseGuardTest do
 
       # `purge/0` is one transaction: it deletes engagements by venue, misses
       # this one because the venue no longer carries the prefix, and then
-      # raises `foreign_key_violation` deleting the person the engagement
+      # hits `foreign_key_violation` deleting the person the engagement
       # names — rolling back everything it had removed. This is the case that
       # does not heal across runs, because every run fails it identically.
-      assert_raise Postgrex.Error, &EngagementsFixtures.purge/0
+      #
+      # It surfaces as a `RuntimeError` rather than the underlying
+      # `Postgrex.Error` because `purge/0` rescues and re-raises, naming the
+      # residue and the remedy. That wrapping is the thing worth pinning: the
+      # raw error says a constraint was violated, which reads as a product bug
+      # in whatever file happened to run first.
+      message = assert_raise RuntimeError, &EngagementsFixtures.purge/0
+      assert message.message =~ "foreign_key_violation"
+      assert message.message =~ "non-sandboxed run left behind"
+      assert message.message =~ "mix ecto.drop"
       assert occupied() != []
 
       report = capture_io(:stderr, &TestDatabaseGuard.sweep/0)
