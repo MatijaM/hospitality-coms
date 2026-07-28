@@ -19,6 +19,27 @@
  *     a retry loop rather than a count of calls.
  *   * `Channel.push` answers on `"ok"`, `"error"` or `"timeout"` and on
  *     nothing else, so a reply is delivered by naming one of the three.
+ *
+ * ## What it does **not** model, and why that is safe today
+ *
+ * Compared line by line against `channel.js` and `push.js`, two behaviours are
+ * absent. Both are inert for the tests here, and both stop being inert the
+ * moment somebody writes a test that needs them — so they are written down
+ * rather than left to be discovered by a test that passes for the wrong reason.
+ *
+ *   * **`pushBuffer` and `canPush()`.** The real `Channel.push` buffers when
+ *     the channel is not joined and flushes on join; this fake sends
+ *     immediately whatever the state. Nothing here pushes before "joined" —
+ *     `Composer` requires `connection.status === "joined"` — so no test can
+ *     currently tell the difference. A test for a send issued while the link is
+ *     down would need it.
+ *   * **`Socket.remove(channel)` on close.** The real socket drops a left
+ *     channel from `Socket.channels`, so its rejoin timer cannot be fired by a
+ *     reconnect; here a left `FakeChannel` stays in `socket.channels` and
+ *     `fireRejoinTimers` visits it, relying on `rejoin()`'s own `left` guard
+ *     for the same answer. That guard is the property under test, so this is a
+ *     *weaker* fake rather than a more forgiving one — but a test that counted
+ *     entries in `socket.channels` expecting the real removal would be wrong.
  */
 
 import type {

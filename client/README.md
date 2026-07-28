@@ -296,6 +296,26 @@ whether this session may read it, may write to it, or still has access at all �
 comes from the server on every join and every send, which is where KTD8 puts it.
 A room this session may not read is refused like any other.
 
+**It is emptied when the session ends**, on both paths that drop the token — the
+explicit log out and the 401. Hospitality is a shared-terminal industry, and
+although the list is bookmarks rather than content and a re-join is refused
+server-side, it still names which venues and shifts that person worked.
+`SessionProvider` takes an `onSessionEnded` callback for it rather than
+importing the room store, so U8's peer surface adds to the same line in
+`main.tsx` without touching `src/session/`.
+
+Keying the list per person instead — `hospitality-coms.rooms.<personId>` — was
+considered and **rejected**: it would let two people share a terminal without
+overwriting each other, but it does so by _retaining_ the previous worker's list
+on the device, which is the exact thing clearing it is for.
+
+Ids are normalised — trimmed and lowercased — at both entry points, the paste
+box and the stored list, through one function. `Ecto.UUID.cast/1` takes either
+case and Postgres stores one value, but **`Phoenix.PubSub` broadcasts on the
+literal topic string**, so `venue_room:ABC…` and `venue_room:abc…` would be one
+database room and two fan-outs: both sessions writing to the same table and
+seeing none of each other's messages.
+
 ### A closed room is learned, not fetched
 
 A shift room past its `closes_at` still joins and still reads — U6 keeps
@@ -308,8 +328,19 @@ sentence.
 
 Remembering it is a guess about the future and it can be wrong in both
 directions: an employer can move a `closes_at`, and a manager can re-roster
-somebody. So the room offers a **"Check again"** that clears what was learned,
-rather than trapping the worker in a state this client inferred.
+somebody. So the room offers a **"Check again"** that clears what was learned —
+and the sentence that closed the composer, which otherwise sat above a
+re-enabled input still claiming the room was refusing.
+
+`unauthorized` on a send is deliberately **not** one of these. It says nothing
+about the room and everything about whether this session is still in it, which
+is a question `join/3` re-derives — so it is answered at the connection level
+instead, closing the composer without persisting anything, and **re-opening the
+room** asks the server again. That correction only works because re-opening
+forces a remount: `RoomView`'s key carries an attempt counter, and without it
+opening the room already open set the same state, React kept the mount, and
+nothing re-joined. Every "open it again to check" this surface offers was a dead
+end until both halves were fixed.
 
 ### The revocation event leaves the topic
 
@@ -342,6 +373,27 @@ one in four.
   where KTD8 puts the enforcement anyway.
 - **Attribution is the engagement id**, shortened, or "You" — never a person and
   never a name (KTD15b). There is no name in the employer zone to render.
+- **No transport status.** `connection` tracks the session's socket, not the
+  link, so a websocket that drops under a live session leaves the composer
+  enabled. `phoenix` reconnects and rejoins on its own and buffers the push, so
+  the usual outcome is that the message goes when the link returns; if it does
+  not, the push times out after ten seconds and says so. Surfacing it properly
+  means `SocketLike` growing `onOpen`/`onClose`/`onError`, which
+  `session-socket.ts` deliberately does not expose. The cost is ten seconds of a
+  composer that looks live, and it is recorded in `use-room.ts` rather than
+  built on a guess about how a reconnect should read.
+
+### The channel error vocabulary belongs to the surface, not the transport
+
+`channel-failure.ts` owns the envelope and **names no codes**. Copy is an
+exhaustive `switch`, so one shared list would make every surface's switch break
+when any surface gained a code — and U8 puts nine events on one multiplexed
+`"peer"` channel. `decodeChannelRefusal` takes the caller's vocabulary as an
+argument; `features/rooms/refusal-message.ts` owns `ROOM_ERROR_CODES` and traces
+each one to the clause that emits it. A code outside the caller's set is
+`unrecognised` with the wire value kept, which is the right answer for a peer
+code reaching a room. `src/api/errors.ts` keeps one shared list because exactly
+one switch consumes it.
 
 ## Deliberately absent, and why
 

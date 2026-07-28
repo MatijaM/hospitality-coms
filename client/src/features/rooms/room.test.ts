@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { isRoomId, roomKey, roomKindLabel, roomTopic, sameRoom } from "./room";
+import {
+  isRoomId,
+  normaliseRoomId,
+  roomKey,
+  roomKindLabel,
+  roomTopic,
+  sameRoom,
+} from "./room";
 
 const ID = "11111111-1111-4111-8111-111111111111";
 
@@ -41,6 +48,30 @@ describe("what may be a topic suffix", () => {
     // length is the load-bearing half rather than a pre-filter: `cast/1` on its
     // own also accepts sixteen raw bytes and encodes them.
     expect(isRoomId("sixteen bytes!!!")).toBe(false);
+  });
+
+  it("lowercases, because the topic string is what PubSub fans out on", () => {
+    // `Ecto.UUID.cast/1` takes either case and Postgres stores one value, so
+    // both cases reach the same rows — but `broadcast!/3` fans out on the
+    // literal topic. Two sessions naming one venue in different cases would
+    // write to the same table and see none of each other's messages, which
+    // looks broken from inside the room and correct from the database.
+    const mixed = "A1A1A1A1-b2b2-4C3C-8d4d-E5E5E5E5E5E5";
+
+    expect(normaliseRoomId(mixed)).toBe("a1a1a1a1-b2b2-4c3c-8d4d-e5e5e5e5e5e5");
+    expect(roomTopic({ kind: "venue", id: normaliseRoomId(mixed) ?? "" })).toBe(
+      "venue_room:a1a1a1a1-b2b2-4c3c-8d4d-e5e5e5e5e5e5",
+    );
+  });
+
+  it("trims, so a paste with a stray space is still an id", () => {
+    expect(normaliseRoomId(`  ${ID}\n`)).toBe(ID);
+  });
+
+  it("answers null for anything that is not an id, rather than a topic suffix", () => {
+    expect(normaliseRoomId("not-an-id")).toBeNull();
+    expect(normaliseRoomId("")).toBeNull();
+    expect(normaliseRoomId("sixteen bytes!!!")).toBeNull();
   });
 
   it("refuses everything else, including the near misses", () => {

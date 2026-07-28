@@ -131,3 +131,25 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function isRoomId(value: string): boolean {
   return value.length === 36 && UUID.test(value);
 }
+
+/**
+ * An id as this client will use it, or `null` if it is not one.
+ *
+ * **The lowercasing is load-bearing, and not for tidiness.** `Ecto.UUID.cast/1`
+ * accepts either case and Postgres stores one value, so `venue_room:ABC…` and
+ * `venue_room:abc…` reach the same rows — but the topic goes to
+ * `Phoenix.PubSub` as a **literal string**, and `broadcast!/3` fans out on
+ * exactly that. Two sessions naming one venue in different cases would sit in
+ * the same database room, write to the same table, and see none of each
+ * other's messages: the room would look broken to both of them and correct to
+ * anybody reading the rows.
+ *
+ * Every id this client holds goes through here — the paste box and the stored
+ * list both — so the two paths cannot disagree about the rule the way they
+ * used to.
+ */
+export function normaliseRoomId(value: string): string | null {
+  const trimmed = value.trim().toLowerCase();
+
+  return isRoomId(trimmed) ? trimmed : null;
+}
