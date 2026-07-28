@@ -42,11 +42,23 @@ defmodule HospitalityComs.TestDatabaseGuard do
   ## Why it cleans rather than refuses
 
   The correct contents of this database before the first test are *empty*:
-  `priv/repo/seeds.exs` writes nothing, `mix test` creates and migrates it, and
-  no fixture in the tree is meant to outlive its own test. So a row here is
-  residue by construction and there is nothing to weigh up — refusing to run
-  and printing instructions would make every developer paste the same `DELETE`
-  the guard could have issued.
+  `mix test` creates and migrates it and runs no seeds, and no fixture in the
+  tree is meant to outlive its own test. So a row here is residue by
+  construction and there is nothing to weigh up — refusing to run and printing
+  instructions would make every developer paste the same `DELETE` the guard
+  could have issued.
+
+  **U11 gave `priv/repo/seeds.exs` something to write, and the premise above is
+  now enforced rather than observed.** `mix test` is aliased to
+  `ecto.create --quiet`, `ecto.migrate --quiet`, `test` — the seeds are reached
+  only by `ecto.setup` and `ecto.reset`, which are development commands — and
+  that script raises under `MIX_ENV=test` rather than relying on nobody typing
+  it. `HospitalityComs.DemoTest` asserts the refusal.
+
+  `HospitalityComs.DemoTest` does seed, by calling `HospitalityComs.Demo.seed/0`
+  itself, and its rows carry the two `LIKE` patterns
+  `EngagementsFixtures.purge/0` reads — so an aborted run of it lands in the
+  *fixture residue* category below rather than in the loud one.
 
   What is worth weighing up is *silence*. Clearing rows without saying so would
   hide a genuine leak — a fixture that stopped purging, a new table nobody

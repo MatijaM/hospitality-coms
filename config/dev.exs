@@ -24,6 +24,31 @@ config :hospitality_coms, HospitalityComs.EmployerRepo,
 # build.
 config :hospitality_coms, clock: HospitalityComs.Clock.Offset
 
+# No queue runs and no plugin ticks here either, and in `:dev` the reason is
+# sharper than the one `config/test.exs` gives.
+#
+# **Oban's cron stages at real wall-clock time; its workers read the injected
+# clock.** `Oban.Plugins.Cron` inserts `RetentionSweeper` hourly at the real
+# instant and it stages immediately, and `RetentionSweeper.perform/1` is
+# `Lifecycle.sweep(Clock.now())` — the *offset* clock. So with queues running,
+# `POST /api/demo/clock {"advance": {"day": 31}}` and nothing else deletes a
+# month of retained messages within the hour, unattended, and
+# `EngagementSweeper` stamps archive deadlines within five minutes. The
+# wall-clock argument in `HospitalityComs.Demo`'s moduledoc covers the
+# *claim-scheduled* `ExpireEngagement` job, which genuinely waits; it does not
+# cover cron, which does not.
+#
+# `Clock.Offset` is `:persistent_term` and node-global, so it survives a code
+# reload and a second browser session runs at whatever instant the first left.
+# That makes "advancing the clock is the safe control and `run_due_work/0` is
+# the dangerous one" false in the one environment the controls exist for.
+#
+# `HospitalityComs.Demo.run_due_work/0` is therefore the only thing that runs a
+# worker in `:dev`, which is also what makes the documented model true where the
+# controls actually run. `HospitalityComs.DemoTest` reads this file to assert
+# it.
+config :hospitality_coms, Oban, testing: :manual
+
 # For development, we disable any cache and enable
 # debugging and code reloading.
 #
@@ -65,6 +90,12 @@ config :hospitality_coms, HospitalityComsWeb.Endpoint,
 # Enable the dev-only mailbox preview route, which is how a magic link is read
 # during development now that no page renders one.
 config :hospitality_coms, dev_routes: true
+
+# U11's demo controls. `HospitalityComsWeb.DemoController` compiles from
+# `dev_support/`, so this key can only ever be true where the module exists;
+# setting it in a production config would gate a scope on a module that is not
+# there. See `HospitalityComs.Demo`.
+config :hospitality_coms, demo_routes: true
 
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"

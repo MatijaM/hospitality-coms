@@ -110,6 +110,27 @@ jobs:
           rm -rf _build/test/lib/hospitality_coms
           mix compile --warnings-as-errors
 
+      # The production build, which is a different question from the one above.
+      # `mix.exs` excludes `dev_support/` from `elixirc_paths(:prod)`, and that
+      # exclusion is what makes `HospitalityComs.Clock.Offset`,
+      # `HospitalityComs.Demo` and `HospitalityComsWeb.DemoController`
+      # structurally absent from production rather than present and guarded
+      # (KTD5b) — a control that advances the clock thirty days is a control
+      # that triggers irreversible retention deletion.
+      #
+      # `HospitalityComs.DemoTest` asserts the property that keeps this green —
+      # no module compiled from `lib/` calls one compiled from `dev_support/` —
+      # out of the `imports` chunk. That check cannot see a compile-time struct
+      # expansion or an alias used in a typespec, and this step can. Neither
+      # substitutes for the other: this proves *this* branch compiles, and the
+      # test says which line to look at when it does not.
+      - name: Compile the production build
+        env:
+          MIX_ENV: prod
+        run: |
+          rm -rf _build/prod/lib/hospitality_coms
+          mix compile --warnings-as-errors
+
       # `mix test` is aliased to `ecto.create --quiet`, `ecto.migrate --quiet`,
       # `test`.
       #

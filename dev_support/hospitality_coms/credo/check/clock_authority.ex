@@ -106,7 +106,11 @@ defmodule HospitalityComs.Credo.Check.ClockAuthority do
   # Track the enclosing module so a call can be attributed to the module that
   # makes it. The stack is pushed for every `defmodule`, named or not, so that
   # `leave/2` can pop unconditionally.
-  defp enter({:defmodule, _meta, [{:__aliases__, _, parts} | _rest]} = ast, {issues, stack}, _config) do
+  defp enter(
+         {:defmodule, _meta, [{:__aliases__, _, parts} | _rest]} = ast,
+         {issues, stack},
+         _config
+       ) do
     {ast, {issues, [qualify(Enum.join(parts, "."), stack) | stack]}}
   end
 
@@ -114,28 +118,43 @@ defmodule HospitalityComs.Credo.Check.ClockAuthority do
     {ast, {issues, [nil | stack]}}
   end
 
-  defp enter({{:., meta, [{:__aliases__, _, [:DateTime]}, :utc_now]}, _call, _args} = ast, {issues, stack}, config) do
+  defp enter(
+         {{:., meta, [{:__aliases__, _, [:DateTime]}, :utc_now]}, _call, _args} = ast,
+         {issues, stack},
+         config
+       ) do
     {ast, {utc_now_issues(current_module(stack), meta, config) ++ issues, stack}}
   end
 
-  defp enter({{:., meta, [{:__aliases__, _, parts}, :now]}, _call, []} = ast, {issues, stack}, config) do
+  defp enter(
+         {{:., meta, [{:__aliases__, _, parts}, :now]}, _call, []} = ast,
+         {issues, stack},
+         config
+       ) do
     {ast, {clock_now_issues(parts, current_module(stack), meta, config) ++ issues, stack}}
   end
 
   # `Ecto.Query.ago(14, "day")`, written out in full.
-  defp enter({{:., meta, [{:__aliases__, _, _parts}, name]}, _call, [_amount, _unit]} = ast, {issues, stack}, config)
+  defp enter(
+         {{:., meta, [{:__aliases__, _, _parts}, name]}, _call, [_amount, _unit]} = ast,
+         {issues, stack},
+         config
+       )
        when name in @query_macros do
     {ast, {[issue({:query_macro, name}, meta, config) | issues], stack}}
   end
 
   # `ago(14, "day")`, imported, which is how it is always actually written.
-  defp enter({name, meta, [_amount, _unit]} = ast, {issues, stack}, config) when name in @query_macros do
+  defp enter({name, meta, [_amount, _unit]} = ast, {issues, stack}, config)
+       when name in @query_macros do
     {ast, {[issue({:query_macro, name}, meta, config) | issues], stack}}
   end
 
   defp enter(ast, acc, _config), do: {ast, acc}
 
-  defp leave({:defmodule, _meta, _args} = ast, {issues, [_module | stack]}), do: {ast, {issues, stack}}
+  defp leave({:defmodule, _meta, _args} = ast, {issues, [_module | stack]}),
+    do: {ast, {issues, stack}}
+
   defp leave(ast, acc), do: {ast, acc}
 
   defp utc_now_issues(module, meta, config) do
@@ -189,7 +208,8 @@ defmodule HospitalityComs.Credo.Check.ClockAuthority do
 
   # An alias names the clock when its segments are a suffix of the clock's own,
   # so both `Clock.now()` and `HospitalityComs.Clock.now()` are recognised.
-  defp clock_alias?(parts, %{clock_parts: clock_parts}) when length(parts) <= length(clock_parts) do
+  defp clock_alias?(parts, %{clock_parts: clock_parts})
+       when length(parts) <= length(clock_parts) do
     Enum.take(clock_parts, -length(parts)) == parts
   end
 

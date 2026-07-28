@@ -186,11 +186,21 @@
           # whatever happens to call the clock, and the check's value is that
           # the list stays short enough to argue about. Test files are excluded:
           # their whole job is to call these functions in isolation.
+          #
+          # `HospitalityComs.Demo` is U11's, and it is a unit-of-work boundary
+          # in the same sense the workers are: one seed run, one clock reading,
+          # one `run_due_work/0` pass, one `end_all_engagements/1` — each is one
+          # unit and each reads the instant once at its top. It is the *only*
+          # new entry the demo needs:
+          # `HospitalityComsWeb.DemoController` deliberately reads no clock, so
+          # that an HTTP request and the control it invokes cannot disagree
+          # about when they are.
           {HospitalityComs.Credo.Check.ClockAuthority,
            files: %{included: ["lib/", "dev_support/"]},
            boundary_modules: [
              HospitalityComsWeb.PersonAuth,
              HospitalityComsWeb.ChannelAuth,
+             HospitalityComs.Demo,
              HospitalityComs.Workers.EngagementSweeper,
              HospitalityComs.Workers.ExpireEngagement,
              HospitalityComs.Workers.RetentionSweeper

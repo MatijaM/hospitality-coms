@@ -38,6 +38,7 @@ defmodule HospitalityComs.EngagementsFixtures do
   alias HospitalityComs.Accounts.EmployerScope
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonScope
+  alias HospitalityComs.Demo
   alias HospitalityComs.EmployerRepo
   alias HospitalityComs.Engagements
   alias HospitalityComs.Engagements.Engagement
@@ -151,19 +152,8 @@ defmodule HospitalityComs.EngagementsFixtures do
   # failure one unit later and is worth catching where it is cheap.
   @spec confirm_purged() :: :ok
   defp confirm_purged do
-    venues =
-      Repo.one(
-        from venue in Venue,
-          where: like(venue.name, ^"#{@venue_prefix}%"),
-          select: count(venue.id)
-      )
-
-    people =
-      Repo.one(
-        from person in Person,
-          where: like(person.email, ^"#{@person_prefix}%"),
-          select: count(person.id)
-      )
+    venues = Repo.one(from venue in prefixed_venues(), select: count(venue.id))
+    people = Repo.one(from person in prefixed_people(), select: count(person.id))
 
     settled(venues + people)
   end
@@ -203,10 +193,7 @@ defmodule HospitalityComs.EngagementsFixtures do
   defp purge_committed do
     Repo.query!("SET LOCAL statement_timeout = '#{@purge_timeout}'")
 
-    venue_ids =
-      Repo.all(
-        from venue in Venue, where: like(venue.name, ^"#{@venue_prefix}%"), select: venue.id
-      )
+    venue_ids = Repo.all(from venue in prefixed_venues(), select: venue.id)
 
     Repo.query!("DELETE FROM oban_jobs WHERE args->>'venue_id' = ANY($1::text[])", [venue_ids])
 
@@ -248,14 +235,33 @@ defmodule HospitalityComs.EngagementsFixtures do
     Repo.delete_all(from grant in EmployerGrant, where: grant.venue_id in ^venue_ids)
     Repo.delete_all(from venue in Venue, where: venue.id in ^venue_ids)
 
-    Repo.query!(
-      "DELETE FROM people_tokens WHERE person_id IN (SELECT id FROM people WHERE email LIKE $1)",
-      ["#{@person_prefix}%"]
+    Repo.delete_all(
+      from token in "people_tokens",
+        where: token.person_id in subquery(from person in prefixed_people(), select: person.id)
     )
 
     Repo.delete_all(prefixed_people())
 
     :purged
+  end
+
+  # Two patterns rather than one, and the second is `HospitalityComs.Demo`'s.
+  #
+  # `HospitalityComs.DemoTest` is not sandboxed and commits for real, so a run
+  # that dies mid-test leaves the seed manifest behind. Without this the
+  # `TRUNCATE` fallback in `HospitalityComs.TestDatabaseGuard` still clears it,
+  # but the guard reports it in the *loud* third category — "written by nothing
+  # in this tree" — which is a false alarm about precisely the residue that
+  # guard exists to make legible.
+  #
+  # The patterns are read from `Demo` rather than restated, so the names and the
+  # cleanup cannot drift apart.
+  @spec prefixed_venues() :: Ecto.Query.t()
+  defp prefixed_venues do
+    demo = Demo.venue_pattern()
+
+    from venue in Venue,
+      where: like(venue.name, ^"#{@venue_prefix}%") or like(venue.name, ^demo)
   end
 
   # **An erased person has no email**, so a purge keyed on the address alone
@@ -270,8 +276,12 @@ defmodule HospitalityComs.EngagementsFixtures do
   # opposition.
   @spec prefixed_people() :: Ecto.Query.t()
   defp prefixed_people do
+    demo = Demo.person_pattern()
+
     from person in Person,
-      where: like(person.email, ^"#{@person_prefix}%") or not is_nil(person.erased_at)
+      where:
+        like(person.email, ^"#{@person_prefix}%") or like(person.email, ^demo) or
+          not is_nil(person.erased_at)
   end
 
   @spec prefixed_person_ids() :: [Ecto.UUID.t()]
