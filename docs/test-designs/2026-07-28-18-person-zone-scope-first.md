@@ -312,5 +312,110 @@ Rows 1–5 are the sweep and each runs once per covered function, so one row is 
 
 ## Revisions made during implementation
 
-_Appended below in a later commit, per `AGENTS.md`. The sections above are not edited to agree
-with what shipped._
+Recorded rather than silently applied, because the gate exists to be departed from explicitly.
+The sections above are not edited to agree with what shipped.
+
+1. **The literal exception list did not fail, and a mutation is what showed it.** The brief claimed
+   writing `MapSet.new([{:session_token_digest, 1}])` inline meant "growing the exception list is an
+   edit to this assertion and shows up in the diff". True, and not enough: **measured, deleting
+   `get_person_by_email/2` from the table and adding it to the literal killed zero tests.** Two
+   lines in one assertion, next to a comment saying not to, and a repo-touching function is
+   uncovered with the suite green. That is the shape
+   `docs/solutions/test-failures/tests-that-certify-nothing.md` catalogues — a control defeated by
+   editing the control.
+
+   Closed with a check the brief did not ask for: the set of `Accounts` exports whose **own body
+   names a repo**, read out of the source AST, must be a subset of the table's keys. It is
+   one-directional on purpose — `sudo_mode?/2` names no repo either and still takes a scope, so
+   "names no repo" *permits* an exception rather than requiring one. Its known edge is
+   `lifecycle_test.exs`'s: a body that delegates to a private helper names no repo of its own. Two
+   test bodies rather than one, because the subset check passes trivially on an empty set: the
+   control asserts the walk found at least twelve functions and names four of them, and both of the
+   walk's own failure modes (an overwritten accumulator, a walk that stops matching `def`) kill it.
+
+2. **Rows 1–5 became eight test bodies, not five.** The sweep splits three ways over the table
+   (employer scope, person scope, impostor struct) plus coverage, the repo-touching subset and its
+   control, and the two anonymous halves plus the label check. Twenty-one bodies in
+   `person_zone_test.exs` against eleven before. Rows do not map one-to-one onto bodies, as U8, U9
+   and U10 all recorded.
+
+3. **The arity assertion needed a derivation the brief assumed away.** `sudo_mode?/1` and
+   `sudo_mode?/2` are two exports of one definition, and a `sudo_mode?/1` call is refused by
+   `sudo_mode?/2`'s head — so `error.arity` is 2 where the table's key says 1. Asserting the key's
+   arity failed against correct code. `refusing_arity/1` takes the maximum exported arity for the
+   name, which is where a definition's head is, and says so.
+
+4. **The conversion covered sixteen exports rather than the issue's six**, as the brief said it
+   would, and one signature narrowed beyond a scope argument.
+   `deliver_person_update_email_instructions/4` took a `Person` doctored to carry the *new* address
+   plus the *old* address beside it; it is `/3` now, taking the new address and deriving the rest
+   from the scope. Flagged under regression risks in advance and measured: mutation 26, signing the
+   token with the new address instead of the scope's person's, kills three tests in
+   `accounts_test.exs`. There is no production caller.
+
+5. **KTD8's session half is `sockets_test.exs`'s, not `revocation_test.exs`'s.** Criterion 8 named
+   the wrong file. Measured: `join_scope/1` mutated to believe the socket's `person_id` instead of
+   re-deriving from the digest leaves `revocation_test.exs` **fully green** — that file proves the
+   *authorization* re-derivation (`Rooms.fetch_venue_room_membership/2` and friends), which this
+   branch does not touch — and kills three tests in `sockets_test.exs`, which is where the deleted
+   token and the aged-out horizon are asserted. Both files pass unchanged; the claim in the brief
+   was pointed at the wrong one.
+
+6. **Baseline arithmetic.** 1047 tests on `main`; 1057 here (ten new bodies in
+   `person_zone_test.exs`), with the same three `PostgresRolesTest` failures issue #20 owns and
+   nothing else red.
+
+## Mutation record
+
+Thirty-two mutations, each applied to a clean tree, measured against the narrowest file that could
+answer, then restored. Every one of the ten new test bodies is killed by at least one, and so is
+`boundary_test.exs`'s changed counterpart.
+
+| # | Mutation | Tests killed |
+|---|----------|--------------|
+| 1 | `get_person_by_email/2`'s head stops naming a scope | 2 |
+| 2 | `get_person!/2`'s head stops naming a scope | 2 |
+| 3 | `register_person/2`'s head is a bare map with `:now` — which an `EmployerScope` has | 2 |
+| 4 | `request_login_instructions/3`'s head drops the struct; the private one keeps it | 2 |
+| 5 | `get_person_by_session_token/2`'s head is a bare map with `:now` | 2 |
+| 6 | `get_person_by_session_token_digest/2`'s head is a bare map with `:now` | 2 |
+| 7 | `get_person_by_magic_link_token/2`'s head is a bare map with `:now` | 2 |
+| 8 | `login_person_by_magic_link/2`'s head is a bare map with `:now` | 2 |
+| 9 | `delete_person_session_token/2`'s head stops naming a scope | 2 |
+| 10 | `sudo_mode?/2`'s terminal clause stops naming a scope | 2 |
+| 11 | `generate_person_session_token/1`'s head is a bare map with `:person` and `:now` | 1 |
+| 12 | `update_person_email/2`'s head is a bare map | 1 |
+| 13 | `deliver_login_instructions/2`'s head is a bare map | 1 |
+| 14 | `deliver_person_update_email_instructions/3`'s head is a bare map | 1 |
+| 15 | `generate_person_session_token/1` stops requiring a person on the scope | 1 |
+| 16 | `update_person_email/2` stops requiring a person on the scope | 1 |
+| 17 | the table loses a row (`get_person!/2`) | 2 |
+| 18 | the exception literal grows to hide a repo-touching function | 1 (**0** before revision 1) |
+| 19 | `session_token_digest/1` stops being the SHA-256 of its argument | 1 |
+| 20 | a Family A function is labelled `:anonymous` in the table | 1 |
+| 21 | a third label appears in the table | 1 |
+| 22 | `PersonAuth` stops authenticating and leaves every request anonymous | 3 |
+| 23 | `PersonAuth` loses the request's instant when the lookup succeeds | 2 |
+| 24 | `ChannelAuth.join_scope/1` believes the socket instead of re-deriving | 3 (`sockets_test`; **0** in `revocation_test` — see revision 5) |
+| 25 | `SessionController` mints the session token at a fixed instant | 2 |
+| 26 | `deliver_person_update_email_instructions/3` signs the token with the new address | 3 |
+| 27 | the repo-touching walk's accumulator is overwritten by the next alias | 1 |
+| 28 | the repo-touching walk stops matching `def` | 2 |
+| 29 | **mutation 4 with the `module`/`function`/`arity` assertions removed** | 1 — and the main sweep **survives** |
+| 30 | `get_person_by_email/2` refuses an anonymous scope | 1 |
+| 31 | the same, against `boundary_test.exs`'s forged-scope counterpart | 1 |
+| 32 | `get_person_by_email/2` refuses a scope that carries a person | 1 |
+
+**Mutation 29 is the one worth reading twice.** It is mutation 4's code change — dropping
+`request_login_instructions/3`'s struct from the head — with the three assertions that name the
+refusing function taken out of the test. Under it, the employer scope falls through the public head
+into `login_request_multi/2`, which still heads on `%PersonScope{}`, and raises
+`FunctionClauseError` **one frame deeper**. `assert_raise FunctionClauseError` passes. The sweep
+goes green on a function that no longer refuses anything. Those three assertions are what make the
+difference between mutation 4 killing two tests and killing none of the one that matters.
+
+Two things are deliberately **not** asserted. Nothing pins that `Accounts` reads no clock — that is
+`HospitalityComs.Credo.Check.ClockAuthority`'s job and a test restating it would be a second
+spelling of the same rule. And no test asserts that the *private* functions take scopes; they
+thread whatever their public caller was handed, and a rule about private arity would be a rule
+about how a body is written rather than about what the module's door refuses.

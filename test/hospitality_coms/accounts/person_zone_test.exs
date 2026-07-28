@@ -246,6 +246,39 @@ defmodule HospitalityComs.Accounts.PersonZoneTest do
       assert Accounts.session_token_digest(token) == PersonToken.hash_token(token)
     end
 
+    test "and no function that reaches the repo can be excepted from it", context do
+      covered = MapSet.new(calls(context), fn {key, _args, _anonymous} -> key end)
+
+      # The literal above pins the exception list in a diff; it does not *fail*
+      # when somebody grows it, so on its own it lets a repo-touching function
+      # be hidden by two lines in one assertion. Measured: deleting
+      # `get_person_by_email/2` from the table and adding it to the literal
+      # killed nothing. This is the direction that fails — the exception list
+      # can only ever hold functions that reach no repo, and which those are is
+      # read out of the source rather than declared.
+      #
+      # It is one-directional on purpose. `sudo_mode?/2` reaches no repo either
+      # and still takes a scope, so "mentions no Repo" permits an exception
+      # rather than requiring one.
+      #
+      # Its known edge is the one `lifecycle_test.exs`'s source sweep has: a
+      # body that delegates to a private helper mentions no repo of its own.
+      assert MapSet.difference(repo_touching_functions(), covered) == MapSet.new()
+    end
+
+    test "…and there are enough of those for that to mean something", _context do
+      # Control. The check above passes trivially on an empty set — which is
+      # what it would answer if the file stopped parsing, if `Repo` were
+      # aliased under another name, or if the walk stopped seeing `def`.
+      touching = repo_touching_functions()
+
+      assert MapSet.size(touching) >= 12
+      assert {:get_person_by_email, 2} in touching
+      assert {:login_person_by_magic_link, 2} in touching
+      refute {:session_token_digest, 1} in touching
+      refute {:sudo_mode?, 2} in touching
+    end
+
     test "answers an anonymous person scope wherever the subject is handed in", context do
       anonymous = PersonScope.for_person(nil, @now)
 
@@ -315,6 +348,49 @@ defmodule HospitalityComs.Accounts.PersonZoneTest do
       {{:deliver_login_instructions, 2}, [url], :named},
       {{:deliver_person_update_email_instructions, 3}, [unique_person_email(), url], :named}
     ]
+  end
+
+  @accounts_source "lib/hospitality_coms/accounts.ex"
+
+  # Every public function whose own body names a repo, read out of the source
+  # AST rather than out of a list. `lifecycle_test.exs` parses source for the
+  # same reason: the compiled `imports` chunk is per module, so it can say that
+  # `Accounts` reaches `Repo` and never which function did.
+  defp repo_touching_functions do
+    @accounts_source
+    |> File.read!()
+    |> Code.string_to_quoted!()
+    |> Macro.prewalk([], fn
+      {:def, _meta, [head, body]} = node, acc ->
+        {node, [{signature(head), names_repo?(body)} | acc]}
+
+      node, acc ->
+        {node, acc}
+    end)
+    |> elem(1)
+    |> Enum.filter(fn {_signature, touches} -> touches end)
+    |> MapSet.new(fn {signature, _touches} -> signature end)
+  end
+
+  defp signature({:when, _meta, [head | _guards]}), do: signature(head)
+
+  defp signature({name, _meta, args}) when is_atom(name) and is_list(args),
+    do: {name, length(args)}
+
+  defp signature({name, _meta, nil}) when is_atom(name), do: {name, 0}
+
+  # `Repo.get_by(…)`, and `insert_login_token(Repo, …)` where it is passed as a
+  # value — both are the function reaching the repo.
+  defp names_repo?(ast) do
+    ast
+    |> Macro.prewalk(false, fn
+      {:__aliases__, _meta, parts} = node, found when is_list(parts) ->
+        {node, found or List.last(parts) == :Repo}
+
+      node, found ->
+        {node, found}
+    end)
+    |> elem(1)
   end
 
   # The arity of the clause that does the refusing, which is not always the
