@@ -565,3 +565,64 @@ recorded in the same spirit as the list above.
     `stamp_undated_copies/3`'s `is_nil(delete_after)` cannot be reached twice with two different
     values, because a closed term's `ends_at` cannot move — so removing it kills no test. It stays
     as the property that makes the stamp idempotent by construction rather than by argument.
+
+## Revisions made after the second review
+
+A fourth reviewer read the branch at 5f25bd0 and raised two findings. Both were acted on; one of
+the two was acted on in the opposite direction to the one suggested, and says why.
+
+19. **A `RETURNING` clause was declared by a function that did not know it was declaring one.**
+    `Records.open_venue/1` carried `select: venue`, `close_venue/2` composed an `update:` on top of
+    it, and `Lifecycle.closed_or_diagnose/3` — in another file — matched `{1, [%Venue{}]}` on the
+    result. So a two-line predicate carried an obligation to a caller it had never heard of, and
+    the obvious edit to it (reuse it as a subquery, drop the select) broke a pattern match a file
+    away. Measured on the old arrangement: dropping it killed **five** tests in `lifecycle_test.exs`,
+    every one of them with a `FunctionClauseError` on `{1, nil}` that named neither the select nor
+    the query — so the finding's "silent clause mismatch" is wrong about the silence and right about
+    everything else.
+
+    Three options were open — state the dependency in both docstrings, assert it structurally, or
+    remove it — and the third was taken because a warning is not a failure. `open_venue/1` is now a
+    predicate with no select and `close_venue/2` declares its own, so the function whose result
+    depends on the clause is the function that asks for it. That also buys a failure in the *other*
+    direction for free: Ecto refuses two selects in one query, so re-adding one to `open_venue/1`
+    raises `Ecto.Query.CompileError` on the next composition rather than shadowing the move.
+    Verified by putting one back.
+
+    The new test asserts the pair — `close_venue/2` carries a select, `open_venue/1` carries none —
+    before it asserts the behaviour, because the structural failure names what is missing where a
+    `FunctionClauseError` out of `Ecto.Multi` does not. Both halves are load-bearing: dropping the
+    select from `close_venue/2` kills the first assertion, moving it back to `open_venue/1` kills
+    the second, and the second is what stops the first passing on an inherited select.
+
+20. **`cancel_jobs/2` deletes in every job state, and the reviewer's suggested filter would have
+    made things worse rather than better.** The finding is that an `:executing` job has its row
+    deleted underneath it. That was checked rather than assumed, three ways.
+
+    *What the row costs.* On the pinned Oban (2.23) `Oban.Engines.Basic.complete_job/2` is an
+    `update_all` whose affected count it discards, returning `:ok` unconditionally, and
+    `Oban.Queue.Executor.ack_event/1` discards that answer in turn. Driven directly at a deleted
+    row it answers `:ok` and logs nothing with the test environment's logger at `:warning` — so the
+    finding's "log a warning or silently no-op depending on the version" resolves to *silent* here.
+    No orphan either: the producer's running set is in memory and no `Lifeline` plugin is
+    configured.
+
+    *What the job could still write.* Not the retained copy, and not because of `erased_at` being
+    set first — because of the lock pair. `retain_own_messages/2` resolves the person under
+    `FOR SHARE` and `erase_person/1` holds `FOR UPDATE` on the same row for its whole transaction,
+    so the archive write either commits before the erasure begins, and is deleted by it, or parks
+    and finds the person erased. Both directions already have tests (revision 11's parking test and
+    the erased-person suppression test); the state of a queue row decides none of it.
+
+    *What a filter would cost.* Excluding `:executing` leaves a row that reaches `:completed` and
+    then **suppresses** the sweeper's replacement under `ExpireEngagement`'s `period: :infinity`
+    uniqueness — the reverse of what "leave the row behind" sounds like — while keeping only the
+    incomplete states leaves an erased person's completed announcements in `oban_jobs` for the
+    pruner's seven days. Either way it puts a second enumeration of Oban's states in the tree, in a
+    module about retention, answering a different question from the one `ExpireEngagement`'s
+    `:unique` states answer.
+
+    So the query is unchanged and the decision is written into `jobs_for_engagements/1`'s docstring
+    and pinned by a test that erases across `executing`, `completed` and `discarded`. It is not
+    padding: `where: job.state != "executing"` kills it on the first state and Oban's `:incomplete`
+    shorthand kills it on the second, so a future filter fails rather than passes quietly.

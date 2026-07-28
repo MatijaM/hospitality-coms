@@ -444,6 +444,37 @@ defmodule HospitalityComs.LifecycleTest do
       assert {:ok, _} = Lifecycle.erase_person(person_at(person, @now))
       assert scheduled_for(other.id) != []
     end
+
+    test "whatever state the job is in, which is why the query carries no state filter" do
+      # The test above runs against a `:scheduled` row and passes just as well
+      # with `where: job.state == "scheduled"` bolted on, so the state-blindness
+      # is pinned here rather than left to be inferred. Both obvious filters are
+      # wrong, in opposite directions:
+      #
+      #   * excluding `:executing` — the case for it being that Oban is left
+      #     updating a row that is gone — leaves a row that reaches `:completed`
+      #     and then *suppresses* the sweeper's replacement under
+      #     `ExpireEngagement`'s `period: :infinity`, which is the reverse of
+      #     what "leave the row behind" sounds like;
+      #   * keeping only the incomplete states leaves an erased person's
+      #     completed announcements in `oban_jobs` for the pruner's seven days.
+      #
+      # And the row underneath costs nothing. Measured on Oban 2.23 by driving
+      # `Oban.Engines.Basic.complete_job/2` at a deleted row: `:ok`, nothing
+      # logged at `:warning`, because the engine discards the affected count and
+      # `Oban.Queue.Executor.ack_event/1` discards its answer. What such a job
+      # could still write is refused by `retain_own_messages/2`'s `FOR SHARE`
+      # against erasure's `FOR UPDATE` — the parking test and the suppression
+      # test in *erasure and retained own-message copies* — and by nothing about
+      # its state.
+      for state <- ["executing", "completed", "discarded"] do
+        %{person: person, engagement: engagement} = engaged()
+        move_announcement_to(engagement.id, state)
+
+        assert {:ok, %{jobs_cancelled: 1}} = Lifecycle.erase_person(person_at(person, @now))
+        assert scheduled_for(engagement.id) == []
+      end
+    end
   end
 
   ## U9's two obstacles
@@ -765,6 +796,35 @@ defmodule HospitalityComs.LifecycleTest do
 
     test "is :not_found for an id that names nothing" do
       assert {:error, :not_found} = Lifecycle.close_venue(Ecto.UUID.generate(), @now)
+    end
+
+    test "hands back the row it closed, on a select close_venue/2 declares itself" do
+      # The `{1, [%Venue{}]}` clause `Lifecycle.closed_or_diagnose/3` matches is
+      # `update_all`'s `RETURNING`, and the `select:` that produces it used to
+      # live on `Records.open_venue/1` — a two-line predicate with no idea it
+      # was carrying one. Dropping it there, to reuse the query as a subquery
+      # say, left `update_all` answering `{1, nil}` and the clause unmatched in
+      # another file; measured on the old arrangement, five tests died of a
+      # `FunctionClauseError` that named neither the select nor the query.
+      #
+      # Both halves are asserted, and before the behaviour, because a structural
+      # failure says which query lost its select. The first alone passes just as
+      # well when the select is inherited, so it is the second — `open_venue/1`
+      # carrying none — that pins *where* the obligation lives. Ecto refuses two
+      # selects in one query, so restoring it there while leaving this one
+      # raises on the next composition rather than shadowing it.
+      %{employer: employer} = engaged()
+
+      assert %Ecto.Query{select: %Ecto.Query.SelectExpr{}} =
+               Records.close_venue(employer.venue_id, @now)
+
+      assert %Ecto.Query{select: nil} = Records.open_venue(employer.venue_id)
+
+      assert {:ok, %{venue: %Venue{id: id, closed_at: %DateTime{} = closed_at}}} =
+               Lifecycle.close_venue(employer.venue_id, @now)
+
+      assert id == employer.venue_id
+      assert DateTime.compare(closed_at, @now) == :eq
     end
   end
 
@@ -1107,6 +1167,9 @@ defmodule HospitalityComs.LifecycleTest do
     Profiles.set_disclosure(person_at(subject, @now), engagement_id, {:person, id}, disclosed)
   end
 
+  # Every state, not only the runnable ones: the claim's announcement is the row
+  # being moved and `scheduled_for/1` is deliberately a raw read with no state
+  # predicate of its own, so a survivor in any state is visible.
   defp scheduled_for(engagement_id) do
     Repo.all(
       from(j in Oban.Job,
@@ -1114,6 +1177,15 @@ defmodule HospitalityComs.LifecycleTest do
         select: j.id
       )
     )
+  end
+
+  # The states a job reaches once it has left `:scheduled` — running, worked,
+  # out of attempts. `engagement_fixture/3`'s claim queued the row this moves.
+  defp move_announcement_to(engagement_id, state) do
+    Repo.query!("UPDATE oban_jobs SET state = $1 WHERE args ->> 'engagement_id' = $2", [
+      state,
+      engagement_id
+    ])
   end
 
   # Every module compiled from `lib/`. Read out of the application rather than

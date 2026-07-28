@@ -280,6 +280,40 @@ defmodule HospitalityComs.Lifecycle.Records do
   Deleting the rows rather than calling `Oban.cancel_job/1` is what makes the
   cancellation part of the transaction: a cancel would survive a rolled-back
   erasure, and would be missing from a committed one that crashed a step later.
+
+  ## No state filter, and that is a decision rather than an omission
+
+  The rows go whatever state they are in, `:executing` included — so a job that
+  is running while the erasure commits has its row deleted underneath it.
+  Measured on the pinned Oban (2.23): `Oban.Engines.Basic.complete_job/2` is an
+  `update_all` whose affected count it discards, returning `:ok` unconditionally,
+  and `Oban.Queue.Executor.ack_event/1` discards that in turn. Driven directly
+  against a deleted row it answers `:ok` and logs nothing at `:warning`. There is
+  no orphan either: the producer's running set is in memory, and no `Lifeline`
+  plugin is configured.
+
+  What that job could otherwise have *written* is closed by a different guard
+  entirely, not by this one. `HospitalityComs.Lifecycle.retain_own_messages/2`
+  resolves the person under `FOR SHARE` and `erase_person/1` holds `FOR UPDATE`
+  on the same row for the length of its transaction, so the archive write either
+  commits before the erasure starts — and is then deleted by it — or parks and
+  finds the person erased. The interleaving is decided there, at the row, rather
+  than here by guessing at a job's state.
+
+  A filter also reads backwards. Excluding `:executing` leaves a row that reaches
+  `:completed`, which under `HospitalityComs.Workers.ExpireEngagement`'s
+  `period: :infinity` uniqueness then *suppresses* the sweeper's replacement —
+  the opposite of what "leave the row behind" sounds like — and keeping only the
+  incomplete states leaves an erased person's completed announcements in
+  `oban_jobs` for the pruner's seven days. Either way it would put a second
+  enumeration of Oban's states in the tree, in a module about retention,
+  answering a different question from the one `ExpireEngagement`'s `:unique`
+  states answer, and a state list with a judgement call in it is a list somebody
+  gets wrong later.
+
+  So the contract is about rows and not about a state machine: after an erasure,
+  no queued work names this person's engagements. `HospitalityComs.LifecycleTest`
+  pins it over three states so that adding a filter fails rather than passes.
   """
   @spec jobs_for_engagements([Ecto.UUID.t()]) :: Ecto.Query.t()
   def jobs_for_engagements(engagement_ids) when is_list(engagement_ids) do
@@ -344,13 +378,22 @@ defmodule HospitalityComs.Lifecycle.Records do
 
   @doc """
   The venue, if it is still trading.
+
+  A predicate and nothing else: **no `select`**, deliberately. It used to carry
+  `select: venue`, which is invisible in a function this size and became the
+  `RETURNING` clause of `close_venue/2`'s `update_all` a few lines down — so
+  `HospitalityComs.Lifecycle`'s `{1, [%Venue{}]}` depended on a select declared
+  by a function that knows nothing about it, and dropping it here (to reuse this
+  as a subquery predicate, say) would have left `update_all` answering `{1, nil}`
+  in another file. The select now lives on the statement whose result is read,
+  and Ecto refuses two in one query, so re-adding one here raises rather than
+  quietly restoring the coupling.
   """
   @spec open_venue(Ecto.UUID.t()) :: Ecto.Query.t()
   def open_venue(venue_id) when is_binary(venue_id) do
     from venue in Venue,
       where: venue.id == ^venue_id,
-      where: is_nil(venue.closed_at),
-      select: venue
+      where: is_nil(venue.closed_at)
   end
 
   @doc """
@@ -386,13 +429,19 @@ defmodule HospitalityComs.Lifecycle.Records do
   Conditional on `closed_at IS NULL` and reporting the affected count, so two
   callers closing at once close it once and the loser is `:already_closed`
   rather than the second write deciding when the venue shut.
+
+  `select: venue` is this statement's `RETURNING` clause, and
+  `HospitalityComs.Lifecycle`'s `{1, [%Venue{} = venue]}` is the only thing that
+  reads it. It is declared here rather than inherited from `open_venue/1` so
+  that the function whose result depends on it is the function that asks for it.
   """
   @spec close_venue(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
   def close_venue(venue_id, %DateTime{} = instant) when is_binary(venue_id) do
     stamped = DateTime.truncate(instant, :second)
 
     from venue in open_venue(venue_id),
-      update: [set: [closed_at: ^stamped, updated_at: ^stamped]]
+      update: [set: [closed_at: ^stamped, updated_at: ^stamped]],
+      select: venue
   end
 
   @doc """

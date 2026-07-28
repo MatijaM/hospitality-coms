@@ -528,8 +528,13 @@ defmodule HospitalityComs.Lifecycle do
     |> closed_or_diagnose(repo, venue_id)
   end
 
-  # Runs only when the conditional update matched nothing, so it cannot turn a
-  # refusal into a success.
+  # The list in the first clause is `Records.close_venue/2`'s own `select:
+  # venue`, handed back by `update_all` as `RETURNING`. That select is declared
+  # by the statement this reads rather than inherited from the predicate it
+  # composes, so the obligation is one function away and visible from here.
+  #
+  # The second clause runs only when the conditional update matched nothing, so
+  # it cannot turn a refusal into a success.
   @spec closed_or_diagnose({non_neg_integer(), [Venue.t()] | nil}, Ecto.Repo.t(), Ecto.UUID.t()) ::
           {:ok, Venue.t()} | {:error, :not_found | :already_closed}
   defp closed_or_diagnose({1, [%Venue{} = venue]}, _repo, _venue_id), do: {:ok, venue}
