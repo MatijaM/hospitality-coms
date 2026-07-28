@@ -203,7 +203,7 @@ defmodule HospitalityComsWeb.ChannelAuth do
   end
 
   @doc """
-  The entity id a channel topic's suffix names, if it is one.
+  The entity id a client-supplied string names, if it is one.
 
   A topic arrives from the client, so its suffix is user input in a place that
   does not look like one — `"venue_room:" <> venue_id` reads like a route
@@ -213,6 +213,13 @@ defmodule HospitalityComsWeb.ChannelAuth do
   can then tell a *malformed* id from an unknown one by which answer they get,
   which is the not-found-rather-than-forbidden rule (AE1) lost at the one place
   the id comes from outside.
+
+  **An id in an event payload is the same input**, and U8's
+  `HospitalityComsWeb.PeerChannel` takes every one of its through here for the
+  same reason. The name is historical — this was the topic suffix's function
+  before there was a payload carrying ids — and it stays because renaming a
+  function three channels call to say something it already does is a cost with
+  no assertion behind it.
 
   The shape is `HospitalityComs.Accounts.EmployerScope`'s `uuid!/1`, and taking
   `byte_size(id) == 36` first is the load-bearing half rather than a cheap
