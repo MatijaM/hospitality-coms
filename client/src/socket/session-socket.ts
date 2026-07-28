@@ -1,12 +1,17 @@
 /**
  * The connection half of the Phoenix socket, and nothing above it.
  *
- * U7 is defining the sockets, their topics, their event names and their
- * payloads while this is being written. So this module knows how to open a
- * connection carrying a session token, how to join a topic somebody else names,
+ * This module knows how to open a connection carrying a session token, how to
+ * join a topic somebody else names, how to report what a push came back with,
  * and — the part that is worth having early — what to do when a join is
  * refused. It knows no topic and no event name of its own, and there is nothing
  * here for rooms, peers or presence.
+ *
+ * U7 has since landed and `src/features/rooms/` names the topics and the
+ * events. Nothing moved down here when it did: a module that knew
+ * `"venue_room:"` would have to know `"peer"` and `"employer_venue:"` too, and
+ * the one property this file exists to hold — a refusal is a decision, not a
+ * thing to wait out — is the same for all of them.
  *
  * ## Why a refused join leaves rather than retries
  *
@@ -45,11 +50,12 @@
  * `connect_info[:auth_token]`. So there is no params key left for anyone to
  * name, and this module sends no params at all.
  *
- * ## What U7 owns
+ * ## The endpoint, and the token's lifetime
  *
- * The endpoint path is configuration with a conventional default, because
- * `HospitalityComsWeb.Endpoint` mounts no socket yet. Nothing here is wired
- * into the running app for the same reason: there is no topic to join.
+ * The endpoint path stays configuration, and it is not the Phoenix default.
+ * U7 mounts two sockets — `/socket/person` and `/socket/employer` (KTD9) — so
+ * there is nothing at `/socket` at all. `SocketProvider` holds the value; see
+ * `PERSON_SOCKET_ENDPOINT`.
  *
  * **The token is captured when the socket is built, not when it connects.**
  * `phoenix` wraps `authToken` in a closure at construction, so a socket built
@@ -139,10 +145,28 @@ export type JoinOptions = {
   readonly onTimeout?: () => void;
 };
 
+/**
+ * What came back from a push, with no case left as a throw.
+ *
+ * `phoenix`'s `Push` answers on three hooks and can also answer on none of
+ * them, which is the fourth member: a push issued after the subscription was
+ * left never reaches the socket, and a caller that cannot tell that apart from
+ * a refusal renders the wrong sentence. The promise this resolves never
+ * rejects, for the same reason nothing in `src/api/` throws.
+ *
+ * `payload` is `unknown` on purpose. This module knows no event name, so it
+ * cannot know what a reply to one looks like; the caller decodes it.
+ */
+export type PushOutcome =
+  | { readonly status: "ok"; readonly payload: unknown }
+  | { readonly status: "error"; readonly payload: unknown }
+  | { readonly status: "timeout" }
+  | { readonly status: "unsent" };
+
 export type TopicSubscription = {
   readonly topic: string;
   leave(): void;
-  push(event: string, payload: object): void;
+  push(event: string, payload: object): Promise<PushOutcome>;
 };
 
 export type SessionSocket = {
@@ -181,9 +205,23 @@ export function createSessionSocket(config: SessionSocketConfig): SessionSocket 
       push(event, payload) {
         // A push after leaving is a bug in the caller rather than something to
         // buffer: `phoenix` would queue it against a channel that is never
-        // going to rejoin.
-        if (left) return;
-        channel.push(event, payload);
+        // going to rejoin. It is answered rather than ignored, so a composer
+        // waiting on the promise is not left waiting for ever.
+        if (left) return Promise.resolve({ status: "unsent" });
+
+        return new Promise<PushOutcome>((resolve) => {
+          channel
+            .push(event, payload)
+            .receive("ok", (reply) => {
+              resolve({ status: "ok", payload: reply });
+            })
+            .receive("error", (reply) => {
+              resolve({ status: "error", payload: reply });
+            })
+            .receive("timeout", () => {
+              resolve({ status: "timeout" });
+            });
+        });
       },
     };
 
