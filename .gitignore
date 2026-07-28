@@ -30,3 +30,7 @@ npm-debug.log
 
 # Agent worktrees, created by parallel subagent dispatch.
 .claude/worktrees/
+
+# npm run from the repo root instead of client/ leaves one of these behind.
+# There is no package.json here; the only one is client/package.json.
+/package-lock.json
