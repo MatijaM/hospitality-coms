@@ -22,17 +22,20 @@
  * **This module names no codes.** It used to, and that was a coupling with a
  * date on it: a surface's copy is an exhaustive `switch` over the codes it can
  * meet, so a single shared list makes *every* switch break when *any* surface
- * gains a code. U8 puts nine events on one multiplexed `"peer"` channel, and a
- * peer-only code on a shared list would have demanded a case inside
- * `features/rooms/`, which knows nothing about peers and can say nothing
- * useful about one.
+ * gains a code. U8 puts nine events on one multiplexed `"peer:<person_id>"`
+ * channel, and a peer-only code on a shared list would have demanded a case
+ * inside `features/rooms/`, which knows nothing about peers and can say nothing
+ * useful about one. That happened as predicted: `PEER_ERROR_CODES` has seven
+ * entries, `conflict` and `not_found` among them, and neither means anything in
+ * a room.
  *
  * `src/api/errors.ts` gets away with one shared list because exactly one switch
  * consumes it. Here there will be at least three.
  *
  * So `decodeChannelRefusal` takes the caller's own vocabulary and narrows to
- * it: `features/rooms/refusal-message.ts` owns `ROOM_ERROR_CODES` and traces
- * each one to the clause that emits it, and U8 can add `PEER_ERROR_CODES`
+ * it: `features/rooms/refusal-message.ts` owns `ROOM_ERROR_CODES` and
+ * `features/peers/refusal-message.ts` owns `PEER_ERROR_CODES`, each tracing
+ * every code to the clause that emits it, and the peer surface was added
  * without editing a room-owned file. Anything outside the caller's set is
  * `unrecognised`, with the wire value kept in `rawCode` — which is also the
  * right answer for a peer code arriving on a room topic: it is a code that

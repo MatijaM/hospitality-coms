@@ -331,8 +331,10 @@ describe("a session that cannot be checked", () => {
 
 describe("a path that is not a surface", () => {
   it("says so instead of rendering an empty page", async () => {
-    // Was `/rooms`, which is a surface now.
-    renderApp({ path: "/peers" });
+    // Was `/rooms`, then `/peers`; both are surfaces now. Picking the next
+    // unbuilt route each time is how this test keeps getting invalidated, so
+    // this one names a path no unit is going to claim.
+    renderApp({ path: "/not-a-surface" });
 
     expect(await screen.findByRole("heading", { name: /nothing here/i })).toBeVisible();
   });

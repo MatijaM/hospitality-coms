@@ -41,6 +41,13 @@ export function HomeRoute() {
         each room comes from its channel.
       </p>
 
+      <h2>Peers</h2>
+      <p>
+        <Link to="/peers">The people you worked with, and your conversations</Link>.
+        Unlike the rooms, nothing about this is kept in this browser — the peer channel
+        serves the lists, so there is nothing here to remember and nothing to clear.
+      </p>
+
       <h2>Not built yet</h2>
       <p>
         Everything below needs an endpoint or a channel that this API does not serve yet.
@@ -48,7 +55,6 @@ export function HomeRoute() {
         to remove than to write.
       </p>
       <ul>
-        <li>The peer directory and peer conversations — waiting on U8.</li>
         <li>
           The profile, its attested entries and its disclosure controls — waiting on U9.
         </li>

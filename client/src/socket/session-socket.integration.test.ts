@@ -36,29 +36,48 @@
  * The server needs a database, and the repository's own `CLAUDE.md` is
  * emphatic that migrating `hospitality_coms_dev` breaks `DROP ROLE
  * employer_role` in `hospitality_coms_test` — grants are database-local while
- * roles are cluster-global. So this runs against a throwaway database that is
- * dropped afterwards:
+ * roles are cluster-global.
  *
- *     createdb -U postgres hospitality_coms_u12
- *     export DATABASE_URL=ecto://postgres:postgres@localhost/hospitality_coms_u12
+ * **A throwaway *database* is not enough**, which this file used to say it was.
+ * Any migrated database on the cluster grants `employer_role` and breaks that
+ * `DROP ROLE` everywhere on it for as long as the database exists. What works
+ * is a throwaway **cluster**: `initdb` into a temporary directory has its own
+ * role namespace, so nothing it grants is visible to the real one. The full
+ * recipe, including the `LC_ALL=C` that macOS needs and the correction to the
+ * token-minting snippet below, is in
+ * `src/features/peers/peers.integration.test.ts`, which was run that way.
+ *
+ *     initdb -D /tmp/hc/data -U postgres --auth=trust --locale=C
+ *     LC_ALL=C pg_ctl -D /tmp/hc/data -o "-p 55432" -l /tmp/hc/log start
+ *     createdb -h 127.0.0.1 -p 55432 -U postgres hospitality_coms_u12
+ *     export DATABASE_URL=ecto://postgres:postgres@127.0.0.1:55432/hospitality_coms_u12
  *     export SECRET_KEY_BASE=$(mix phx.gen.secret)
  *     export MAGIC_LINK_BASE_URL=http://localhost:5173/log-in/
  *     export WEBSOCKET_ORIGINS=http://localhost:5173
- *     MIX_ENV=prod mix ecto.migrate
- *     MIX_ENV=prod PHX_SERVER=true mix phx.server &
+ *     export PORT=4010 MIX_ENV=prod
+ *     mix ecto.migrate
+ *     PHX_SERVER=true mix phx.server &
  *
  *     # a person and a session token, minted directly: `/dev/mailbox` is a
  *     # dev-only route and this server is not in dev.
- *     MIX_ENV=prod mix run -e '
+ *     #
+ *     # The transaction is **required** and this snippet did not have it:
+ *     # `register_person/2` inserts with `mode: :savepoint`, which outside a
+ *     # transaction raises `DBConnection.TransactionError`. Every ordinary
+ *     # caller reaches it from inside `request_magic_link/2`'s transaction.
+ *     mix run -e '
  *       now = HospitalityComs.Clock.now()
- *       {:ok, p} = HospitalityComs.Accounts.register_person(%{email: "u12@example.com"}, now)
- *       IO.puts(HospitalityComsWeb.PersonAuth.encode_token(
- *         HospitalityComs.Accounts.generate_person_session_token(p, now)))'
+ *       {:ok, {_p, t}} = HospitalityComs.Repo.transaction(fn ->
+ *         {:ok, p} = HospitalityComs.Accounts.register_person(%{email: "u12@example.com"}, now)
+ *         {p, HospitalityComs.Accounts.generate_person_session_token(p, now)}
+ *       end)
+ *       IO.puts(HospitalityComsWeb.PersonAuth.encode_token(t))'
  *
- *     HOSPITALITY_COMS_SESSION_TOKEN=<that> npm run test:socket
+ *     HOSPITALITY_COMS_SOCKET_URL=ws://localhost:4010/socket/person \
+ *       HOSPITALITY_COMS_SESSION_TOKEN=<that> npm run test:socket
  *
  *     # afterwards, and this part is not optional
- *     dropdb -U postgres hospitality_coms_u12
+ *     LC_ALL=C pg_ctl -D /tmp/hc/data -m immediate stop && rm -rf /tmp/hc
  */
 
 import { describe, expect, it, vi } from "vitest";
