@@ -306,6 +306,23 @@ async function openConversation(
   answer(channel, "history", "ok", { messages });
 }
 
+/**
+ * Confirms a disconnect, opening the confirmation first if it is not on screen.
+ *
+ * The reopen is what makes two calls of this "one impatient worker" rather than
+ * "one worker and a fixture". `DisconnectControl` used to dismiss the
+ * confirmation with the same click that sent the push, so the second confirm a
+ * double-click reaches is the "Disconnect" button and then "Yes, disconnect"
+ * again — and a helper that only clicked the latter would fail on a missing
+ * element instead of on the second push it exists to count.
+ */
+async function confirmDisconnect(): Promise<void> {
+  const reopen = screen.queryByRole("button", { name: /^disconnect$/i });
+  if (reopen !== null) await userEvent.click(reopen);
+
+  await userEvent.click(screen.getByRole("button", { name: /yes, disconnect/i }));
+}
+
 function messageBodies(): (string | null)[] {
   return within(screen.getByRole("list", { name: /conversation messages/i }))
     .queryAllByRole("listitem")
@@ -1092,6 +1109,35 @@ describe("disconnecting", () => {
     expect(pushesOf(channel, "disconnect")).toEqual([
       { event: "disconnect", payload: { connection_id: CONNECTION_ID } },
     ]);
+  });
+
+  it("takes one disconnect per confirmation, not one per click", async () => {
+    // The confirmation is not the guard against a duplicate, and it used to be
+    // treated as one: it was dismissed by the same click that sent the push, so
+    // the "Disconnect" button was back on screen with the first answer still
+    // out and confirming again sent a second `disconnect` for a conversation
+    // the first one had already closed. The server answers that one `conflict`,
+    // which this surface would then render beside a conversation that did in
+    // fact end.
+    //
+    // Both controls close while an answer is in flight now, which is
+    // `IncomingRequest`'s shape in `peers-route.tsx` — the same defect class
+    // "takes one answer per request, not one per click" pins a few blocks up.
+    const { channel } = await openPeers({ conversations: [conversationWire()] });
+
+    await openConversation(channel, PEER_ID);
+
+    await confirmDisconnect();
+    await confirmDisconnect();
+
+    expect(pushesOf(channel, "disconnect")).toEqual([
+      { event: "disconnect", payload: { connection_id: CONNECTION_ID } },
+    ]);
+
+    // Still the confirmation, and nothing on it is live: the server has not
+    // answered, so there is no state to go back to yet.
+    expect(screen.getByRole("button", { name: /yes, disconnect/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /cancel/i })).toBeDisabled();
   });
 
   it("takes the other party's messages off the screen, because the server does", async () => {

@@ -175,6 +175,22 @@ function Composer({
   );
 }
 
+/**
+ * The confirm step, and the one control that ends the conversation.
+ *
+ * Two flags rather than one, because they answer two different questions:
+ * `asking` is whether the confirmation is on screen, and `disconnecting` is
+ * whether an answer is in flight. Both controls close while one is running,
+ * which is `IncomingRequest`'s shape in `peers-route.tsx` and is here for the
+ * same reason: the second click of a double-click sends a second `disconnect`
+ * for a conversation the first one closed, and the server answers it `conflict`
+ * — a refusal this surface would then render beside a conversation that did in
+ * fact end, which is worse than not sending it.
+ *
+ * `asking` is cleared **after** the reply rather than beside the push. Clearing
+ * it first re-rendered the "Disconnect" button while the request was still out,
+ * so the confirm step could be reached again and the flag guarded nothing.
+ */
 function DisconnectControl({
   conversation,
   surface,
@@ -183,6 +199,18 @@ function DisconnectControl({
   readonly surface: PeerSurface;
 }) {
   const [asking, setAsking] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+
+  // On success the conversation closes and `ConversationView` stops rendering
+  // this at all, so the two writes below land on a component that is going
+  // away. On a refusal they are what puts the surface back where it was, with
+  // the sentence the notice is already showing.
+  async function confirm(): Promise<void> {
+    setDisconnecting(true);
+    await surface.disconnect(conversation.connectionId);
+    setDisconnecting(false);
+    setAsking(false);
+  }
 
   if (!asking) {
     return (
@@ -207,15 +235,16 @@ function DisconnectControl({
       </p>
       <button
         type="button"
+        disabled={disconnecting}
         onClick={() => {
-          void surface.disconnect(conversation.connectionId);
-          setAsking(false);
+          void confirm();
         }}
       >
         Yes, disconnect
       </button>
       <button
         type="button"
+        disabled={disconnecting}
         onClick={() => {
           setAsking(false);
         }}
