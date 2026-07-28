@@ -6,6 +6,21 @@
  * here. Naming the absences beats an empty dashboard: the next unit needs to
  * know which surface it owns, and a worker looking at this needs to know
  * nothing is broken.
+ *
+ * ## Say what is missing, not which unit owes it
+ *
+ * This list previously read "waiting on U9", "waiting on U10", "waiting on
+ * U11". All three shipped, and the list still said so — it was written when
+ * they were future work and nothing brought it back. Worse, the vocabulary was
+ * the plan's: a worker reading "waiting on U9" learns nothing, and a developer
+ * reading it after U9 merged learns something false.
+ *
+ * So each entry now names the thing that is actually absent. Those are
+ * checkable claims, and one of them is checked: `/profile` cannot connect
+ * because `PersonSocket` routes no `profile:*` topic, and `sockets_test.exs`
+ * pins that socket's routing table exactly, with a control. Adding the channel
+ * fails that test, which is where somebody will be standing when this paragraph
+ * needs deleting.
  */
 
 import { Link } from "react-router";
@@ -48,18 +63,33 @@ export function HomeRoute() {
         serves the lists, so there is nothing here to remember and nothing to clear.
       </p>
 
-      <h2>Not built yet</h2>
+      <h2>Profile</h2>
       <p>
-        Everything below needs an endpoint or a channel that this API does not serve yet.
+        <Link to="/profile">Your record, and who can see each part of it</Link>.{" "}
+        <strong>This screen cannot connect yet.</strong> The record itself is built —
+        attested entries, declared entries, corrections, and the per-venue and per-person
+        disclosure rules — but nothing carries it to this browser, so the screen loads and
+        then reports that it could not join.
+      </p>
+
+      <h2>Not reachable from here yet</h2>
+      <p>
+        Both of these exist in the backend and neither has a way in from a browser.
         Nothing is stubbed, because a placeholder for a shape nobody has chosen costs more
         to remove than to write.
       </p>
       <ul>
         <li>
-          The profile, its attested entries and its disclosure controls — waiting on U9.
+          <strong>Erasure and retention.</strong> Erasing an account, and the deadlines
+          that delete old messages, run on the server. There is no endpoint and no
+          channel, so no screen can ask for them.
         </li>
-        <li>Archived engagements and erasure — waiting on U10.</li>
-        <li>The demo controls — waiting on U11.</li>
+        <li>
+          <strong>The demo controls.</strong> Seeding, moving the clock and running due
+          work are HTTP endpoints under <code>/api/demo</code>, in development builds
+          only, and they need an <code>x-demo-control</code> header. There is no UI for
+          them.
+        </li>
       </ul>
     </section>
   );
