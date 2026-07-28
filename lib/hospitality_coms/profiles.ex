@@ -383,7 +383,7 @@ defmodule HospitalityComs.Profiles do
   profile away from somebody they are still in conversation with.
 
   Attested entries come back subject to the worker's peer-audience decisions and
-  to **the concurrency rule of every venue this peer works at**, which is the
+  to **the concurrency rule of every venue that binds this peer**, which is the
   same rule `employer_visible_attested_entries` applies and is here for a reason
   that is structural rather than defensive: an employer session is a person
   session plus a venue, so a venue's manager necessarily holds an engagement
@@ -394,6 +394,24 @@ defmodule HospitalityComs.Profiles do
   So a colleague at venue A learns no more about a worker's other jobs than
   venue A does, a peer whose venues the worker never worked at is unaffected,
   and a `set_disclosure/4` row still overrides in either direction.
+
+  A venue binds a peer while they work there **and** while it is what makes the
+  two of them visible to each other, which is R13's thirty-day tail. Both halves
+  are `Records.concealed_from/3`'s; the second is what stops a manager whose own
+  engagement ended yesterday reading the open default for the next thirty days.
+
+  **What a connected ex-colleague sees once the tail has run out is the open
+  default, and that is a decision.** Visibility gates discovery; a connection
+  outlives it, which is the whole reason this gate has two clauses. Once no
+  venue is making the pair visible, no venue is why the viewer can see this
+  worker — the connection is, and a connection exists only because the worker
+  accepted the request that made it. The alternative is to bind a viewer to
+  every venue they were *ever* co-rostered at, which never lapses and would
+  apply a venue's rule for life to somebody who left the trade. Bounded and
+  remediable: it takes the worker's own acceptance and the viewer's departure,
+  the viewer holds no employer session anywhere by then, and one
+  `set_disclosure/4` row — or `Peers.disconnect/2`, which closes the gate
+  outright — takes it back. `HospitalityComs.ProfilesTest` asserts both.
 
   Declared entries come back whole: writing one is publishing it, which is why
   the ledger governs attested entries alone.

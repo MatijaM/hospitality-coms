@@ -980,29 +980,91 @@ defmodule HospitalityComs.ProfilesTest do
       assert there.venue.id in venue_ids(peer_view.attested_entries)
     end
 
-    test "stops applying once the colleague's own engagement has ended, which is on the record" do
-      # **A residual, asserted rather than described.** The rule keys on the
-      # peer holding an engagement at the venue that is *active at the asking
-      # instant*, which is the shape the employer view has. Visibility outlives
-      # an engagement by thirty days (R13), so for that window an ex-colleague
-      # is a peer holding no post — and sees the worker's record with no venue's
-      # rule applied to it.
+    test "keeps binding the departing manager for as long as their venue makes them visible" do
+      # **The residual the first cut left, and this test asserted it.** It read
+      # "stops applying once the colleague's own engagement has ended, which is
+      # on the record" and asserted both venues came back. The rule keyed on the
+      # viewer holding a post *active at the asking instant*, which is the shape
+      # the employer view has — but peer visibility runs for thirty days past
+      # the end of the engagement that created it (R13), and for that window the
+      # viewer holds no active post anywhere, so no venue's rule applied and the
+      # open default returned. A manager whose own term ended yesterday got
+      # thirty days of exactly the access this block exists to remove.
       #
-      # Bounded and deliberate: it needs the peer's own term to have closed, it
-      # closes with the tail, and the alternative — "ever held an engagement
-      # there" — would apply a venue's rule for ever to somebody who left it
-      # years ago.
+      # The binding is now the relation that *makes them visible* as well as the
+      # one that puts them behind an employer session, so it covers the tail and
+      # lapses with it. The instant is one day past the manager's own `ends_at`
+      # plus nine: the term closed at day 30, and the pair are visible until day
+      # 60.
       %{manager: manager, worker: worker, here: here, elsewhere: elsewhere} =
         manager_and_worker()
 
       later = PeersFixtures.person_at(manager, days(40))
 
+      # No post, therefore no employer session anywhere — and still bound.
+      assert Engagements.fetch_grant_holding_engagement(later, here.venue.id) ==
+               {:error, :no_grant}
+
       assert Peers.visible?(later, worker.person.id)
+
+      assert {:ok, peer_view} = Profiles.fetch_peer_profile(later, worker.person.id)
+
+      assert venue_ids(peer_view.attested_entries) == [here.venue.id]
+      refute elsewhere.venue.id in venue_ids(peer_view.attested_entries)
+    end
+
+    test "lapses with visibility, so a connected ex-colleague is bound by no venue" do
+      # **The boundary of the rule above, chosen rather than inherited.** The
+      # binding is the visibility relation, so it ends when visibility ends —
+      # and `fetch_peer_profile/2`'s gate is visible **or** connected, so a pair
+      # who connected while co-rostered still reach each other's records after
+      # the tail. At that point no venue is why the viewer can see this worker:
+      # the connection is, and it exists only because the worker accepted it.
+      #
+      # The alternative is a binding on "ever co-rostered at V", which never
+      # lapses and would apply a venue's rule for life to somebody who left the
+      # trade. What is left is bounded — the worker's own acceptance, the
+      # viewer's departure, and thirty days, by which time the viewer holds no
+      # employer session anywhere — and it has two remedies, both asserted here
+      # because a residual with an untested remedy is a residual with none.
+      %{
+        manager: manager,
+        worker: worker,
+        here: here,
+        elsewhere: elsewhere,
+        elsewhere_engagement: elsewhere_engagement
+      } = manager_and_worker()
+
+      connection = PeersFixtures.connection_fixture(manager, worker)
+
+      later = PeersFixtures.person_at(manager, days(90))
+
+      refute Peers.visible?(later, worker.person.id)
+      assert Peers.connected?(later, worker.person.id)
 
       assert {:ok, peer_view} = Profiles.fetch_peer_profile(later, worker.person.id)
 
       assert Enum.sort(venue_ids(peer_view.attested_entries)) ==
                Enum.sort([here.venue.id, elsewhere.venue.id])
+
+      # First remedy: the per-peer override, which takes the entry from this one
+      # person and from nobody else.
+      assert {:ok, _off} =
+               Profiles.set_disclosure(
+                 worker,
+                 elsewhere_engagement.id,
+                 {:person, manager.person.id},
+                 false
+               )
+
+      assert {:ok, narrowed} = Profiles.fetch_peer_profile(later, worker.person.id)
+      assert venue_ids(narrowed.attested_entries) == [here.venue.id]
+
+      # Second remedy: closing the connection closes the gate, because the other
+      # half of it has already lapsed.
+      assert {:ok, _closed} = Peers.disconnect(worker, connection.id)
+
+      assert Profiles.fetch_peer_profile(later, worker.person.id) == {:error, :not_a_peer}
     end
   end
 

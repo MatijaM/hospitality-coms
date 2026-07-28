@@ -50,6 +50,8 @@ defmodule HospitalityComs.Profiles.Records do
   import Ecto.Query
 
   alias HospitalityComs.Engagements.Engagement
+  alias HospitalityComs.Engagements.Records, as: EngagementRecords
+  alias HospitalityComs.Peers.Records, as: PeerRecords
   alias HospitalityComs.Profiles.AttestedEntry
   alias HospitalityComs.Profiles.CorrectionRequest
   alias HospitalityComs.Profiles.DeclaredEntry
@@ -118,8 +120,8 @@ defmodule HospitalityComs.Profiles.Records do
   `instant`.
 
   **The peer default is disclosed for the venues the peer has nothing to do
-  with, and is the viewing venue's own concurrency rule for the ones they work
-  at.** Those are two halves of one predicate and neither is the whole of it:
+  with, and is the concurrency rule of every venue that binds them for the rest.**
+  Those are two halves of one predicate and neither is the whole of it:
 
     * A peer was co-rostered with this worker and the venue room's roll already
       told them the venue and the employer-authored role label (KTD15b), so a
@@ -131,8 +133,10 @@ defmodule HospitalityComs.Profiles.Records do
       co-rostered with every worker at that venue, which makes them a visible
       peer. Left at "disclosed", the concurrency default the employer view
       enforces was recoverable by asking the same question through the peer
-      door, with no grant, nothing manufactured, and no consent step. So the
-      viewing venue's rule follows the person who works there.
+      door, with no grant, nothing manufactured, and no consent step. So a
+      venue's rule follows whoever works there, **and whoever that venue is
+      still making visible** — see `concealed_from/3` for why the second half
+      is not the first restated.
 
   `peer_disclosure/4` is the whole of it, and the override is layered on top in
   both directions: a `false` row takes an entry away, a `true` row hands one
@@ -185,14 +189,39 @@ defmodule HospitalityComs.Profiles.Records do
       select: disclosure.engagement_id
   end
 
-  # The subject's engagements a venue the viewer works at would hide, as ids.
+  # The subject's engagements a venue that binds the viewer would hide, as ids.
   #
   # `employer_visible_attested_entries` says the same thing about one venue and
-  # this says it about every venue the viewer holds an engagement at that is
-  # active at `instant`. Read the three joins as the view's three roles:
-  # `subject` is the engagement whose entry is being asked about, `stint` is
-  # another engagement of the same person somewhere else, and `post` is the
-  # viewer's own engagement at the venue `stint` is at.
+  # this says it about every venue that binds the viewer. Two bindings, which
+  # are two of the view's three roles: `subject` is the engagement whose entry
+  # is being asked about, and `stint` is another engagement of the same person
+  # somewhere else. The view's third role — the viewer's own post at `stint`'s
+  # venue — is the two-way membership test below rather than a join, because it
+  # was only ever an existence check and a join spells that as a row multiplier.
+  #
+  # **A venue binds the viewer two ways, and neither contains the other.** They
+  # work there at `instant` (`venues_worked_at/2`), or the venue is what makes
+  # the two of them visible to each other at `instant`
+  # (`PeerRecords.visible_venue_ids/3`). The first is where an employer session
+  # can exist; the second is *why the viewer can see this person at all*, and it
+  # is what carries the rule through R13's thirty-day tail, during which the
+  # viewer holds no post anywhere and the first half binds nothing. Without it a
+  # manager whose own engagement ended yesterday read the open default for
+  # thirty days — the exact access this predicate exists to remove, on a delay.
+  #
+  # Neither half is redundant. Two engagements active at one venue at one
+  # instant are necessarily co-rostered there, so where the *subject* is also
+  # active the first half implies the second — but the first is a fact about the
+  # viewer alone, so it binds a venue the subject left before the viewer
+  # arrived, and the second does not. `NOT EXISTS` in the view ranges over every
+  # stint the person ever held there, so a viewer bound only by co-rostering is
+  # handed a returning worker's older concurrency the view withholds. Deleting
+  # either disjunct kills a test.
+  #
+  # For a viewer who has left, the binding lapses when visibility does, and that
+  # is deliberate: past the tail no venue is why they can see this worker, and
+  # what remains is a connection the worker themselves accepted. See
+  # `HospitalityComs.Profiles.fetch_peer_profile/2`.
   #
   # The overlap is the view's, clause for clause, including the two
   # non-emptiness comparisons — `HospitalityComs.Engagements.end_engagement/2`
@@ -202,31 +231,41 @@ defmodule HospitalityComs.Profiles.Records do
   # `stint.venue_id != subject.venue_id` is the view's own-venue branch: an
   # entry a venue itself attested is always visible to the people who work
   # there, because that is exactly what its roll already discloses. A viewer
-  # holding posts at two venues is bound by both, so what they see is what every
-  # venue they work at would show them.
-  #
-  # **`post` must be active and the residual is on the record.** Visibility
-  # outlives an engagement by thirty days (R13), so for that window an
-  # ex-colleague is a peer holding no post and no venue's rule applies to them.
-  # `HospitalityComs.ProfilesTest` asserts that rather than leaving it to be
-  # discovered. The alternative — every venue they have *ever* worked at —
-  # applies a venue's rule for ever to somebody who left it years ago.
+  # bound at two venues is bound by both, so what they see is what every venue
+  # binding them would show them — the intersection, not the union. Showing what
+  # the more permissive of two would show is how somebody holding two jobs
+  # becomes a channel out of the stricter one.
   @spec concealed_from(Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
   defp concealed_from(person_id, viewer_id, %DateTime{} = instant) do
     from subject in Engagement,
       join: stint in Engagement,
       on: stint.person_id == subject.person_id and stint.venue_id != subject.venue_id,
-      join: post in Engagement,
-      on: post.venue_id == stint.venue_id,
       where: subject.person_id == ^person_id,
-      where: post.person_id == ^viewer_id,
-      where: post.starts_at <= ^instant,
-      where: post.ends_at > ^instant,
+      where:
+        stint.venue_id in subquery(venues_worked_at(viewer_id, instant)) or
+          stint.venue_id in subquery(PeerRecords.visible_venue_ids(viewer_id, person_id, instant)),
       where: stint.starts_at < stint.ends_at,
       where: subject.starts_at < subject.ends_at,
       where: subject.starts_at < stint.ends_at,
       where: stint.starts_at < subject.ends_at,
       select: subject.id
+  end
+
+  # The venues the viewer is inside at `instant`: they hold an engagement there
+  # whose term contains it, which is `EngagementRecords.active_at/2` and not a
+  # second spelling of activeness.
+  #
+  # This is the half the employer view has, and it is the half that keeps the
+  # two answers equal wherever an employer session exists at all. Holding one
+  # takes a grant-holding engagement active at the instant, and the view shows a
+  # worker only while *their* engagement there is active too — so a venue whose
+  # employer door is open to this worker is always a venue the viewer works at,
+  # and the peer read subtracts everything the employer read subtracts.
+  @spec venues_worked_at(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  defp venues_worked_at(viewer_id, instant) do
+    from post in EngagementRecords.active_at(Engagement, instant),
+      where: post.person_id == ^viewer_id,
+      select: post.venue_id
   end
 
   ## Declared entries

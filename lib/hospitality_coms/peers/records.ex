@@ -185,6 +185,32 @@ defmodule HospitalityComs.Peers.Records do
       where: peer.person_id == ^other_person_id
   end
 
+  @doc """
+  The venues at which two named people are visible to each other at `instant`,
+  as ids.
+
+  `visible_between/3` projected onto the venue the pair share, and the caller is
+  outside this context: `HospitalityComs.Profiles.Records` binds a peer to the
+  concurrency rule of every venue that is *why* they can see this worker at all,
+  and that is this relation rather than a second spelling of it.
+
+  It is here rather than at the call site because the visibility interval —
+  R13's thirty-day tail included — is written once, in `co_engagements/1`. A
+  profile query that restated the overlap would be a third definition of who can
+  see whom, beside this one and the employer view's, and the two that already
+  exist are as many as the rule can survive.
+
+  `distinct`, because the answer is a set of venues: a pair with two overlapping
+  stints at one place are co-rostered there once.
+  """
+  @spec visible_venue_ids(Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  def visible_venue_ids(person_id, other_person_id, %DateTime{} = instant)
+      when is_binary(person_id) and is_binary(other_person_id) do
+    from [own: own] in visible_between(person_id, other_person_id, instant),
+      distinct: true,
+      select: own.venue_id
+  end
+
   ## Requests
 
   @doc """

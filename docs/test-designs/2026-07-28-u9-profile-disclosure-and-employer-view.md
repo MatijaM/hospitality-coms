@@ -540,6 +540,53 @@ left as written so the difference between the design and the correction stays vi
     asserts it three ways against `GrantProfileZone.granted_views/0` and `Zones.employer_views/0`,
     since the names are literals in three modules.
 
+28. **The residual revision 14 left is closed, and the test that named it now asserts the
+    opposite.** Peer visibility runs for thirty days past the end of the engagement that created it
+    (R13). Revision 14 bound a viewer to venue V while they held an engagement there *active at the
+    asking instant*, so during that tail the viewer held no post anywhere, no venue's rule applied,
+    and the open default came back — a manager whose own term ended yesterday got thirty days of
+    exactly the access revision 14 removed. It was disclosed rather than hidden, which is why it was
+    closeable as a decision instead of found again as a defect.
+
+    A venue now binds the viewer two ways: they work there at the instant, **or** the venue is what
+    makes the two of them visible to each other at the instant. The second is
+    `Peers.Records.visible_venue_ids/3` — `co_engagements/1` projected onto the venue, added there
+    rather than restated here so the visibility interval keeps one spelling beside the employer
+    view's. The first is now `EngagementRecords.active_at/2` rather than two inline comparisons, and
+    the viewer's post stopped being a join: it was only ever an existence check, and a join spells
+    that as a row multiplier.
+
+    **A pure replacement was preferred and is wrong, measured.** Binding on co-rostering *alone*
+    fails two ways. It drops the case where the viewer works at V and the subject worked there
+    before they arrived — revision 14's "applies the rule of every venue the colleague works at, not
+    only the shared one" is exactly that shape and fails under it — and, worse, the view's
+    `NOT EXISTS` ranges over **every** stint the person ever held at V, so a viewer bound only by
+    co-rostering is handed a returning worker's older concurrency the employer view withholds. The
+    two halves are a union because neither contains the other; deleting either kills a test.
+
+    **One test changed what it asserts, and the change is disclosed rather than absorbed.** Revision
+    14's "stops applying once the colleague's own engagement has ended, which is on the record"
+    asserted both venues came back at day 40. It is now "keeps binding the departing manager for as
+    long as their venue makes them visible" and asserts one — with
+    `Engagements.fetch_grant_holding_engagement/2` answering `{:error, :no_grant}` beside it, so the
+    claim is that a viewer holding no employer session anywhere is still bound.
+
+    **What a connected ex-colleague sees after the tail is a decision, and it has its own body.** The
+    binding lapses with visibility while `fetch_peer_profile/2`'s gate is visible **or** connected,
+    so a pair who connected while co-rostered still reach each other's records with no venue's rule
+    applied. Left open on purpose: at that point no venue is *why* the viewer can see this worker,
+    the connection is, and it exists only because the worker accepted it. The alternative — "ever
+    co-rostered at V" — never lapses. Both remedies are asserted in the same body, because a
+    residual with an untested remedy is a residual with none.
+
+    Five mutations, each restored, counted over `profiles_test.exs`'s 73: dropping the co-rostering
+    disjunct kills the departing-manager body alone (1); dropping the activeness disjunct kills the
+    every-venue body alone (1); making the co-rostering binding permanent kills the
+    connected-ex-colleague body alone (1); dropping activeness entirely — "a venue binds you for ever
+    if you ever worked there", the alternative revision 14 rejected in prose — kills the same body
+    alone (1), which is the first time that alternative has been refuted by a test rather than by an
+    argument; dropping the viewer's own person filter kills four.
+
 ## Quality scores (self-assessed)
 
 - Coverage of stated scenarios: all 10 from the issue, plus the issue's stated verification,
