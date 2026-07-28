@@ -21,6 +21,7 @@ defmodule HospitalityComsWeb.SessionControllerTest do
   alias HospitalityComs.Mailer
   alias HospitalityComs.Repo
   alias HospitalityComs.UnreachableMailerAdapter
+  alias HospitalityComsWeb.Router
 
   @now ~U[2026-03-01 12:00:00.000000Z]
   @invalid_link "the link is invalid or it has expired"
@@ -37,6 +38,51 @@ defmodule HospitalityComsWeb.SessionControllerTest do
     [_before, rest] = String.split(delivered.text_body, base, parts: 2)
 
     rest |> String.split("\n", parts: 2) |> hd() |> String.trim()
+  end
+
+  describe "where a magic link points" do
+    # The link is redeemed by the React client, on its own origin. This
+    # application must serve no page at that path — which is exactly what made
+    # the wrong host survive four units: pointed at Phoenix, the link 404s, and
+    # a 404 reads as a broken link rather than as a misconfigured one.
+    #
+    # Asserting the *path* is unrouted rather than the *host* is a literal is
+    # what makes this survive a deployment: the host is a deploy-time value and
+    # `MAGIC_LINK_BASE_URL` overrides it in production, while "this endpoint
+    # cannot answer it" holds wherever the client is served from.
+    test "at a path this application does not route" do
+      %URI{path: path} =
+        :hospitality_coms |> Application.fetch_env!(:magic_link_base_url) |> URI.parse()
+
+      assert :error =
+               Phoenix.Router.route_info(Router, "GET", path <> "any-token", "localhost")
+    end
+
+    test "and the check would notice a path this application does route" do
+      assert %{route: _} = Phoenix.Router.route_info(Router, "GET", "/api/me", "localhost")
+    end
+
+    # The test above does not catch the wrong *host*, which is the way this
+    # actually broke: `/log-in/:token` is unrouted here whether the link says
+    # 4000 or 5173, so a link pointing at the API passed it.
+    #
+    # What must agree is this value and the client dev server's port, and until
+    # now nothing linked them but a comment — the shape issue #42 catalogues.
+    # Reading the port out of the client's own config is what makes the
+    # agreement checkable across the two languages; the alternative is that the
+    # coupling stays prose and drifts again the next time either side moves.
+    test "at the port the client dev server actually listens on" do
+      vite = File.read!(Path.join([__DIR__, "..", "..", "..", "client", "vite.config.ts"]))
+
+      # The control: a regex that matched nothing would make the comparison
+      # nil == nil and the test would pass having checked nothing.
+      assert [_, client_port] = Regex.run(~r/^\s*port:\s*(\d+),/m, vite)
+
+      %URI{port: link_port} =
+        :hospitality_coms |> Application.fetch_env!(:magic_link_base_url) |> URI.parse()
+
+      assert link_port == String.to_integer(client_port)
+    end
   end
 
   describe "POST /api/log-in" do
