@@ -23,8 +23,16 @@ config :hospitality_coms, :scopes,
   ]
 
 # Where a magic link points. The application serves no page that redeems one —
-# the React client in U12 does — so this is configuration rather than a route.
-config :hospitality_coms, :magic_link_base_url, "http://localhost:4000/log-in/"
+# the React client does — so this is configuration rather than a route, and the
+# host is **the client's origin, never this endpoint's**.
+#
+# 5173 is the client's Vite dev server (`client/vite.config.ts`), which proxies
+# `/api` and `/socket` back to Phoenix on 4000. Pointing this at 4000 sends the
+# worker to the API, which routes `/api/log-in/token` and nothing at
+# `/log-in/:token` — so the link 404s and the only way in is to retype the host.
+# It read as the obvious default for four units, because the port the server
+# announces at boot is the one nothing about this value refers to.
+config :hospitality_coms, :magic_link_base_url, "http://localhost:5173/log-in/"
 
 config :hospitality_coms,
   # HospitalityComs.EmployerRepo addresses the same database and is
