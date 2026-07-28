@@ -8,22 +8,29 @@ defmodule HospitalityComsWeb.PersonSocket do
   `HospitalityComsWeb.EmployerSocket` is a separate module with a separate
   routing table, and the separation is the point. An employer session attempting
   to reach a peer conversation is refused by Phoenix's own dispatch, because
-  `EmployerSocket.__channel__("peer")` is `nil` — before any `join/3` runs,
-  before any scope is built, before any query is issued. One socket module with
-  an authorization check inside `join/3` would put that refusal in a function
-  body somebody has to remember to write; two modules put it in the routing
-  table, where forgetting it means the feature does not exist rather than that
-  the check is missing.
+  `EmployerSocket.__channel__("peer:" <> person_id)` is `nil` — before any
+  `join/3` runs, before any scope is built, before any query is issued. One
+  socket module with an authorization check inside `join/3` would put that
+  refusal in a function body somebody has to remember to write; two modules put
+  it in the routing table, where forgetting it means the feature does not exist
+  rather than that the check is missing.
 
   ## One channel for every peer conversation (KTD10)
 
-  `"peer"` is an exact topic, not a pattern, and it carries every one of this
-  person's conversations. `max_channels_per_transport` defaults to 100 in
-  Phoenix 1.8.9, and a worker holding engagements at three venues, with a venue
-  room and several shift rooms at each, is already using a meaningful fraction
-  of that before a single conversation is opened. Multiplexing also means there
-  is no per-conversation topic to leak into an employer socket's routing table
-  by a later copy-paste.
+  `"peer:*"` carries every one of one person's conversations on one topic.
+  `max_channels_per_transport` defaults to 100 in Phoenix 1.8.9, and a worker
+  holding engagements at three venues, with a venue room and several shift rooms
+  at each, is already using a meaningful fraction of that before a single
+  conversation is opened. Multiplexing also means there is no per-conversation
+  topic to leak into an employer socket's routing table by a later copy-paste.
+
+  **The suffix is the person, not the conversation**, and it is a pattern rather
+  than the exact string `"peer"` for one reason: `Phoenix.Channel.Server`
+  subscribes every joined channel to its own topic, so an exact topic would put
+  every person's peer channel in the cluster into one group. It also makes the
+  channel's topic the same string `HospitalityComs.Peers` already publishes on.
+  `HospitalityComsWeb.PeerChannel` matches the suffix against the joining
+  session's own person and refuses anything else.
 
   ## The credential is a header, and the id is a session (KTD7)
 
@@ -48,7 +55,7 @@ defmodule HospitalityComsWeb.PersonSocket do
 
   channel "venue_room:*", HospitalityComsWeb.VenueRoomChannel
   channel "shift_room:*", HospitalityComsWeb.ShiftRoomChannel
-  channel "peer", HospitalityComsWeb.PeerChannel
+  channel "peer:*", HospitalityComsWeb.PeerChannel
 
   @doc """
   Authenticates the session token the transport carried.

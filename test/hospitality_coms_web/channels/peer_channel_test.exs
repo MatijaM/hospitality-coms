@@ -37,13 +37,14 @@ defmodule HospitalityComsWeb.PeerChannelTest do
       person = person_fixture(@now)
       socket = person_socket(person)
 
-      assert {:ok, reply, _channel} = subscribe_and_join(socket, "peer", %{})
+      assert {:ok, reply, channel} = subscribe_and_join(socket, peer_topic(person), %{})
       assert reply == %{person_id: person.id}
+      assert channel.topic == Peers.topic(person.id)
     end
 
     test "answers an event it does not handle rather than crashing on it" do
       person = person_fixture(@now)
-      {:ok, _reply, channel} = subscribe_and_join(person_socket(person), "peer", %{})
+      {:ok, _reply, channel} = subscribe_and_join(person_socket(person), peer_topic(person), %{})
 
       ref = push(channel, "open_conversation", %{"with" => "somebody"})
       assert_reply ref, :error, refusal
@@ -58,7 +59,7 @@ defmodule HospitalityComsWeb.PeerChannelTest do
       # them at once. `Phoenix.Channel` only warns-and-ignores for a channel
       # that exports no `handle_info/2` at all, and this one exports five.
       person = person_fixture(@now)
-      {:ok, _reply, channel} = subscribe_and_join(person_socket(person), "peer", %{})
+      {:ok, _reply, channel} = subscribe_and_join(person_socket(person), peer_topic(person), %{})
 
       send(channel.channel_pid, {:something_else, %{}})
 
@@ -120,11 +121,68 @@ defmodule HospitalityComsWeb.PeerChannelTest do
 
       assert first_id == one.id
       assert second_id == two.id
-      assert mine.topic == "peer"
+      assert mine.topic == Peers.topic(first.person.id)
 
       ref = push(mine, "list_conversations", %{})
       assert_reply ref, :ok, %{conversations: conversations}
       assert MapSet.new(conversations, & &1.connection_id) == MapSet.new([one.id, two.id])
+    end
+  end
+
+  describe "the wire shapes this channel is a contract for" do
+    test "name a message the same way in a reply, a history entry, and a push" do
+      # U12's client is written against these key names and nothing pinned
+      # them. One entity had two: the live push said `message_id` and the reply
+      # and the history said `id`, so a client keying on `<entity>_id` — which
+      # is what every other shape here does — read one of the three and not the
+      # other two.
+      %{first: first, second: second} = PeersFixtures.co_rostered(@now)
+      connection = PeersFixtures.connection_fixture(first, second)
+
+      theirs = joined(second)
+
+      ref = push(theirs, "send", %{"connection_id" => connection.id, "body" => "hello"})
+      assert_reply ref, :ok, sent
+
+      assert Map.keys(sent) |> Enum.sort() ==
+               ~w(author_id body connection_id message_id sent_at)a
+
+      ref = push(theirs, "history", %{"connection_id" => connection.id})
+      assert_reply ref, :ok, %{messages: [entry]}
+      assert Map.keys(entry) |> Enum.sort() == Map.keys(sent) |> Enum.sort()
+
+      assert_push "peer_message", notice
+      assert notice.message_id == sent.message_id
+
+      # And exactly one push. The channel's topic *is* the topic
+      # `HospitalityComs.Peers` announces on, so a second explicit subscription
+      # would deliver every notice twice.
+      refute_push "peer_message", _duplicate
+    end
+
+    test "carry the timestamp of the state a request reports" do
+      # `state` is the claim and these are when it became true. A client
+      # rendering "declined" had nothing to render it *as of*.
+      %{first: first, second: second} = PeersFixtures.co_rostered(@now)
+      request = PeersFixtures.request_fixture(first, second)
+
+      theirs = joined(second)
+
+      ref = push(theirs, "list_requests", %{})
+      assert_reply ref, :ok, %{incoming: [pending]}
+
+      assert Map.keys(pending) |> Enum.sort() ==
+               ~w(accepted_at addressee_id declined_at request_id requested_at requester_id state)a
+
+      assert pending.declined_at == nil
+      assert pending.accepted_at == nil
+
+      ref = push(theirs, "decline", %{"request_id" => request.id})
+      assert_reply ref, :ok, declined
+
+      assert declined.state == :declined
+      assert declined.declined_at == DateTime.to_iso8601(DateTime.truncate(@now, :second))
+      assert declined.accepted_at == nil
     end
   end
 
@@ -311,9 +369,13 @@ defmodule HospitalityComsWeb.PeerChannelTest do
   end
 
   defp joined(scope) do
-    {:ok, _reply, channel} = subscribe_and_join(person_socket(scope.person), "peer", %{})
+    {:ok, _reply, channel} =
+      subscribe_and_join(person_socket(scope.person), peer_topic(scope.person), %{})
+
     channel
   end
+
+  defp peer_topic(person), do: Peers.topic(person.id)
 
   defp person_socket(person) do
     {:ok, socket} = connect(PersonSocket, %{}, auth(session_token(person, @now)))

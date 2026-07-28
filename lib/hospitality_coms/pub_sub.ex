@@ -8,8 +8,16 @@ defmodule HospitalityComs.PubSub do
   joined channel to its own topic, from inside the framework, without passing
   through `subscribe/2` — which is exactly how a room channel comes to receive
   the messages `broadcast!/3` sends. What this module governs is the
-  subscriptions the *application* makes on purpose: the peer topic, the
-  employer topic, and an engagement's revocation.
+  subscriptions the *application* makes on purpose: the employer topic, and an
+  engagement's revocation.
+
+  The peer topic is the case where the two coincide.
+  `HospitalityComsWeb.PeerChannel`'s topic **is** `topic({:peer, person_id})`,
+  so Phoenix's own subscription is the one that delivers a peer announcement and
+  calling `subscribe/2` there as well would deliver each notice twice. The
+  `{:peer, _}` clause below stays because the topic is public — `HospitalityComs
+  .Peers.topic/1` hands the string out — and any process that is not that
+  channel still has to come through a door that pins the id to the scope.
 
   ## Why subscription needs a boundary of its own
 

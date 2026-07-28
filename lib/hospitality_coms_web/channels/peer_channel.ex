@@ -4,12 +4,12 @@ defmodule HospitalityComsWeb.PeerChannel do
 
   ## One channel, not one per conversation
 
-  `"peer"` is an exact topic and carries the whole peer surface for this person:
-  who they can see, what they have been asked, what they have asked, every
-  conversation, and every message in every one of them. **Every event names its
-  conversation in the payload and never in the topic**, which is what makes that
-  possible and what stops a per-conversation topic name existing for a later
-  unit to copy into an employer socket's routing table by accident.
+  `"peer:<person_id>"` carries the whole peer surface for one person: who they
+  can see, what they have been asked, what they have asked, every conversation,
+  and every message in every one of them. **Every event names its conversation
+  in the payload and never in the topic**, which is what makes that possible and
+  what stops a per-conversation topic name existing for a later unit to copy
+  into an employer socket's routing table by accident.
 
   `max_channels_per_transport` is at Phoenix's default of 100, and a worker with
   engagements at three venues is already holding a venue room and several shift
@@ -17,22 +17,36 @@ defmodule HospitalityComsWeb.PeerChannel do
   writes out where the real bound is and who can exceed it; what this file
   contributes is that conversations are not part of the count.
 
-  ## The topic is the same string for everybody, and that matters
+  ## The suffix is the person, and that is what makes a stray broadcast harmless
 
-  `"peer"` has no suffix, so **every person's peer channel is subscribed to the
-  same Phoenix topic** — `Phoenix.Channel.Server` subscribes each joined channel
-  to its own topic, and here that is one shared group. A `broadcast/3` or
-  `broadcast!/3` from this channel would therefore deliver to every peer channel
-  in the cluster, which is a disclosure of everybody's conversations to
-  everybody.
+  `Phoenix.Channel.Server` subscribes every joined channel to its own topic.
+  The topic used to be the bare string `"peer"`, so every person's peer channel
+  in the cluster sat in **one shared group** and a `broadcast/3` from this file
+  would have delivered every conversation to everybody. Nothing in the file did
+  it; nothing structural stopped the next person adding one, and a comment
+  saying "do not" is not a guarantee.
 
-  So there is not one in this file and there must never be one. All fan-out goes
-  through `HospitalityComs.Peers`, which publishes on
-  `HospitalityComs.PubSub.topic({:peer, person_id})` — a topic per person — and
-  `join/3` subscribes this channel to its own and to nothing else, with
-  `HospitalityComs.PubSub.subscribe/2` pinning the id to the scope in its
-  function head so a channel cannot subscribe to anybody else's even if a caller
-  tried.
+  The suffix removes the group. `join/3` matches it against the joining scope's
+  own person id — the repeated variable in `admitted/3`'s head is the check —
+  so a channel's topic is always its own person's, and the string it resolves to
+  is exactly `HospitalityComs.PubSub.topic({:peer, person_id})`, which is where
+  `HospitalityComs.Peers` publishes. A `broadcast/3` from here would reach that
+  one person's own channels and nobody else's.
+
+  That coincidence is also why `join/3` subscribes to nothing. Phoenix has
+  already subscribed the channel to the topic the announcements arrive on, and a
+  second `HospitalityComs.PubSub.subscribe/2` for the same string would deliver
+  every notice twice.
+
+  ## One process carries every one of this person's conversations
+
+  The cost of multiplexing, stated rather than discovered: an unhandled
+  exception in any `handle_in/3` drops **all** of this person's conversations at
+  once, not the one the event named. A room channel crashing takes down one
+  room. No current path raises — every event answers, the terminal clause is
+  tested, and `handle_info/2` has a catch-all — and the mitigation is that
+  Phoenix's client rejoins, which re-derives everything from the database. It is
+  the trade KTD10 makes, not a defect waiting to be fixed.
 
   ## The instant is per event (KTD5)
 
@@ -41,11 +55,12 @@ defmodule HospitalityComsWeb.PeerChannel do
   morning has this afternoon's request refused against this afternoon's
   visibility, on the same process, with no rejoin and no job.
 
-  Unlike the room channels, `join/3` authorises nothing beyond the session:
-  there is no membership behind `"peer"` to check. **Every event authorises
-  itself**, in the context, against the caller's own person id — which is the
-  only shape that could work here, because one channel carries conversations
-  with different people that were opened and closed at different times.
+  Unlike the room channels, `join/3` authorises nothing beyond the session and
+  the topic naming the session's own person: there is no membership behind a
+  peer topic to check. **Every event authorises itself**, in the context,
+  against the caller's own person id — which is the only shape that could work
+  here, because one channel carries conversations with different people that
+  were opened and closed at different times.
 
   ## Ids in payloads are user input
 
@@ -75,13 +90,16 @@ defmodule HospitalityComsWeb.PeerChannel do
   alias HospitalityComs.Peers.Conversation
   alias HospitalityComs.Peers.PeerMessage
   alias HospitalityComs.Peers.Visibility
-  alias HospitalityComs.PubSub
   alias HospitalityComsWeb.ChannelAuth
   alias HospitalityComsWeb.ErrorEnvelope
   alias HospitalityComsWeb.RoomChannel
   alias Phoenix.Socket
 
-  @refusal "this session is not live"
+  # One sentence for a session that is no longer live, a topic naming somebody
+  # else, and a topic whose suffix is not a uuid at all. Saying which would
+  # answer whether a person id names anybody, which is AE1's rule applied where
+  # the id comes from outside.
+  @refusal "this session cannot join that peer surface"
   @unknown "no such peer, request, or conversation"
 
   @typedoc """
@@ -94,13 +112,19 @@ defmodule HospitalityComsWeb.PeerChannel do
           {:ok, map()} | {:error, ErrorEnvelope.t() | ErrorEnvelope.with_fields()}
 
   @doc """
-  Joins this person's peer surface, if the session is still live.
+  Joins one person's peer surface, if the session is still live and the surface
+  is that session's own.
 
   The session is derived again here rather than taken from the socket, which is
   what stops a socket outliving the token it connected with — see
   `HospitalityComsWeb.ChannelAuth`. This topic needs it as much as the room
-  topics do and has less to fall back on: there is no membership behind `"peer"`
-  to refuse a stale session on its way past.
+  topics do and has less to fall back on: there is no membership behind a peer
+  topic to refuse a stale session on its way past.
+
+  The suffix is cast before it is compared, for `ChannelAuth.topic_id/1`'s
+  reason and one more: `Ecto.UUID.cast/1` downcases, so a client that
+  capitalised the id in the topic joins its own surface rather than being told
+  it belongs to somebody else.
 
   An anonymous scope is refused by function clause on top of that.
   `PersonSocket.connect/3` cannot produce one, so the clause is the belt to that
@@ -109,19 +133,34 @@ defmodule HospitalityComsWeb.PeerChannel do
   @impl true
   @spec join(String.t(), map(), Socket.t()) ::
           {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
-  def join("peer", _payload, socket) do
-    socket |> ChannelAuth.join_scope() |> admit(socket)
+  def join("peer:" <> suffix, _payload, socket) do
+    suffix |> ChannelAuth.topic_id() |> admit(socket)
   end
 
-  @spec admit({:ok, PersonScope.t()} | {:error, :no_session}, Socket.t()) ::
+  @spec admit({:ok, Ecto.UUID.t()} | :error, Socket.t()) ::
           {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
-  defp admit({:ok, %PersonScope{person: %Person{id: person_id}} = scope}, socket) do
-    :ok = PubSub.subscribe(scope, {:peer, person_id})
+  defp admit({:ok, person_id}, socket) do
+    socket |> ChannelAuth.join_scope() |> admitted(person_id, socket)
+  end
 
+  defp admit(:error, _socket), do: {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
+
+  # The repeated variable is the check: the topic's person and the session's
+  # person are one binding, so a topic naming anybody else has no clause. That
+  # is the shape `HospitalityComs.PubSub.subscribe/2` uses for the same
+  # question, moved up to the layer that decides which group Phoenix subscribes
+  # this channel to.
+  @spec admitted({:ok, PersonScope.t()} | {:error, :no_session}, Ecto.UUID.t(), Socket.t()) ::
+          {:ok, map(), Socket.t()} | {:error, ErrorEnvelope.t()}
+  defp admitted({:ok, %PersonScope{person: %Person{id: person_id}}}, person_id, socket) do
     {:ok, %{person_id: person_id}, socket}
   end
 
-  defp admit({:error, :no_session}, _socket) do
+  defp admitted({:ok, %PersonScope{}}, _person_id, _socket) do
+    {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
+  end
+
+  defp admitted({:error, :no_session}, _person_id, _socket) do
     {:error, ErrorEnvelope.new(:unauthorized, @refusal)}
   end
 
@@ -376,6 +415,10 @@ defmodule HospitalityComsWeb.PeerChannel do
     connection |> Conversation.of_connection(id) |> rendered_conversation()
   end
 
+  # `accepted_at` and `declined_at` are here because `state` is the claim and
+  # these are when it became true. A client that renders "declined" has nothing
+  # to render it *as of* without them, and every other rendered shape in this
+  # file carries the timestamp of the state it reports.
   @spec rendered_request(ConnectionRequest.t()) :: map()
   defp rendered_request(%ConnectionRequest{} = request) do
     %{
@@ -383,14 +426,20 @@ defmodule HospitalityComsWeb.PeerChannel do
       requester_id: request.requester_id,
       addressee_id: request.addressee_id,
       state: request.state,
-      requested_at: DateTime.to_iso8601(request.requested_at)
+      requested_at: DateTime.to_iso8601(request.requested_at),
+      accepted_at: iso8601(request.accepted_at),
+      declined_at: iso8601(request.declined_at)
     }
   end
 
+  # `message_id`, not `id`. Every other rendered entity here names itself
+  # `<entity>_id` — `request_id`, `connection_id`, `person_id` — and the live
+  # `peer_message` push has always said `message_id`, so a bare `id` on the
+  # history and send replies made one entity two key names on one channel.
   @spec rendered_message(PeerMessage.t()) :: map()
   defp rendered_message(%PeerMessage{} = message) do
     %{
-      id: message.id,
+      message_id: message.id,
       connection_id: message.connection_id,
       author_id: message.author_id,
       body: message.body,
