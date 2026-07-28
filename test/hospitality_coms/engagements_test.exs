@@ -1004,6 +1004,102 @@ defmodule HospitalityComs.EngagementsTest do
     end
   end
 
+  describe "would_orphan_venue?/2" do
+    # The question `end_engagement/2` decides for itself, exported so that
+    # `HospitalityComs.Demo.end_all_engagements/1` can decide before it starts.
+    # It is new public production code and one of its two answering clauses was
+    # reached by nothing: inverting `orphaning_answer({[], _}, _)` to `{:ok,
+    # true}` left all 980 tests passing, while the sibling killed six. Every
+    # case that lands on the empty clause is enumerated below, because the
+    # docstring enumerates them as a *disclosure* property — an id that names
+    # nothing must be indistinguishable from an engagement at another venue.
+
+    test "answers true for the venue's last grant-holding engagement" do
+      {employer, %{grant: grant}} = scoped_venue_fixture(@now)
+      manager = engagement_fixture(employer, person_scope_fixture(@now), %{grant_id: grant.id})
+
+      assert Engagements.would_orphan_venue?(employer, manager.id)
+    end
+
+    test "and false for an ordinary worker beside them, which is the control" do
+      {employer, %{grant: grant}} = scoped_venue_fixture(@now)
+      _manager = engagement_fixture(employer, person_scope_fixture(@now), %{grant_id: grant.id})
+      worker = engagement_fixture(employer, person_scope_fixture(@now))
+
+      refute Engagements.would_orphan_venue?(employer, worker.id)
+    end
+
+    test "answers false for an id naming nothing" do
+      {employer, %{grant: grant}} = scoped_venue_fixture(@now)
+      _manager = engagement_fixture(employer, person_scope_fixture(@now), %{grant_id: grant.id})
+
+      refute Engagements.would_orphan_venue?(employer, Ecto.UUID.generate())
+    end
+
+    test "answers false for another venue's engagement" do
+      {mine, %{grant: my_grant}} = scoped_venue_fixture(@now)
+      {theirs, %{grant: their_grant}} = scoped_venue_fixture(@now)
+
+      _my_manager = engagement_fixture(mine, person_scope_fixture(@now), %{grant_id: my_grant.id})
+
+      their_manager =
+        engagement_fixture(theirs, person_scope_fixture(@now), %{grant_id: their_grant.id})
+
+      refute Engagements.would_orphan_venue?(mine, their_manager.id)
+      assert Engagements.would_orphan_venue?(theirs, their_manager.id)
+    end
+
+    test "answers false for a term that has already closed" do
+      {employer, %{venue: venue, grant: founding}} = scoped_venue_fixture(@now)
+
+      {:ok, issued} = Venues.issue_grant(employer)
+
+      departing = engagement_fixture(employer, person_scope_fixture(@now), %{grant_id: issued.id})
+
+      remaining =
+        engagement_fixture(employer, person_scope_fixture(@now), %{grant_id: founding.id})
+
+      {:ok, _ended} = Engagements.end_engagement(employer, departing.id)
+
+      later = employer_scope_at(venue, founding, DateTime.add(@now, 1, :day))
+
+      refute Engagements.would_orphan_venue?(later, departing.id)
+      assert Engagements.would_orphan_venue?(later, remaining.id)
+    end
+
+    test "answers false to a scope whose own grant is no longer live" do
+      # The one employer-scoped entry point in this module that skipped
+      # `Venues.fetch_acting_grant/1`. `end_engagement/2` and
+      # `renew_engagement/3` both open with it, so a session holding a revoked
+      # grant got a real answer here where every sibling refuses. The pair is
+      # the control: the same question, the same engagement, one live scope and
+      # one dead one.
+      {employer, %{venue: venue, grant: founding}} = scoped_venue_fixture(@now)
+      manager = engagement_fixture(employer, person_scope_fixture(@now), %{grant_id: founding.id})
+
+      {:ok, issued} = Venues.issue_grant(employer)
+      {:ok, _closed} = Venues.revoke_grant(employer, issued.id)
+
+      revoked = employer_scope_at(venue, issued, @now)
+
+      assert Engagements.would_orphan_venue?(employer, manager.id)
+      refute Engagements.would_orphan_venue?(revoked, manager.id)
+    end
+
+    test "refuses a scope carrying no grant at all, by function clause" do
+      # Handed through a map so the type checker cannot see the refusal at the
+      # call site: `peers_test.exs`'s idiom, and its reason. A scope built at run
+      # time from a session carries no compile-time proof, and it is the
+      # run-time refusal the boundary rests on.
+      {_employer, %{venue: venue}} = scoped_venue_fixture(@now)
+      grantless = untyped(EmployerScope.for_employer(venue.id, @now))
+
+      assert_raise FunctionClauseError, fn ->
+        Engagements.would_orphan_venue?(grantless, Ecto.UUID.generate())
+      end
+    end
+  end
+
   describe "reading the bridge" do
     test "is per venue: another venue's engagements are absent" do
       {first_employer, _first} = scoped_venue_fixture(@now)
@@ -1460,6 +1556,10 @@ defmodule HospitalityComs.EngagementsTest do
       kind
     )
   end
+
+  # Named `untyped/1` rather than `dynamic/1` because this file imports
+  # `Ecto.Query`, which exports a macro of that name. `demo_test.exs`'s idiom.
+  defp untyped(scope), do: Map.fetch!(%{scope: scope}, :scope)
 
   defp employer_scope_at(venue, grant, instant) do
     EmployerScope.for_grant(venue.id, grant.id, instant)

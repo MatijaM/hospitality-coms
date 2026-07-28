@@ -56,10 +56,11 @@ case HospitalityComs.Demo.seed() do
     raise """
     This database holds part of a demo manifest.
 
-    Some of the six anchors — two venues, four people — are present and some are
-    not, which is what an interrupted seed run leaves behind. Completing it step
-    by step would silently skip whatever the interrupted run had already
-    written, so this refuses instead.
+    Some of the nine anchors — two venues, four people, and the three curated
+    rows the profile surface is built on — are present and some are not, which
+    is what an interrupted seed run leaves behind. Completing it step by step
+    would silently skip whatever the interrupted run had already written, so
+    this refuses instead.
 
         mix ecto.reset
     """

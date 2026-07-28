@@ -458,3 +458,100 @@ Recorded rather than applied silently, per the convention this series establishe
   a compile-time struct expansion or an alias in a typespec, and CI never built `:prod` at all.
 - **`test/support/test_database_guard.ex`'s moduledoc** now says the premise is enforced rather than
   observed, since `priv/repo/seeds.exs` has something to write for the first time.
+
+### Recorded during the post-review fix batch
+
+Three reviewers on isolated clusters; everything below labelled *measured* was reproduced against a
+real database before it was fixed, and every behavioural test named was proved load-bearing by a
+mutation that killed it and nothing else.
+
+- **The manifest raised the first time anybody used it, and the `:present` path was why (measured).**
+  `connection_id` was resolved as "the only `peer_connections` row Tomo is a party to" and
+  `pending_request_id` as `List.first/1` of his inbox — both relations the transport exists to
+  change. Accepting the seeded Luka→Tomo approach produced `Ecto.MultipleResultsError`, declining it
+  produced `MatchError`, both escaping a function spec'd `{:ok, manifest()} | {:error,
+  :partial_manifest}` as an unhandled 500, and nothing put the row back. Both are keyed on the
+  seeded *pair*, oldest first, and the manifest's typedoc now states the constraint on what may be
+  added to it: every id must name a row the demo cannot destroy.
+- **A backwards clock plus the two write controls wedged `run_due_work/0` permanently (measured).**
+  `end_all_engagements/1` closed at `max(starts_at, now)` over "every term that has not closed", so
+  under a clock wound back past a term's opening it collapsed the term to `ends_at == starts_at`
+  rather than ending employment — and the archive deadline `ends_at + 90 days` then landed before
+  messages already sent inside it. `retained_message_copies_deadline_after_sending` refuses that
+  row; Postgres evaluates a CHECK on the candidate *before* `ON CONFLICT` arbitration, so
+  `Lifecycle.backfill_copies/3`'s `on_conflict: :nothing` did not save the already-copied message,
+  and `run_due_work/0`'s unbounded lower edge re-reached the term on every later run whatever the
+  clock said. Only `mix ecto.reset` cleared it.
+
+  **The fix is in `end_all_engagements/1`** — its target set is now
+  `Engagements.list_person_engagements/1`, what the person *holds* at the instant. Not in
+  `Lifecycle`: production cannot reach the state, since `scope.now` is monotonic at the HTTP
+  boundary, and the clamp would have had to go in two places (`backfill_copies/3`'s insert *and*
+  `stamp_undated_copies`'s update), which is a production retention change bought for a demo-only
+  state. Not in the clock handling either: backwards movement is a documented need and refusing it
+  would remove the capability rather than the defect. **Residue on the record:** a clock wound back
+  more than ninety days *inside* a term whose messages lie beyond that window still produces the
+  refusal; nothing in the seeded manifest reaches it.
+- **Decision 5's anchor set stopped six phases short and is now nine (reproduced).** All six original
+  anchors exist by the fourth of `write/1`'s eleven phases, so deleting Tomo's declared entry and
+  re-seeding answered `{:ok, :present}` and wrote nothing. The declared entry, the correction request
+  and the disclosure row are anchors now, one `Repo.exists?` query each rather than a count, so a
+  duplicate row cannot push `found` past `total`. The three ids are on the manifest as well.
+- **The eleventh control that could not control was in the production-absence property itself.**
+  `assert offenders == []` is the canonical vacuous assertion and *both* operands of that sweep are
+  quantified over; measured, `library_modules/0` returning `[]` left 53/53 passing while
+  `dev_support_modules/0` returning `[]` killed one. The guarded half was the *other* test's. Both
+  operands now carry a named module and a length floor.
+- **"Seeds are idempotent" was bounded over four of twenty-three base tables.** Measured on this
+  branch: a second seed writing one `declared_entries` row left 50/50 passing with the old
+  four-schema `census/0` and fails with the new one. This is U10's log-out defect one unit later —
+  an empty table compares zero to zero — so it reuses U10's replacement idiom rather than a third:
+  count from `information_schema`, and assert the tables the manifest fills are non-empty before
+  comparing anything.
+- **`:dev` now sets `testing: :manual`.** Oban's cron stages at the real instant while
+  `RetentionSweeper.perform/1` reads the injected clock, so in the one environment these controls
+  exist for, `advance_clock(day: 31)` and nothing else deleted a month of retained messages within
+  the hour. Row 21's "a clock advance alone deletes nothing" was environment-conditional with
+  nothing recording that; `demo_test.exs` now reads both config files through `Config.Reader`, with
+  the merged cron plugin and non-empty queue list as the control. **This changes `:dev` behaviour**:
+  no queue and no cron tick runs under `mix phx.server`, and `Demo.run_due_work/0` is the only
+  driver — which is what the moduledoc already claimed.
+- **Decision 3's "all-or-nothing" was a claim the return type could not support.** The pre-flight
+  takes no lock and each close is its own transaction, so a refusal from inside the loop left the
+  earlier closes committed while the controller rendered "Nothing was ended." `end_all_engagements/1`
+  answers `{:error, reason, closed}` and the controller renders `ended` beside the envelope;
+  `end_engagement/2`'s own `:not_found` is translated to `:stale` inside the loop, so the control's
+  `:not_found` means "no such person" and nothing else. The residue-carrying case is asserted for
+  its shape only and is recorded as deliberately unreached, with `:no_grant` and the changeset.
+- **Row 28's HTTP half asserted the wording rather than the property.** Removing `permitted/1`'s
+  pre-flight closes Ana's Harbour engagement, meets `end_engagement/2`'s refusal at the Kolektiv and
+  returns the same 409 with the same sentence — measured, the test passed. It now reads her open
+  engagement count around the call, and the rendered `ended` array shows the residue directly.
+- **`would_orphan_venue?/2` had an answering clause reached by nothing** — inverting
+  `orphaning_answer({[], _}, _)` left 980/980 passing — and it was the only employer-scoped entry
+  point in `Engagements` that skipped `Venues.fetch_acting_grant/1`, so a session holding a revoked
+  grant got a real answer where every sibling refuses. Both closed, with the four cases its docstring
+  enumerates as a *disclosure* property now asserted individually.
+- **`Demo.identified/1` claimed parity with `ChannelAuth.topic_id/1` and omitted its `byte_size ==
+  36` guard.** Not cosmetic: `Ecto.UUID.cast/1` accepts the sixteen raw bytes a UUID dumps to, and a
+  percent-encoded path segment carries them, so there was a working spelling of a person id that no
+  other surface in this application accepts.
+- **`/api/demo/*` now requires the header `x-demo-control` on state-changing actions.**
+  Unauthenticated and same-origin-reachable are different properties, and `unit_pair/1`'s
+  `is_integer(count)` was blocking the clock by accident; that is written down beside it now.
+- **Nine refusal branches were reached by no test.** Five are exercised (a partial manifest over
+  HTTP, and the four malformed clock bodies), each proved by planting a `raise`; the other four are
+  recorded as deliberately unreached in `demo_controller_test.exs`'s moduledoc with the reason.
+- **`.formatter.exs` did not cover `dev_support/`.** CI's `mix format --check-formatted` reads that
+  list, so U11's ~1250 lines plus `clock/offset.ex` and the Credo checks were in a blind spot the
+  check could never fail on — and all four files were unformatted. Fixed and formatted.
+- **One finding is refuted.** The `due_work()` typedoc's justification for two counts was wrong and
+  has been rewritten, but the suggested test ("renew past the advanced instant, then assert `swept >
+  announced`") cannot exist: `list_expired/3` selects `ends_at <= instant` and the worker broadcasts
+  unless `ends_at > instant`, both from one clock, so a renewal takes the term out of the *window*
+  rather than out of the announcement and the two counts are equal by construction. Measured:
+  replacing `expiry == :revoked` with `true` kills nothing because it is an **equivalent mutant**,
+  while replacing it with `expiry == :still_active` kills four. The equality is now asserted, which
+  is what catches a worker that stops agreeing with the window.
+- **One reviewer claim was already corrected in the brief and is left alone**: `demo_routes: true` in
+  `config/prod.exs` does *not* compile clean. The router's comment stands.

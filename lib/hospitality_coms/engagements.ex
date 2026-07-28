@@ -130,6 +130,7 @@ defmodule HospitalityComs.Engagements do
   alias HospitalityComs.Profiles.AttestedEntry
   alias HospitalityComs.Repo
   alias HospitalityComs.Venues
+  alias HospitalityComs.Venues.EmployerGrant
   alias HospitalityComs.Workers.ExpireEngagement
 
   @typedoc """
@@ -835,13 +836,37 @@ defmodule HospitalityComs.Engagements do
   already closed all answer `false` — there is nothing there to orphan a venue —
   so this discloses no more about which engagements exist than
   `end_engagement/2`'s `:not_found` already does.
+
+  **A scope whose own grant is no longer live answers `false` too**, and that is
+  `Venues.fetch_acting_grant/1` doing here what it already does at the top of
+  `end_engagement/2` and `renew_engagement/3`. This was the one employer-scoped
+  entry point in this module that skipped it, so a session holding a revoked
+  grant got a real answer where every sibling refuses. `false` rather than an
+  error tuple because that is the answer every other unanswerable case gets, and
+  because the refusal a caller then meets is `end_engagement/2`'s own.
   """
   @spec would_orphan_venue?(EmployerScope.t(), Ecto.UUID.t()) :: boolean()
   def would_orphan_venue?(%EmployerScope{grant_id: grant_id} = scope, engagement_id)
       when is_binary(grant_id) and is_binary(engagement_id) do
-    {:ok, orphaning} = EmployerRepo.scoped_transaction(scope, &orphaning(&1, engagement_id))
+    {:ok, orphaning} = EmployerRepo.scoped_transaction(scope, &authorized(&1, engagement_id))
     orphaning
   end
+
+  @spec authorized(EmployerScope.t(), Ecto.UUID.t()) :: {:ok, boolean()}
+  defp authorized(scope, engagement_id) do
+    scope |> Venues.fetch_acting_grant() |> orphaning_or_refuse(scope, engagement_id)
+  end
+
+  @spec orphaning_or_refuse(
+          {:ok, EmployerGrant.t()} | {:error, :no_grant},
+          EmployerScope.t(),
+          Ecto.UUID.t()
+        ) :: {:ok, boolean()}
+  defp orphaning_or_refuse({:ok, _grant}, scope, engagement_id) do
+    orphaning(scope, engagement_id)
+  end
+
+  defp orphaning_or_refuse({:error, :no_grant}, _scope, _engagement_id), do: {:ok, false}
 
   @spec orphaning(EmployerScope.t(), Ecto.UUID.t()) :: {:ok, boolean()}
   defp orphaning(scope, engagement_id) do

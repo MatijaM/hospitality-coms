@@ -64,6 +64,24 @@ defmodule HospitalityComs.Demo do
   lower edge and keeps the batch bound. That is a property of a clock that
   jumps, not a disagreement with the sweeper.
 
+  **Two consequences of that edge, written beside the decision rather than
+  discovered later.**
+
+  First, the demo deletes archives the production path provably would not. A
+  term whose announcement was lost more than a day ago is outside production's
+  window for ever, so its retained copies keep a null deadline and are retained
+  indefinitely; here the same term is announced, stamped, and — if the clock has
+  moved past the stamp — swept in the *same* control action. That is the demo
+  showing retention rather than a disagreement about what retention is, but it
+  is a deletion the production sweeper would never have reached.
+
+  Second, `epoch/0` with a batch bound and `desc: ends_at` is exactly the
+  combination `Engagements.list_expired/3`'s own moduledoc calls
+  non-converging: past `EngagementSweeper.batch_size/0` closed terms this
+  announces the same newest batch for ever and never reaches an older one. At
+  manifest scale — six engagements — it cannot arise, and a demo that had
+  outgrown five hundred closed terms would have outgrown `mix ecto.reset` too.
+
   ## The control holds no authority, and borrows one venue's at a time
 
   "Demo controls run under their own scope, not an employer scope, because
@@ -85,11 +103,19 @@ defmodule HospitalityComs.Demo do
   demo control with its own copy of KTD17 would be a second definition of the
   invariant KTD17 exists to hold.
 
-  The refusal is all-or-nothing. Each close is its own transaction, so there is
-  no set to roll back; the control therefore asks
+  The refusal is decided up front. Each close is its own transaction, so there
+  is no set to roll back; the control therefore asks
   `Engagements.would_orphan_venue?/2` about every engagement before it closes
   any. A control that ended four of five and reported a failure would leave the
   demonstration in a state no single action explains.
+
+  **That is a pre-flight and not a lock, so "all-or-nothing" is a property of
+  the ordinary case rather than a guarantee** — `would_orphan_venue?/2` says so
+  itself. If something commits between the answer and the close, the closes
+  already committed stay committed, so every refusal carries them:
+  `{:error, reason, closed}`, and `HospitalityComsWeb.DemoController` renders
+  the list beside the envelope. Reporting `{:error, reason}` alone told an
+  operator "Nothing was ended" about a database where something had been.
 
   ## The seeds build scopes at historical instants; they do not move the clock
 
@@ -114,8 +140,15 @@ defmodule HospitalityComs.Demo do
   ## Idempotence is all-or-nothing, and a half-seeded database says so
 
   The manifest resolves by natural key: four people by email, two venues by
-  name. All six present is `:present` and writes nothing; none present is
-  `:created`; anything in between is `{:error, :partial_manifest}`.
+  name, and the three curated rows the profile surface is built on. All nine
+  present is `:present` and writes nothing; none present is `:created`; anything
+  in between is `{:error, :partial_manifest}`.
+
+  **The last three are there because the first six were not enough.** All six of
+  them exist by the fourth of `write/1`'s eleven phases, so a run interrupted
+  anywhere after that answered `:present` on the next attempt and wrote nothing
+  — the declared entry, the correction request and the disclosure row simply
+  absent, and `priv/repo/seeds.exs` printing "already here". Reproduced.
 
   The third state is the honest one. A find-or-create per step silently
   completes a run that died halfway, and the row it did not write is the one
@@ -151,6 +184,9 @@ defmodule HospitalityComs.Demo do
   alias HospitalityComs.Peers.Connection
   alias HospitalityComs.Peers.ConnectionRequest
   alias HospitalityComs.Profiles
+  alias HospitalityComs.Profiles.CorrectionRequest
+  alias HospitalityComs.Profiles.DeclaredEntry
+  alias HospitalityComs.Profiles.Disclosure
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms
   alias HospitalityComs.Rooms.ShiftRoom
@@ -166,8 +202,8 @@ defmodule HospitalityComs.Demo do
   @venue_suffix " (demo)"
   @person_domain "@demo.invalid"
 
-  # The manifest's anchors, by natural key. `resolve/1` asks for all six and
-  # decides between the three states on how many it found.
+  # The manifest's anchors, by natural key. `anchors/0` asks for all nine and
+  # `seeded/2` decides between the three states on how many it found.
   @venue_names %{harbour: "Harbour Tavern", kolektiv: "Kolektiv Coffee"}
   @person_names %{mira: "mira", ana: "ana", tomo: "tomo", luka: "luka"}
 
@@ -176,6 +212,9 @@ defmodule HospitalityComs.Demo do
   # fourth room added later fails loudly instead of relabelling these three.
   @room_labels [:past_shift, :closed_shift, :live_shift]
 
+  # The one literal `curate/3` and the anchor query would otherwise both spell.
+  @declared_organisation "Pivnica Medvedgrad"
+
   @typedoc """
   Where the seeded world is, by label.
 
@@ -183,6 +222,15 @@ defmodule HospitalityComs.Demo do
   `HospitalityComsWeb.DemoController` and read by tests that fetch what they
   need through the contexts, so carrying loaded rows here would be two
   representations of the same thing and one of them stale.
+
+  **Every id here names a row the demo cannot destroy**, and that is a
+  constraint on what may be added rather than an observation. `connection_id`
+  and `pending_request_id` were once resolved as "the only connection Tomo has"
+  and "the first request in his inbox" — both of which the transport changes the
+  moment anybody answers the seeded approach — so re-reading the manifest raised
+  out of a function whose spec enumerates one error. They are keyed on the
+  seeded *pair* now, oldest first, which accepting, declining, disconnecting and
+  re-requesting all leave alone.
   """
   @type manifest() :: %{
           status: :created | :present,
@@ -193,7 +241,10 @@ defmodule HospitalityComs.Demo do
           shift_types: %{atom() => Ecto.UUID.t()},
           shift_rooms: %{atom() => Ecto.UUID.t()},
           connection_id: Ecto.UUID.t(),
-          pending_request_id: Ecto.UUID.t()
+          pending_request_id: Ecto.UUID.t(),
+          declared_entry_id: Ecto.UUID.t(),
+          correction_request_id: Ecto.UUID.t(),
+          disclosure_id: Ecto.UUID.t()
         }
 
   @typedoc """
@@ -209,11 +260,27 @@ defmodule HospitalityComs.Demo do
   @typedoc """
   What one `run_due_work/0` did.
 
-  `swept` and `announced` are counted apart for the reason
-  `HospitalityComs.Workers.EngagementSweeper` counts `suppressed` and `failed`
-  apart: collapsed into one they read identically and mean opposite things. The
-  difference between them is the terms that turned out to be active after all,
-  which is a renewal having happened rather than anything going wrong.
+  `swept` is what the window found; `announced` is how many of those the real
+  worker judged closed at its own instant and broadcast for.
+
+  **They are equal in every run this control can produce, and the reason is
+  worth writing down rather than leaving as a coincidence.** `run_due_work/0`
+  reads the clock once and `HospitalityComs.Workers.ExpireEngagement.perform/1`
+  reads it again, but both read the *same* clock, and `list_expired/3` selects
+  on `ends_at <= instant` while the worker broadcasts unless `ends_at >
+  instant` — so a term the window found is a term the worker calls closed,
+  whichever of the two instants it uses. An earlier note here claimed the
+  difference was "terms that turned out to be active after all, which is a
+  renewal having happened"; a renewal moves `ends_at` past the instant, which
+  takes the term out of the *window* rather than out of the announcement, so
+  that difference is unreachable. Replacing the worker's `:revoked` test with
+  `true` therefore kills no test because it is an equivalent mutant, not
+  because the counts are unexamined — `demo_test.exs` pins the equality, and a
+  worker that stopped agreeing with the window would fail it.
+
+  Kept as two numbers because they are two measurements: the window's and the
+  worker's. Collapsing them would make a future divergence — a worker given its
+  own instant, a row deleted between the two statements — invisible.
   """
   @type due_work() :: %{
           instant: DateTime.t(),
@@ -225,11 +292,21 @@ defmodule HospitalityComs.Demo do
   @typedoc """
   Why `end_all_engagements/1` closed nothing, or stopped.
 
-  `:not_found` is an id naming nobody. `:last_grant_holder` is R22 and is
-  decided before anything is closed. `:no_grant` is a venue with no live
-  authority at all — an orphan, in `HospitalityComs.Lifecycle`'s sense — which
-  no scope can act for. `:stale` and a changeset are `end_engagement/2`'s own,
-  reachable only if something committed between the pre-flight and the close.
+  `:not_found` is an id naming nobody, and **only** that: an engagement that
+  went away under the loop answers `:stale`, because `end_engagement/2`'s own
+  `:not_found` there means "it moved while it was being ended" and rendering
+  that as "No such person" over HTTP would be a 404 about the wrong entity.
+
+  `:last_grant_holder` is R22 and is decided before anything is closed.
+  `:no_grant` is a venue with no live authority at all — an orphan, in
+  `HospitalityComs.Lifecycle`'s sense — which no scope can act for. Both come
+  from the pre-flight, so both carry an empty `closed` list by construction.
+
+  `:stale` and a changeset are `end_engagement/2`'s own and are reachable only
+  if something committed between the pre-flight and the close — which is exactly
+  the case where engagements *have* already been closed, so every refusal
+  carries the list of what it closed before it stopped. See
+  `end_all_engagements/1`.
   """
   @type closure_failure() ::
           :not_found
@@ -273,7 +350,7 @@ defmodule HospitalityComs.Demo do
   @doc """
   Writes the manifest, or reports that it is already there.
 
-  `:created` wrote it, `:present` found all six anchors and wrote nothing, and
+  `:created` wrote it, `:present` found all nine anchors and wrote nothing, and
   `{:error, :partial_manifest}` found some — a database somebody interrupted,
   which `mix ecto.reset` fixes and this function deliberately will not.
 
@@ -296,19 +373,71 @@ defmodule HospitalityComs.Demo do
 
   @spec anchors() :: {non_neg_integer(), non_neg_integer()}
   defp anchors do
-    names = Enum.map(Map.keys(@venue_names), &venue_name/1)
-    emails = Enum.map(Map.keys(@person_names), &person_email/1)
+    queries = anchor_queries()
 
-    venues = Repo.aggregate(from(venue in Venue, where: venue.name in ^names), :count)
-    people = Repo.aggregate(from(person in Person, where: person.email in ^emails), :count)
+    {Enum.count(queries, &Repo.exists?/1), length(queries)}
+  end
 
-    {venues + people, length(names) + length(emails)}
+  # **Nine anchors, and the last three are the reason there are nine.** The two
+  # venues and the four people all exist by the fourth of `write/1`'s eleven
+  # phases, so a run interrupted anywhere after that answered `:present` on the
+  # next attempt and wrote nothing — the curated rows the profile surface needs
+  # were absent and this function was what said they were there. Reproduced:
+  # delete Tomo's declared entry, seed again, and `:present` came back with the
+  # entry still missing.
+  #
+  # One query per anchor rather than one count over each set. A count is what
+  # made `found` an arithmetic sum, so a duplicate row could push it past
+  # `total` and report a fully seeded database as a partial one.
+  @spec anchor_queries() :: [Ecto.Query.t()]
+  defp anchor_queries do
+    venues =
+      Enum.map(Map.keys(@venue_names), fn label ->
+        from(venue in Venue, where: venue.name == ^venue_name(label))
+      end)
+
+    people =
+      Enum.map(Map.keys(@person_names), fn label ->
+        from(person in Person, where: person.email == ^person_email(label))
+      end)
+
+    venues ++ people ++ curated_anchors()
+  end
+
+  # The tail of `write/1`, keyed on the one person it is all about. Nothing on
+  # any transport writes a declared entry, a correction request or a disclosure
+  # row for Tomo, and nothing anywhere deletes one, so presence here is exactly
+  # "the curated phase ran".
+  @spec curated_anchors() :: [Ecto.Query.t()]
+  defp curated_anchors do
+    tomo = person_email(:tomo)
+
+    [
+      from(entry in DeclaredEntry,
+        join: person in Person,
+        on: person.id == entry.person_id,
+        where: person.email == ^tomo
+      ),
+      from(request in CorrectionRequest,
+        join: engagement in Engagement,
+        on: engagement.id == request.engagement_id,
+        join: person in Person,
+        on: person.id == engagement.person_id,
+        where: person.email == ^tomo
+      ),
+      from(row in Disclosure,
+        join: person in Person,
+        on: person.id == row.person_id,
+        where: person.email == ^tomo
+      )
+    ]
   end
 
   @spec resolved(:created | :present, DateTime.t()) :: {:ok, manifest()}
   defp resolved(status, instant) do
     venues = Map.new(@venue_names, fn {label, _name} -> {label, venue_id!(label)} end)
     people = Map.new(@person_names, fn {label, _name} -> {label, person_id!(label)} end)
+    engagements = engagement_ids(people, venues)
 
     {:ok,
      %{
@@ -316,11 +445,14 @@ defmodule HospitalityComs.Demo do
        instant: instant,
        venues: venues,
        people: people,
-       engagements: engagement_ids(people, venues),
+       engagements: engagements,
        shift_types: shift_type_ids(venues.harbour),
        shift_rooms: shift_room_ids(venues.harbour),
-       connection_id: connection_id!(people.tomo),
-       pending_request_id: pending_request_id!(people.tomo, instant)
+       connection_id: connection_id!(people.tomo, people.ana),
+       pending_request_id: request_id!(people.luka, people.tomo),
+       declared_entry_id: declared_entry_id!(people.tomo),
+       correction_request_id: correction_request_id!(engagements.tomo_kolektiv),
+       disclosure_id: disclosure_id!(people.tomo)
      }}
   end
 
@@ -331,7 +463,9 @@ defmodule HospitalityComs.Demo do
 
   @spec person_id!(atom()) :: Ecto.UUID.t()
   defp person_id!(label) do
-    Repo.one!(from person in Person, where: person.email == ^person_email(label), select: person.id)
+    Repo.one!(
+      from person in Person, where: person.email == ^person_email(label), select: person.id
+    )
   end
 
   # One engagement per (person, venue) pair in the manifest, which is what makes
@@ -402,29 +536,74 @@ defmodule HospitalityComs.Demo do
     """
   end
 
-  @spec connection_id!(Ecto.UUID.t()) :: Ecto.UUID.t()
-  defp connection_id!(person_id) do
-    %Connection{id: id} =
-      Repo.one!(
-        from connection in Connection,
-          where: connection.person_a_id == ^person_id or connection.person_b_id == ^person_id
-      )
-
-    id
+  # **The seeded pair, oldest first, and not "the only connection Tomo has".**
+  # That is what this was, and accepting the seeded Luka→Tomo approach — the
+  # first thing a client does with it — puts a second row in the table and made
+  # every later read of the manifest raise `Ecto.MultipleResultsError` out of a
+  # function spec'd to return one error atom. Disconnecting and reconnecting the
+  # same pair does the same thing, which is why the ordering and the limit are
+  # here rather than only the pair.
+  @spec connection_id!(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.UUID.t()
+  defp connection_id!(person_id, other_id) do
+    Repo.one!(
+      from connection in Connection,
+        where:
+          (connection.person_a_id == ^person_id and connection.person_b_id == ^other_id) or
+            (connection.person_a_id == ^other_id and connection.person_b_id == ^person_id),
+        order_by: [asc: connection.connected_at, asc: connection.id],
+        limit: 1,
+        select: connection.id
+    )
   end
 
-  # Read through the context rather than off the table, because "pending" is
-  # derived — `Peers` computes it from the pair's visibility at the instant
-  # asked about — and a query here would be a second opinion about it.
-  @spec pending_request_id!(Ecto.UUID.t(), DateTime.t()) :: Ecto.UUID.t()
-  defp pending_request_id!(person_id, instant) do
-    %ConnectionRequest{id: id} =
-      person_id
-      |> person_scope(instant)
-      |> Peers.list_incoming_requests()
-      |> List.first()
+  # The seeded approach, by direction, and it stays this row whatever happens to
+  # it. Reading it as "the first request in Tomo's inbox" was a read through
+  # `Peers.list_incoming_requests/1`, which is empty the moment he declines —
+  # a `MatchError`, permanent for that database, from the demo's own first move.
+  # The manifest names the row; whether it is still pending is
+  # `Peers.fetch_request/2`'s answer and nothing here restates it.
+  @spec request_id!(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.UUID.t()
+  defp request_id!(requester_id, addressee_id) do
+    Repo.one!(
+      from request in ConnectionRequest,
+        where: request.requester_id == ^requester_id and request.addressee_id == ^addressee_id,
+        order_by: [asc: request.requested_at, asc: request.id],
+        limit: 1,
+        select: request.id
+    )
+  end
 
-    id
+  @spec declared_entry_id!(Ecto.UUID.t()) :: Ecto.UUID.t()
+  defp declared_entry_id!(person_id) do
+    Repo.one!(
+      from entry in DeclaredEntry,
+        where: entry.person_id == ^person_id,
+        order_by: [asc: entry.declared_at, asc: entry.id],
+        limit: 1,
+        select: entry.id
+    )
+  end
+
+  @spec correction_request_id!(Ecto.UUID.t()) :: Ecto.UUID.t()
+  defp correction_request_id!(engagement_id) do
+    Repo.one!(
+      from request in CorrectionRequest,
+        where: request.engagement_id == ^engagement_id,
+        order_by: [asc: request.requested_at, asc: request.id],
+        limit: 1,
+        select: request.id
+    )
+  end
+
+  @spec disclosure_id!(Ecto.UUID.t()) :: Ecto.UUID.t()
+  defp disclosure_id!(person_id) do
+    Repo.one!(
+      from row in Disclosure,
+        where: row.person_id == ^person_id,
+        order_by: [asc: row.decided_at, asc: row.id],
+        limit: 1,
+        select: row.id
+    )
   end
 
   ## The manifest, written
@@ -701,7 +880,7 @@ defmodule HospitalityComs.Demo do
     {:ok, _declared} =
       Profiles.declare_entry(PersonScope.for_person(people.tomo, days(t0, -3)), %{
         role_label: "Barback",
-        organisation_name: "Pivnica Medvedgrad",
+        organisation_name: @declared_organisation,
         starts_at: days(t0, -900),
         ends_at: days(t0, -600)
       })
@@ -801,8 +980,7 @@ defmodule HospitalityComs.Demo do
     announced = Enum.count(expired, &announce/1)
     {:ok, run} = RetentionSweeper.perform(job(RetentionSweeper.new(%{})))
 
-    {:ok,
-     %{instant: instant, swept: length(expired), announced: announced, retention: run}}
+    {:ok, %{instant: instant, swept: length(expired), announced: announced, retention: run}}
   end
 
   # The whole history, rather than `EngagementSweeper.lookback_from/1`'s day.
@@ -817,7 +995,8 @@ defmodule HospitalityComs.Demo do
   # it inert exactly as it does in production.
   @spec announce(Engagement.t()) :: boolean()
   defp announce(%Engagement{} = engagement) do
-    {:ok, expiry} = engagement |> ExpireEngagement.schedule_for() |> job() |> ExpireEngagement.perform()
+    {:ok, expiry} =
+      engagement |> ExpireEngagement.schedule_for() |> job() |> ExpireEngagement.perform()
 
     expiry == :revoked
   end
@@ -843,7 +1022,7 @@ defmodule HospitalityComs.Demo do
   ## Ending every engagement a person holds
 
   @doc """
-  Closes every engagement of `person_id` whose term has not already closed.
+  Closes every engagement `person_id` holds at the control's instant.
 
   R44, and the action AE7 turns on: afterwards the person is employed nowhere
   and their profile, their attested entries, their retained own messages and
@@ -858,9 +1037,51 @@ defmodule HospitalityComs.Demo do
   Takes a person id and no scope. The enumeration crosses venues, which is
   exactly what no employer session may do; each close then runs as the venue it
   belongs to. See the moduledoc.
+
+  ## The target set is what the person *holds*, not what has not closed
+
+  `Engagements.list_person_engagements/1`, so a term that has not opened at the
+  control's instant is not in it. `Engagements.end_engagement/2`'s own target
+  set is one state wider — "the term has not closed" — deliberately, so a claim
+  made in error can be taken back; that widening produces `ends_at ==
+  starts_at`, the empty range, which is right for a single mistaken claim and
+  wrong for every engagement a person holds.
+
+  **It was also a way to wedge `run_due_work/0` permanently.** Under a clock
+  wound back before a term opened, this closed that term to its own opening —
+  and the archive deadline is `ends_at + 90 days`, so a term collapsed to an
+  opening two hundred days before the words spoken inside it gets a deadline
+  *earlier* than a message it must outlive. `retained_message_copies` has a
+  CHECK that refuses exactly that; Postgres evaluates it on the candidate row
+  before `ON CONFLICT` arbitration, so `Lifecycle.backfill_copies/3`'s
+  `on_conflict: :nothing` does not save the already-copied message, and
+  `run_due_work/0`'s unbounded lower edge re-reached the poisoned term on every
+  later run whatever the clock said. Measured; the fix is here rather than in
+  `HospitalityComs.Lifecycle` because production cannot reach the state —
+  `scope.now` is monotonic at the HTTP boundary, so `ends_at` is never written
+  behind a message that already exists — and because the deadline arithmetic
+  would have had to change in two places to survive it, which is a production
+  retention change bought for a demo-only state.
+
+  **The residue, on the record.** The clock can still be wound back more than
+  ninety days *inside* a term whose messages lie beyond that window, which
+  produces the same refusal. Nothing in the seeded manifest reaches it — the
+  one person whose engagements are closable at all is Tomo, whose messages sit
+  fifty-eight days inside his shortest term — and reaching it needs a client to
+  write a message under a forward clock and then an operator to wind back past
+  it before ending. `mix ecto.reset` is the remedy, as it is for a partial
+  manifest.
+
+  ## Every refusal carries what it closed first
+
+  `{:error, reason, closed}`, and the third element is not decoration. Each
+  close is its own transaction and the pre-flight takes no lock, so a refusal
+  from inside the loop leaves the closes before it committed. `closed` is empty
+  for `:not_found`, `:last_grant_holder` and `:no_grant`, which are all decided
+  before the first close; it can be non-empty for `:stale` and for a changeset.
   """
   @spec end_all_engagements(Ecto.UUID.t()) ::
-          {:ok, [Engagement.t()]} | {:error, closure_failure()}
+          {:ok, [Engagement.t()]} | {:error, closure_failure(), [Engagement.t()]}
   def end_all_engagements(person_id) when is_binary(person_id) do
     now = Clock.now()
 
@@ -871,34 +1092,39 @@ defmodule HospitalityComs.Demo do
     |> refuse_or_close()
   end
 
-  # A person id arriving over HTTP is user input. `Ecto.UUID.cast/1` is the same
-  # shape `HospitalityComsWeb.ChannelAuth.topic_id/1` uses for a topic suffix,
-  # and for the same reason: without it `Repo.get/2` raises
-  # `Ecto.Query.CastError` out of a function whose spec enumerates three atoms.
+  # A person id arriving over HTTP is user input, and this is
+  # `HospitalityComsWeb.ChannelAuth.topic_id/1`'s shape without the raise —
+  # **`byte_size/1` included**. Without the byte size, `Ecto.UUID.cast/1` also
+  # accepts the sixteen raw bytes a UUID dumps to, and a percent-encoded path
+  # segment can carry them, so `/api/demo/people/%D6%A1…/end-engagements` ended a
+  # person's engagements through a spelling of their id no other surface in this
+  # application accepts. The comment here used to claim the parity the code did
+  # not have.
   @spec identified(String.t()) :: Ecto.UUID.t() | nil
-  defp identified(person_id) do
+  defp identified(person_id) when byte_size(person_id) == 36 do
     person_id |> Ecto.UUID.cast() |> cast_or_nil()
   end
+
+  defp identified(_person_id), do: nil
 
   @spec cast_or_nil({:ok, Ecto.UUID.t()} | :error) :: Ecto.UUID.t() | nil
   defp cast_or_nil({:ok, person_id}), do: person_id
   defp cast_or_nil(:error), do: nil
 
   @spec known(Ecto.UUID.t() | nil, DateTime.t()) ::
-          {:ok, [Engagement.t()], DateTime.t()} | {:error, :not_found}
-  defp known(nil, _now), do: {:error, :not_found}
+          {:ok, [Engagement.t()], DateTime.t()} | {:error, :not_found, []}
+  defp known(nil, _now), do: {:error, :not_found, []}
   defp known(person_id, now), do: Person |> Repo.get(person_id) |> held(now)
 
   @spec held(Person.t() | nil, DateTime.t()) ::
-          {:ok, [Engagement.t()], DateTime.t()} | {:error, :not_found}
-  defp held(nil, _now), do: {:error, :not_found}
+          {:ok, [Engagement.t()], DateTime.t()} | {:error, :not_found, []}
+  defp held(nil, _now), do: {:error, :not_found, []}
 
   defp held(%Person{} = person, now) do
     engagements =
       person
       |> PersonScope.for_person(now)
-      |> Engagements.list_person_history()
-      |> Enum.filter(&(DateTime.compare(&1.ends_at, now) == :gt))
+      |> Engagements.list_person_engagements()
 
     {:ok, engagements, now}
   end
@@ -906,9 +1132,10 @@ defmodule HospitalityComs.Demo do
   # The pre-flight, and the whole of why it is not a second copy of KTD17:
   # `Engagements.would_orphan_venue?/2` is the same decision `end_engagement/2`
   # makes, asked by the function that makes it.
-  @spec closable({:ok, [Engagement.t()], DateTime.t()} | {:error, :not_found}) ::
-          {:ok, [{EmployerScope.t(), Engagement.t()}]} | {:error, closure_failure()}
-  defp closable({:error, :not_found}), do: {:error, :not_found}
+  @spec closable({:ok, [Engagement.t()], DateTime.t()} | {:error, :not_found, []}) ::
+          {:ok, [{EmployerScope.t(), Engagement.t()}]}
+          | {:error, closure_failure(), [Engagement.t()]}
+  defp closable({:error, :not_found, []}), do: {:error, :not_found, []}
 
   defp closable({:ok, engagements, now}) do
     engagements
@@ -918,11 +1145,11 @@ defmodule HospitalityComs.Demo do
 
   @spec permitted([{EmployerScope.t() | nil, Engagement.t()}]) ::
           {:ok, [{EmployerScope.t(), Engagement.t()}]}
-          | {:error, :last_grant_holder | :no_grant}
+          | {:error, :last_grant_holder | :no_grant, []}
   defp permitted(pairs) do
     cond do
-      Enum.any?(pairs, fn {scope, _engagement} -> is_nil(scope) end) -> {:error, :no_grant}
-      Enum.any?(pairs, &orphaning?/1) -> {:error, :last_grant_holder}
+      Enum.any?(pairs, fn {scope, _engagement} -> is_nil(scope) end) -> {:error, :no_grant, []}
+      Enum.any?(pairs, &orphaning?/1) -> {:error, :last_grant_holder, []}
       true -> {:ok, pairs}
     end
   end
@@ -932,9 +1159,10 @@ defmodule HospitalityComs.Demo do
     do: Engagements.would_orphan_venue?(scope, engagement.id)
 
   @spec refuse_or_close(
-          {:ok, [{EmployerScope.t(), Engagement.t()}]} | {:error, closure_failure()}
-        ) :: {:ok, [Engagement.t()]} | {:error, closure_failure()}
-  defp refuse_or_close({:error, reason}), do: {:error, reason}
+          {:ok, [{EmployerScope.t(), Engagement.t()}]}
+          | {:error, closure_failure(), [Engagement.t()]}
+        ) :: {:ok, [Engagement.t()]} | {:error, closure_failure(), [Engagement.t()]}
+  defp refuse_or_close({:error, reason, closed}), do: {:error, reason, closed}
 
   defp refuse_or_close({:ok, pairs}) do
     pairs
@@ -944,17 +1172,30 @@ defmodule HospitalityComs.Demo do
     |> oldest_first()
   end
 
+  # `end_engagement/2`'s `:not_found` becomes `:stale` here, and it is the only
+  # translation in this function. At this point the person is known and the
+  # engagement was in their own list a moment ago, so "no such thing" can only
+  # mean it moved under the loop — which is what `:stale` already says, and
+  # which the controller already renders as a 409 rather than as a 404 about a
+  # person who plainly exists.
   @spec collected(
           {:ok, Engagement.t()} | {:error, closure_failure()},
           [Engagement.t()]
-        ) :: {:cont, {:ok, [Engagement.t()]}} | {:halt, {:error, closure_failure()}}
+        ) ::
+          {:cont, {:ok, [Engagement.t()]}}
+          | {:halt, {:error, closure_failure(), [Engagement.t()]}}
   defp collected({:ok, engagement}, closed), do: {:cont, {:ok, [engagement | closed]}}
-  defp collected({:error, reason}, _closed), do: {:halt, {:error, reason}}
 
-  @spec oldest_first({:ok, [Engagement.t()]} | {:error, closure_failure()}) ::
-          {:ok, [Engagement.t()]} | {:error, closure_failure()}
+  defp collected({:error, :not_found}, closed),
+    do: {:halt, {:error, :stale, Enum.reverse(closed)}}
+
+  defp collected({:error, reason}, closed),
+    do: {:halt, {:error, reason, Enum.reverse(closed)}}
+
+  @spec oldest_first({:ok, [Engagement.t()]} | {:error, closure_failure(), [Engagement.t()]}) ::
+          {:ok, [Engagement.t()]} | {:error, closure_failure(), [Engagement.t()]}
   defp oldest_first({:ok, closed}), do: {:ok, Enum.reverse(closed)}
-  defp oldest_first({:error, reason}), do: {:error, reason}
+  defp oldest_first({:error, reason, closed}), do: {:error, reason, closed}
 
   # A live grant at the venue, which is the authority the close runs under. The
   # control has none of its own; this is the venue's, borrowed for one write.
@@ -974,11 +1215,6 @@ defmodule HospitalityComs.Demo do
   defp scoped(grant_id, venue_id, now), do: EmployerScope.for_grant(venue_id, grant_id, now)
 
   ## Small helpers
-
-  @spec person_scope(Ecto.UUID.t(), DateTime.t()) :: PersonScope.t()
-  defp person_scope(person_id, instant) do
-    PersonScope.for_person(Accounts.get_person!(person_id), instant)
-  end
 
   @spec days(DateTime.t(), integer()) :: DateTime.t()
   defp days(instant, count), do: DateTime.add(instant, count, :day)

@@ -47,6 +47,7 @@ defmodule HospitalityComs.DemoTest do
   alias HospitalityComs.Lifecycle.RetainedMessageCopy
   alias HospitalityComs.Peers
   alias HospitalityComs.Profiles
+  alias HospitalityComs.Profiles.DeclaredEntry
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms
   alias HospitalityComs.Rooms.RoomMessage
@@ -61,6 +62,19 @@ defmodule HospitalityComs.DemoTest do
   # out of the stored bounds and the grace-boundary tests would be comparing an
   # instant against a value a fraction of a second away from the one they meant.
   @instant ~U[2026-06-01 09:00:00.000000Z]
+
+  # The base tables a seeded manifest fills. Written out because `census/0`
+  # compares counts and **an empty table compares zero to zero**: without this,
+  # a second seed writing into any table the manifest happens not to reach is
+  # invisible. The four it does not fill are `people_tokens` (nobody logs in),
+  # `venue_room_suspensions` (nobody opts out), `retention_runs` (no sweep has
+  # run) and `oban_peers`.
+  @seeded_tables ~w(
+    attested_entries attested_entry_disclosures connection_requests correction_requests
+    declared_entries employer_grants engagements invitations oban_jobs peer_connections
+    peer_messages people retained_message_copies room_messages roster_entries shift_rooms
+    shift_types venues
+  )
 
   setup do
     EngagementsFixtures.real_connections()
@@ -176,7 +190,77 @@ defmodule HospitalityComs.DemoTest do
       assert Engagements.list_person_engagements(luka) == []
       assert length(Engagements.list_person_history(luka)) == 1
       assert length(Profiles.list_attested_entries(luka)) == 1
-      assert %{} = Profiles.own_profile(luka)
+
+      # `assert %{} = …` is the empty-map *pattern*, which matches every map, so
+      # `own_profile/1` returning `%{}` satisfied it. The keys are written out
+      # here and the attested half is compared against the read above, which is
+      # the half a profile with nothing in it would fail.
+      assert %{
+               attested_entries: attested,
+               declared_entries: [],
+               correction_requests: []
+             } = Profiles.own_profile(luka)
+
+      assert Enum.map(attested, & &1.attested_entry_id) ==
+               Enum.map(Profiles.list_attested_entries(luka), & &1.attested_entry_id)
+
+      assert length(attested) == 1
+    end
+
+    test "names the curated rows the profile surface is built on", %{manifest: manifest} do
+      # C4: all six of the original anchors exist by the fourth of `write/1`'s
+      # eleven phases, so the three rows written after the pending request were
+      # outside everything `seed/0` checked and everything the manifest named.
+      tomo = person_scope(manifest, :tomo)
+
+      assert Enum.map(Profiles.list_declared_entries(tomo), & &1.id) ==
+               [manifest.declared_entry_id]
+
+      assert Enum.map(Profiles.list_correction_requests(tomo), & &1.correction_request_id) ==
+               [manifest.correction_request_id]
+
+      assert Enum.map(Profiles.list_disclosures(tomo), & &1.id) == [manifest.disclosure_id]
+    end
+  end
+
+  describe "the manifest after the demo has been driven" do
+    setup [:seeded]
+
+    test "survives the seeded approach being accepted, which is the first thing a client does",
+         %{manifest: manifest} do
+      # C1. `connection_id` was "the only connection Tomo is a party to", and
+      # accepting puts a second row in `peer_connections`, so every later read
+      # of the manifest raised `Ecto.MultipleResultsError` out of a function
+      # spec'd `{:ok, manifest()} | {:error, :partial_manifest}` — a 500 with no
+      # envelope, permanent for that database, from the demo's own first move.
+      assert {:ok, _connection} =
+               Peers.accept_request(person_scope(manifest, :tomo), manifest.pending_request_id)
+
+      assert {:ok, again} = Demo.seed()
+      assert again.status == :present
+      assert Map.delete(again, :status) == Map.delete(manifest, :status)
+    end
+
+    test "and survives it being declined, which empties the inbox it was read from", %{
+      manifest: manifest
+    } do
+      # The other half of C1: `pending_request_id` came off
+      # `Peers.list_incoming_requests/1` through `List.first/1`, and a declined
+      # request is not incoming, so the same read became a `MatchError`.
+      assert {:ok, _declined} =
+               Peers.decline_request(person_scope(manifest, :tomo), manifest.pending_request_id)
+
+      assert {:ok, again} = Demo.seed()
+      assert again.status == :present
+      assert Map.delete(again, :status) == Map.delete(manifest, :status)
+    end
+
+    test "and survives the seeded conversation being disconnected", %{manifest: manifest} do
+      assert {:ok, _closed} =
+               Peers.disconnect(person_scope(manifest, :tomo), manifest.connection_id)
+
+      assert {:ok, again} = Demo.seed()
+      assert again.connection_id == manifest.connection_id
     end
   end
 
@@ -184,13 +268,37 @@ defmodule HospitalityComs.DemoTest do
     setup [:seeded]
 
     test "writes nothing the second time and answers with the same ids", %{manifest: first} do
+      # **The bound is every base table, and the emptiness check is what keeps
+      # it one.** It used to count four schemas, so a second seed writing one
+      # `declared_entries` row left all 53 tests passing while a `room_messages`
+      # row killed one. That is U10's defect exactly — its log-out bound was
+      # vacuous over fourteen of the twenty-three base tables because an empty
+      # table compares zero to zero — so this reuses `lifecycle_test.exs`'s
+      # idiom: count from `information_schema`, and assert the tables the
+      # manifest is supposed to fill are non-empty before comparing anything.
       before = census()
+
+      assert Enum.reject(@seeded_tables, &(Map.fetch!(before, &1) > 0)) == []
 
       assert {:ok, second} = Demo.seed()
 
       assert second.status == :present
       assert Map.delete(second, :status) == Map.delete(first, :status)
       assert census() == before
+    end
+
+    test "refuses a database missing a row written after the last anchor", %{manifest: manifest} do
+      # C4. `declared_entries` is written by the tenth of `write/1`'s eleven
+      # phases; the six original anchors are all in place by the fourth. So a
+      # run interrupted between them answered `:present` and wrote nothing,
+      # `priv/repo/seeds.exs` printed "already here", and the profile surface
+      # was short a row with nothing saying so. Reproduced before the fix.
+      {1, _} =
+        Repo.delete_all(
+          from(entry in DeclaredEntry, where: entry.id == ^manifest.declared_entry_id)
+        )
+
+      assert Demo.seed() == {:error, :partial_manifest}
     end
 
     test "refuses a database holding only part of the manifest", %{manifest: manifest} do
@@ -211,12 +319,33 @@ defmodule HospitalityComs.DemoTest do
     setup [:seeded]
 
     test "a clock advance alone deletes nothing", %{manifest: manifest} do
+      # **True here because nothing is running, and that is a fact about the
+      # environment rather than about the control.** `config/test.exs` sets
+      # `testing: :manual`, so no queue and no cron tick exists to notice the
+      # advance. `config/dev.exs` now sets the same thing, and the test below
+      # is what holds it there; without it, cron stages `RetentionSweeper` at
+      # the *real* instant while the worker reads the *injected* clock, and this
+      # assertion is false within the hour in the one environment the controls
+      # exist for.
       before = shift_message_count(manifest.shift_rooms.past_shift)
 
       {:ok, _instant} = Demo.advance_clock(day: 11)
 
       assert shift_message_count(manifest.shift_rooms.past_shift) == before
       assert before > 0
+    end
+
+    test "counts the window and the worker apart, and they agree" do
+      # `swept` is what `list_expired/3` found and `announced` is how many of
+      # those the real worker judged closed. Both read one clock, so they are
+      # equal by construction — which is why replacing the worker's `:revoked`
+      # test with `true` kills nothing: it is an equivalent mutant. What is not
+      # equivalent is the worker disagreeing with the window, and this is what
+      # would catch it. `>= 1` because zero equals zero.
+      {:ok, work} = Demo.run_due_work()
+
+      assert work.swept == work.announced
+      assert work.swept >= 1
     end
 
     test "and the advance followed by the control deletes exactly the due rows", %{
@@ -387,8 +516,15 @@ defmodule HospitalityComs.DemoTest do
       assert Engagements.list_person_engagements(person_scope(manifest, :tomo)) == []
     end
 
-    test "refuses a venue's last grant-holding engagement", %{manifest: manifest} do
-      assert Demo.end_all_engagements(manifest.people.ana) == {:error, :last_grant_holder}
+    test "refuses a venue's last grant-holding engagement, and says it closed nothing", %{
+      manifest: manifest
+    } do
+      # The third element is not decoration: each close is its own transaction
+      # and the pre-flight takes no lock, so a refusal from inside the loop
+      # leaves what it closed committed. Here the refusal is the pre-flight's,
+      # so the list is empty — and it is now rendered rather than asserted in
+      # the message.
+      assert Demo.end_all_engagements(manifest.people.ana) == {:error, :last_grant_holder, []}
     end
 
     test "and ends none of that person's other engagements, which is the control", %{
@@ -396,7 +532,7 @@ defmodule HospitalityComs.DemoTest do
     } do
       before = Engagements.list_person_engagements(person_scope(manifest, :ana))
 
-      {:error, :last_grant_holder} = Demo.end_all_engagements(manifest.people.ana)
+      {:error, :last_grant_holder, []} = Demo.end_all_engagements(manifest.people.ana)
 
       assert Enum.map(Engagements.list_person_engagements(person_scope(manifest, :ana)), & &1.id) ==
                Enum.map(before, & &1.id)
@@ -405,12 +541,70 @@ defmodule HospitalityComs.DemoTest do
     end
 
     test "answers :not_found for an id naming nobody, and for one that is not an id" do
-      assert Demo.end_all_engagements(Ecto.UUID.generate()) == {:error, :not_found}
-      assert Demo.end_all_engagements("not-a-uuid") == {:error, :not_found}
+      assert Demo.end_all_engagements(Ecto.UUID.generate()) == {:error, :not_found, []}
+      assert Demo.end_all_engagements("not-a-uuid") == {:error, :not_found, []}
+    end
+
+    test "and for a person id supplied as the sixteen bytes it dumps to", %{manifest: manifest} do
+      # `Ecto.UUID.cast/1` accepts a raw sixteen-byte UUID and encodes it, so
+      # without the byte-size guard this is a working spelling of Tomo's id that
+      # no other surface in this application accepts — and a percent-encoded
+      # path segment carries arbitrary bytes. `ChannelAuth.topic_id/1` has the
+      # guard; the comment here claimed parity the code did not have.
+      {:ok, raw} = Ecto.UUID.dump(manifest.people.tomo)
+
+      assert byte_size(raw) == 16
+      assert Ecto.UUID.cast(raw) == {:ok, manifest.people.tomo}
+      assert Demo.end_all_engagements(raw) == {:error, :not_found, []}
+      assert length(Engagements.list_person_engagements(person_scope(manifest, :tomo))) == 2
     end
 
     test "succeeds with an empty list for a person holding nothing", %{manifest: manifest} do
       assert Demo.end_all_engagements(manifest.people.luka) == {:ok, []}
+    end
+  end
+
+  describe "end_all_engagements/1 under a clock wound backwards" do
+    setup [:seeded]
+
+    test "leaves a term that has not opened exactly where it was", %{manifest: manifest} do
+      # The target set is what the person *holds* at the control's instant, not
+      # "every term that has not closed". `end_engagement/2`'s own set is one
+      # state wider on purpose, so a claim made in error can be taken back —
+      # and that widening closes at `max(starts_at, now)`, which for a term that
+      # has not opened is the empty range. Applied to every engagement a person
+      # holds it does not end employment, it un-writes it.
+      before = engagement_bounds(manifest.engagements.mira_harbour)
+
+      {:ok, _instant} = Demo.advance_clock(day: -202)
+
+      assert Demo.end_all_engagements(manifest.people.mira) == {:ok, []}
+      assert engagement_bounds(manifest.engagements.mira_harbour) == before
+      assert {starts_at, ends_at} = before
+      assert DateTime.compare(starts_at, ends_at) == :lt
+    end
+
+    test "and does not poison run_due_work/0 for ever", %{manifest: manifest} do
+      # C2, measured. Closing Mira's term at an instant before it opened gave it
+      # `ends_at == starts_at` two hundred days before the words spoken inside
+      # it, and the archive deadline is `ends_at + 90 days` —
+      # `retained_message_copies_deadline_after_sending` refuses a copy dated
+      # before its own message. Postgres evaluates a CHECK on the candidate row
+      # *before* `ON CONFLICT` arbitration, so `backfill_copies/3`'s
+      # `on_conflict: :nothing` did not save the message that was already
+      # copied, and `run_due_work/0`'s unbounded lower edge re-reached the term
+      # on every later run whatever the clock said. `mix ecto.reset` was the
+      # only way out.
+      {:ok, _instant} = Demo.advance_clock(day: -202)
+      {:ok, []} = Demo.end_all_engagements(manifest.people.mira)
+      {:ok, _instant} = Demo.advance_clock(day: 3)
+
+      assert {:ok, _work} = Demo.run_due_work()
+
+      :ok = Clock.Offset.set(@instant)
+
+      assert {:ok, work} = Demo.run_due_work()
+      assert work.retention.outcome == :completed
     end
   end
 
@@ -499,6 +693,21 @@ defmodule HospitalityComs.DemoTest do
     end
 
     test "and no module compiled from lib/ calls one compiled from dev_support/" do
+      # **`assert offenders == []` is the canonical assertion that is vacuous on
+      # an empty result, and both operands of this sweep are quantified over.**
+      # Measured: `library_modules/0` returning `[]` left all 53 tests in this
+      # file passing, while `dev_support_modules/0` returning `[]` killed one —
+      # and the asymmetry was the defect, because the guarded half was the other
+      # test's. The floors below are the manoeuvre that half already uses.
+      # Eleven assertions in this project have read as coverage while providing
+      # none; two of them were found in this unit, one of them here.
+      assert HospitalityComs.Engagements in library_modules()
+      assert HospitalityComsWeb.PersonAuth in library_modules()
+      assert length(library_modules()) > 50
+
+      assert Demo in dev_support_modules()
+      assert length(dev_support_modules()) >= 3
+
       offenders =
         Enum.filter(library_modules(), fn module ->
           Enum.any?(called_modules(module), &(&1 in dev_support_modules()))
@@ -521,6 +730,33 @@ defmodule HospitalityComs.DemoTest do
 
       assert File.read!("config/dev.exs") =~ "demo_routes"
       assert File.read!("config/test.exs") =~ "demo_routes"
+    end
+  end
+
+  describe "the queues in the two environments the controls run in" do
+    test "neither of them lets a cron tick drive a worker" do
+      # **The claim "a clock advance alone deletes nothing" is environment-
+      # conditional and nothing recorded that.** It holds in `:test` because
+      # `testing: :manual` is set there. `:dev` set no such thing, and Oban's
+      # cron stages at the *real* instant while `RetentionSweeper.perform/1`
+      # reads the *injected* clock — so `advance_clock(day: 31)` and nothing
+      # else deleted a month of retained messages within the hour, unattended,
+      # in the one environment these controls exist for. The wall-clock argument
+      # in `Demo`'s moduledoc covers the claim-scheduled `ExpireEngagement` job,
+      # which genuinely waits; it does not cover cron.
+      for env <- [:dev, :test] do
+        oban = oban_config(env)
+
+        assert oban[:testing] == :manual,
+               "config/#{env}.exs lets Oban run queues and plugins beside an injected clock"
+      end
+    end
+
+    test "and the configuration they override really does schedule both, the control" do
+      oban = oban_config(:dev)
+
+      assert Enum.any?(oban[:plugins], &match?({Oban.Plugins.Cron, _crontab}, &1))
+      assert oban[:queues] != []
     end
   end
 
@@ -562,15 +798,36 @@ defmodule HospitalityComs.DemoTest do
 
   ## Counting
 
+  # Every base table, from `information_schema`, which is `lifecycle_test.exs`'s
+  # reader and `TestDatabaseGuard`'s source. A list of schemas written out here
+  # is a list somebody forgets to extend, and the four it named left nineteen
+  # tables in which a second seed could write freely.
   defp census do
-    Map.new(
-      [
-        engagements: Engagement,
-        room_messages: RoomMessage,
-        roster_entries: RosterEntry,
-        retained_message_copies: RetainedMessageCopy
-      ],
-      fn {label, schema} -> {label, Repo.aggregate(schema, :count)} end
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+        """,
+        []
+      )
+
+    Map.new(rows, fn [table] ->
+      %{rows: [[count]]} = Repo.query!("SELECT count(*) FROM #{table}", [])
+      {table, count}
+    end)
+  end
+
+  defp oban_config(env) do
+    "config/config.exs" |> Config.Reader.read!(env: env) |> get_in([:hospitality_coms, Oban])
+  end
+
+  defp engagement_bounds(engagement_id) do
+    Repo.one!(
+      from engagement in Engagement,
+        where: engagement.id == ^engagement_id,
+        select: {engagement.starts_at, engagement.ends_at}
     )
   end
 

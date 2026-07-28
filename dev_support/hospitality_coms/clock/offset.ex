@@ -70,7 +70,9 @@ defmodule HospitalityComs.Clock.Offset do
   def state, do: :persistent_term.get(@key, %__MODULE__{})
 
   @spec instant(t()) :: DateTime.t()
-  defp instant(%__MODULE__{fixed: nil, shift: shift}), do: DateTime.shift(Clock.System.now(), shift)
+  defp instant(%__MODULE__{fixed: nil, shift: shift}),
+    do: DateTime.shift(Clock.System.now(), shift)
+
   defp instant(%__MODULE__{fixed: fixed, shift: shift}), do: DateTime.shift(fixed, shift)
 
   @spec put(t()) :: :ok

@@ -18,6 +18,31 @@ defmodule HospitalityComsWeb.DemoController do
   credential would suggest the surface is safe to expose to whoever holds it.
   What makes it safe is that it does not exist outside `:dev` and `:test`.
 
+  ## …but a page in another tab is not "whoever holds it"
+
+  Unauthenticated and same-origin-reachable are different properties. Any page a
+  developer has open can issue
+  `fetch("http://localhost:4000/api/demo/run-due-work", {method: "POST", mode:
+  "no-cors"})`: that is a CORS-*simple* request, so the browser sends it with no
+  preflight, and `Plug.Parsers` here passes `*/*`, so a body it cannot parse is
+  no obstacle either. `Plug.MethodOverride` extends the same trick to
+  `DELETE /api/demo/clock` through a form POST. The response is unreadable to
+  the attacker and the writes still happen.
+
+  So every state-changing action requires the header `x-demo-control`. A
+  simple request cannot carry a custom header; asking for one forces a
+  preflight, and this application answers `OPTIONS` with no CORS headers at all,
+  so the browser refuses the request before it reaches a controller. Reads are
+  left alone — `GET /api/demo/clock` writes nothing and stays typeable into an
+  address bar.
+
+  **One control was already protected by accident and it is worth naming.**
+  `unit_pair/1` requires `is_integer(count)`, and a forged request cannot supply
+  one: `application/x-www-form-urlencoded` yields strings, and `application/json`
+  is not a simple content type. That type check is therefore load-bearing beyond
+  its stated job, and relaxing it to accept `"31"` would hand the clock back to
+  the forgery this header now refuses.
+
   ## It holds no logic
 
   Every action turns a request into one `HospitalityComs.Demo` call and one JSON
@@ -40,6 +65,15 @@ defmodule HospitalityComsWeb.DemoController do
   # can be turned into an atom without `String.to_atom/1` on user input.
   @units ~w(year month week day hour minute second)
 
+  # Any custom header would do; a named one reads better in a `curl` line than
+  # an arbitrary one. See the moduledoc for why its presence is the whole check
+  # and its value is not looked at.
+  @control_header "x-demo-control"
+
+  @control_actions [:seed, :update_clock, :reset_clock, :run_due_work, :end_engagements]
+
+  plug :demanded_header when action in @control_actions
+
   @doc """
   Writes the seed manifest, or reports that it is already there.
   """
@@ -61,7 +95,8 @@ defmodule HospitalityComsWeb.DemoController do
   something other than what it was asked.
   """
   @spec update_clock(Plug.Conn.t(), map()) :: Plug.Conn.t()
-  def update_clock(conn, %{"instant" => instant} = params) when not is_map_key(params, "advance") do
+  def update_clock(conn, %{"instant" => instant} = params)
+      when not is_map_key(params, "advance") do
     conn |> instant(instant) |> moved(conn)
   end
 
@@ -158,11 +193,15 @@ defmodule HospitalityComsWeb.DemoController do
 
   ## Answering
 
-  @spec answer(Plug.Conn.t(), {:ok, result} | {:error, term()}, (result -> map())) ::
-          Plug.Conn.t()
+  @spec answer(
+          Plug.Conn.t(),
+          {:ok, result} | {:error, term()} | {:error, term(), [Engagement.t()]},
+          (result -> map())
+        ) :: Plug.Conn.t()
         when result: var
   defp answer(conn, {:ok, result}, render), do: json(conn, render.(result))
-  defp answer(conn, {:error, reason}, _render), do: refused(conn, reason)
+  defp answer(conn, {:error, reason}, _render), do: refused(conn, reason, [])
+  defp answer(conn, {:error, reason, closed}, _render), do: refused(conn, reason, closed)
 
   @spec moved({:ok, DateTime.t()} | Plug.Conn.t(), Plug.Conn.t()) :: Plug.Conn.t()
   defp moved({:ok, _instant}, conn), do: json(conn, %{clock: clock(Demo.clock())})
@@ -212,22 +251,28 @@ defmodule HospitalityComsWeb.DemoController do
 
   defp advance_or_refuse(false, pairs, _conn), do: Demo.advance_clock(pairs)
 
-  @spec refused(Plug.Conn.t(), atom() | Ecto.Changeset.t()) :: Plug.Conn.t()
-  defp refused(conn, %Ecto.Changeset{} = changeset) do
+  # Every refusal a closing control can produce renders `ended` beside the
+  # envelope, empty list included. `Demo.end_all_engagements/1` decides
+  # `:last_grant_holder` and `:no_grant` before it closes anything, so "Nothing
+  # was ended." is true of those two by construction — but it was being *said*
+  # rather than shown, and the two refusals that can leave a residue said
+  # nothing about it at all.
+  @spec refused(Plug.Conn.t(), atom() | Ecto.Changeset.t(), [Engagement.t()]) :: Plug.Conn.t()
+  defp refused(conn, %Ecto.Changeset{} = changeset, closed) do
     conn
     |> put_status(:unprocessable_entity)
     |> json(
-      ErrorEnvelope.for_changeset(
-        :unprocessable_entity,
-        "the demo control was refused",
-        changeset
-      )
+      :unprocessable_entity
+      |> ErrorEnvelope.for_changeset("the demo control was refused", changeset)
+      |> Map.merge(ended(closed))
     )
   end
 
-  defp refused(conn, :not_found), do: refuse(conn, :not_found, "No such person.")
+  defp refused(conn, :not_found, closed) do
+    refuse(conn, :not_found, "No such person.", closed)
+  end
 
-  defp refused(conn, :partial_manifest) do
+  defp refused(conn, :partial_manifest, _closed) do
     refuse(
       conn,
       :conflict,
@@ -235,24 +280,55 @@ defmodule HospitalityComsWeb.DemoController do
     )
   end
 
-  defp refused(conn, :last_grant_holder) do
+  defp refused(conn, :last_grant_holder, closed) do
     refuse(
       conn,
       :conflict,
-      "One of these engagements is its venue's last grant-holding engagement. Nothing was ended."
+      "One of these engagements is its venue's last grant-holding engagement. Nothing was ended.",
+      closed
     )
   end
 
-  defp refused(conn, :no_grant) do
-    refuse(conn, :conflict, "One of these venues holds no live grant. Nothing was ended.")
+  defp refused(conn, :no_grant, closed) do
+    refuse(conn, :conflict, "One of these venues holds no live grant. Nothing was ended.", closed)
   end
 
-  defp refused(conn, :stale) do
-    refuse(conn, :conflict, "One of these engagements changed while it was being ended.")
+  defp refused(conn, :stale, closed) do
+    refuse(
+      conn,
+      :conflict,
+      "One of these engagements changed while it was being ended. " <>
+        "Whatever had already closed is listed under ended.",
+      closed
+    )
   end
 
   @spec refuse(Plug.Conn.t(), atom(), String.t()) :: Plug.Conn.t()
   defp refuse(conn, code, message) do
     conn |> put_status(code) |> json(ErrorEnvelope.new(code, message))
   end
+
+  @spec refuse(Plug.Conn.t(), atom(), String.t(), [Engagement.t()]) :: Plug.Conn.t()
+  defp refuse(conn, code, message, closed) do
+    conn |> put_status(code) |> json(Map.merge(ErrorEnvelope.new(code, message), ended(closed)))
+  end
+
+  ## The header a forged cross-origin request cannot carry
+
+  @spec demanded_header(Plug.Conn.t(), keyword()) :: Plug.Conn.t()
+  defp demanded_header(conn, _opts) do
+    conn |> get_req_header(@control_header) |> carried(conn)
+  end
+
+  @spec carried([String.t()], Plug.Conn.t()) :: Plug.Conn.t()
+  defp carried([], conn) do
+    conn
+    |> refuse(
+      :forbidden,
+      "A demo control needs the #{@control_header} header. See HospitalityComsWeb.DemoController."
+    )
+    |> halt()
+  end
+
+  defp carried([_value | _rest], conn), do: conn
 end
