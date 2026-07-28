@@ -2,12 +2,20 @@
 
 The React client for hospitality-coms. U12 is being built in slices — the plan's
 own note says it "is the coarsest unit in the plan and will likely split during
-execution once the surface count is real" — and three have landed: the
+execution once the surface count is real" — and four have landed: the
 **foundation** (toolchain, typed API client, log-in), the **room surfaces**
-(U7's venue and shift rooms, the composer, the revocation) and the **peer
+(U7's venue and shift rooms, the composer, the revocation), the **peer
 surfaces** (U8's directory, the request state machine, 1:1 conversations,
-disconnect). U9–U11's surfaces are still absent, and the table at the bottom
-says what each is waiting on.
+disconnect) and the **profile surface** (U9's record, per-audience disclosure,
+corrections).
+
+**The fourth is different from the other three and the difference is not
+small: no channel on the server answers any of its events.** U9 settled the
+shapes and deliberately added no transport, so the profile surface is built
+against the shapes with the envelope written down in one place —
+`src/features/profile/contract.ts`. Read that before assuming anything behind
+`/profile` works against a running server. U10 and U11's surfaces are still
+absent, and the table at the bottom says what each is waiting on.
 
 ## Why a separate directory and not the asset pipeline
 
@@ -140,6 +148,19 @@ function and read as though it proved all of it. `vi.stubGlobal` with a
 applies to anything else ambient — `navigator`, `window.*`, the time zone, the
 locale.
 
+**Two test files whose names differ only in `.ts` versus `.tsx` are one file to
+TypeScript and two to vitest.** `tsconfig.json`'s `include` expands a directory
+and then deduplicates by path-without-extension, keeping `.ts` over `.tsx` — so
+`profile.test.ts` beside `profile.test.tsx` meant the `.tsx` was in **neither**
+`tsc --noEmit` nor `eslint`, while `vitest` ran it and reported it green. A
+whole surface suite, typechecked by nothing and linted by nothing, reading as
+covered. It surfaced as `eslint`'s "was not found by the project service", which
+reads like a config problem and is not one; `npx tsc --noEmit --listFiles | grep
+<name>` is what settles it. The fix is the naming the other two surfaces already
+have by accident — `room.test.ts` beside `rooms.test.tsx`, `peer.test.ts` beside
+`peers.test.tsx` — and here it is `profile.test.ts` beside
+`profile-route.test.tsx`. **Do not name a `.tsx` test after a `.ts` module.**
+
 `npm test` skips `src/api/client.integration.test.ts`, which runs the whole
 log-in flow against a live server and reads the magic link out of
 `/dev/mailbox/json`. Run it with the server up:
@@ -207,14 +228,24 @@ now wrap it.
 ## How the code is arranged
 
 ```
-src/api/            the four endpoints, their types, and every way they can fail
-src/session/        who is logged in, where the token lives, magic-link parsing
-src/socket/         the connection, the channel error envelope, the provider
-src/features/rooms/ venue and shift rooms: the list, a room, the composer
-src/features/peers/ the directory, requests, conversations, the disconnect
-src/app/            routes and the surfaces they render
-src/test-support/   fakes shared by the tests above the client and the socket
+src/api/              the four endpoints, their types, and every way they can fail
+src/session/          who is logged in, where the token lives, magic-link parsing
+src/socket/           the connection, the channel error envelope, the topic-id rule
+src/features/rooms/   venue and shift rooms: the list, a room, the composer
+src/features/peers/   the directory, requests, conversations, the disconnect
+src/features/profile/ the record, the disclosure ledger, corrections, a peer's record
+src/app/              routes and the surfaces they render
+src/test-support/     fakes shared by the tests above the client and the socket
 ```
+
+`src/socket/topic-id.ts` is the one rule for turning a string into a topic
+suffix — 36 bytes then a uuid cast, lowercased. It was written in `room.ts` and
+copied into `peer.ts`, which recorded the condition for un-duplicating it:
+_"hoisting a uuid helper into `src/socket/` is the alternative, and it belongs
+to whichever unit first has a third caller."_ The profile surface is the third
+caller, so that is where it now lives; `normaliseRoomId` and
+`normalisePersonId` are one-line delegations, because each surface's call sites
+read better for its own name.
 
 ### The error envelope is a contract, so it is typed like one
 
@@ -661,16 +692,170 @@ product state — whether a request has expired — against this client's own cl
 which is why `lapsed` arrives from the server. Ordering two instants the server
 stamped decides nothing.
 
+## The profile
+
+`src/features/profile/` is U9's worker-facing surface: the record, the ledger of
+disclosure decisions, declared entries, correction requests, and one peer's
+record at a time.
+
+### It is built against a transport that does not exist, and that was a choice
+
+**Measured at `3063e9c`, which is U9 merged:** `grep -rn 'Profiles'
+lib/hospitality_coms_web/` finds nothing, `router.ex` still declares the same
+four API routes, `PeerChannel` handles nine events and none carries an entry or
+a disclosure, and `EmployerVenueChannel`'s only `handle_in/3` clause is the
+terminal one. U9's issue named contexts, migrations and one test file, and its
+verification is a context-level claim, so the absence is deliberate on that side.
+
+The two honest options were to build against the shapes the contexts return and
+say where the transport is missing, or to build only what an existing channel
+event can feed. **The second yields the empty set** — none of the four
+measurements above leaves anything to render — so "build nothing" was the only
+thing it could produce, and the slice would not exist.
+
+What made the first defensible is that the part U9 settled is the part a client
+depends on: `VisibleEntry`, `VisibleCorrection`, `DeclaredEntry` and
+`Disclosure` are real modules with `@enforce_keys`, `@type t()` and a moduledoc
+arguing every field, and `Profiles`' `@spec`s say which function answers which.
+What is _not_ settled is the envelope — the topic, the event names, the wire
+casing.
+
+So the envelope lives in **`contract.ts` and nowhere else**: the topic prefix and
+all seven event names are exported constants that every other file in the
+feature imports, so the contract cannot drift from what the client actually
+sends. A transport author has one file to satisfy and no surface to reverse
+engineer.
+
+This is a deliberate exception to the rule three paragraphs down — "nothing is
+stubbed; a placeholder for a shape nobody has chosen costs the next unit more to
+find and undo than it costs to write from nothing". That rule is about a shape
+**nobody has chosen**. These are chosen.
+
+### What the contract asks for that U9 does not currently produce
+
+Three things, and each is a finding rather than a preference.
+
+**Three of the five shapes have no render struct.** `VisibleEntry` and
+`VisibleCorrection` name their ids `attested_entry_id` and
+`correction_request_id`; `DeclaredEntry`, `Disclosure` and `CorrectionRequest`
+are Ecto schemas and say `id`. A channel rendering those wholesale would put
+`id` on the wire for three entities beside `<entity>_id` for two, on one
+surface — the defect class this project has fixed twice already (U8's
+`rendered_message/1`, U9's own `venue_corrections/1`) and which issue #31 is a
+third instance of. The contract asks for `declared_entry_id` and
+`disclosure_id`, and `decode.ts` **refuses `id`** rather than accepting either,
+because a decoder that took both is how the two spellings come to coexist.
+
+**`request_correction/3` answers a different shape from every read of the same
+entity.** Its `@spec` returns `CorrectionRequest.t()` — the schema, with `id`
+and `resolution` as a `String.t()` — while `list_correction_requests/1`,
+`list_visible_corrections/2`, `list_venue_corrections/1` and
+`fetch_peer_profile/2` all return `VisibleCorrection`, with
+`correction_request_id` and `resolution` as an atom. "Four readers, one shape"
+was U9's own claim and it is true of the readers; the writer is the fifth
+caller and is outside it. The contract asks the transport to render a
+`VisibleCorrection`.
+
+**The audience travels as `audience_kind` + `audience_id`, in both
+directions.** `Disclosure.audience()` is `{:venue, id} | {:person, id}` and the
+table spells it as two nullable columns with exactly one set. Neither is a wire
+shape: the two-column form has to be validated for "exactly one" on the way in,
+and a reply spelled that way beside a request spelled otherwise would be the
+same defect again.
+
+### What the profile surface cannot render, and it is not a UI shortcoming
+
+**A worker cannot be shown who can currently see an entry.**
+`attested_entry_disclosures` holds _overrides_. Both defaults are computed
+server-side from periods that are already stored — an employer is hidden an
+entry whose term overlapped one of theirs, a peer is shown one unless the worker
+said otherwise _and_ unless a venue binding that peer would hide it — and
+neither reaches any wire. So the honest rendering is "the decisions you have
+taken", plus a sentence saying the rest follows a rule this screen cannot
+compute, and `disclosureState` answers `"default"` where there is no row.
+
+Answering `"shown"` there was the tempting alternative and is actively wrong,
+not merely optimistic: the employer default _hides_ an entry exactly where a
+worker's jobs overlapped, so the reassuring version tells somebody their second
+job is disclosed to the venue it is in fact concealed from — and the decision
+they then do not bother taking is the one the unit exists to give them.
+
+**There is no audience picker, because nothing enumerates an audience.**
+`VisibleEntry.venue_id` is the venue that _asserted_ the entry, not one that
+might read it, and no event lists the venues a worker holds an engagement at or
+the peers who can see them. So an audience is typed in as a raw id — poor, and
+better than the only picker this surface could actually build, which would offer
+the attesting venue: the one audience an entry is never hidden from.
+
+**The employer read is not here at all.** `list_visible_entries/2`,
+`list_visible_corrections/2`, `list_venue_corrections/1` and
+`resolve_correction/3` take an `EmployerScope`, so they belong on
+`EmployerVenueChannel`. Whether an employer session is a separate route tree, a
+separate build, or the same one is still the open question recorded below, and
+both profile scenarios issue #12 names are worker-facing.
+
+### The one rule the render layer can defeat on its own
+
+`Profiles.incompleteness_notice/0` is arity zero so that a worker concealing
+something is indistinguishable from one with nothing to conceal. The views'
+column lists are pinned server-side, and `profiles_test.exs` asserts an employer
+read of a concealing worker is identical in length and key set to a read of one
+who has never worked anywhere else.
+
+**All of that is undone by a client that computes the difference back** — a
+count, an ordinal, a gap where a hidden entry would sit, a different notice.
+Three things hold it here:
+
+- **`ProfileView` is the only component that renders somebody else's record, and
+  its props carry no ledger and no counts.** Not "it does not use them" — it
+  cannot be handed them, which a reviewer can check from the type.
+- **The notice arrives on the join reply, never on a profile reply.** That is
+  arity zero expressed on a transport: a join is about the session, so no
+  profile read can influence one, and the same string is rendered beside a
+  record with three entries and one with none. A per-profile field would be
+  arity one however carefully the server computed it.
+- No list is numbered and none renders its length.
+
+`profile-route.test.tsx` asserts the first two against the DOM, and the fixture
+for the first is the point of it: the viewer _is_ holding a ledger — their own —
+carrying a decision keyed on the engagement the peer's visible entry names, so a
+view that reached for `surface.disclosures` would have something real to render.
+A fixture that is empty exactly where the property lives cannot fail, which is
+the lesson `peers.test.tsx` already records.
+
+### There are no announcements, and that is U9 rather than a gap
+
+`usePeerSurface` handles five pushes; this handles none, because
+`HospitalityComs.Profiles` broadcasts nothing at all. So the surface refreshes on
+its own actions and on a rejoin, and a decision taken on another device is not
+seen until one of those. Written down rather than papered over with a poll: the
+fix is a broadcast on the server, and a timer here would be this client
+compensating for a decision U9 has not taken.
+
+### The fourth shared-terminal finding
+
+A refused rejoin carrying `unauthorized` clears the record and the ledger and
+leaves the session alone — `usePeerSurface`'s handling, applied to the most
+sensitive thing this client has held yet. A room bookmark names a venue; a peer
+graph names who somebody knows; this names every term they have served, every
+venue that asserted one, every contest they have raised, and the ledger, which
+is the list of what they did not want seen.
+
 ## Deliberately absent, and why
 
 Nothing below is stubbed. A placeholder for a shape nobody has chosen costs the
 next unit more to find and undo than it costs to write from nothing.
 
-| Surface                                        | Waiting on | What is missing                                   |
-| ---------------------------------------------- | ---------- | ------------------------------------------------- |
-| Profile, attested entries, disclosure controls | U9         | Endpoints, and the per-employer view              |
-| Archived engagements, erasure                  | U10        | Endpoints                                         |
-| Demo controls                                  | U11        | The control surface, which is not employer-scoped |
+| Surface                         | Waiting on | What is missing                                                               |
+| ------------------------------- | ---------- | ----------------------------------------------------------------------------- |
+| The employer's read of a record | U9         | `EmployerVenueChannel` events, and the answer to the employer-client question |
+| Archived engagements, erasure   | U10        | Endpoints                                                                     |
+| Demo controls                   | U11        | The control surface, which is not employer-scoped                             |
+
+The worker-facing profile surface is **built** and its transport is not; that is
+`src/features/profile/contract.ts` rather than a row here, because a row saying
+"waiting on U9" would be wrong in both directions — U9 has landed, and the
+events still do not exist.
 
 `lib/hospitality_coms_web/router.ex` still declares four API routes plus the dev
 mailbox preview, and those four are exactly what `src/api/` covers. U5 and U6

@@ -28,6 +28,8 @@
  * authority.
  */
 
+import { isTopicId, normaliseTopicId } from "../../socket/topic-id";
+
 /** The two topics `PersonSocket` routes for a room. */
 export type RoomKind = "venue" | "shift";
 
@@ -114,22 +116,16 @@ export function roomKindLabel(kind: RoomKind): string {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /**
- * Whether a string is the id shape a topic suffix may carry.
+ * Whether a string is the id shape a room topic's suffix may carry.
  *
- * The same rule `HospitalityComsWeb.ChannelAuth.topic_id/1` applies — 36 bytes,
- * then a uuid cast — and it is checked here for the worker's benefit rather
- * than the server's. The server answers a malformed suffix with exactly what it
- * answers an unknown room, deliberately, so that a refusal enumerates nothing
- * (AE1). That is right for the server and useless to somebody who has just
- * mistyped their own paste, so this client tells them about their own input
- * before it puts it on a socket. It learns nothing by doing so: the value came
- * from this browser.
+ * The rule itself moved to `src/socket/topic-id.ts` when the profile surface
+ * became its third caller — `peer.ts` named that as the condition for hoisting
+ * it. The name stays here because this is what the rooms call it and every call
+ * site reads better for it.
  */
 export function isRoomId(value: string): boolean {
-  return value.length === 36 && UUID.test(value);
+  return isTopicId(value);
 }
 
 /**
@@ -149,7 +145,5 @@ export function isRoomId(value: string): boolean {
  * used to.
  */
 export function normaliseRoomId(value: string): string | null {
-  const trimmed = value.trim().toLowerCase();
-
-  return isRoomId(trimmed) ? trimmed : null;
+  return normaliseTopicId(value);
 }

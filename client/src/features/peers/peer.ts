@@ -40,12 +40,12 @@
  * whenever `HospitalityComs.Clock` is offset, which the demo does deliberately.
  */
 
+import { normaliseTopicId } from "../../socket/topic-id";
+
 /** Where `HospitalityComs.Peers` announces, and what `PeerChannel` joins. */
 export function peerTopic(personId: string): string {
   return `peer:${personId}`;
 }
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * An id as this client will put it in a topic, or `null` if it is not one.
@@ -67,15 +67,14 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * A room in the wrong case loses one room's fan-out. This loses the whole
  * surface's, so it is checked at the one place a topic is built.
  *
- * It is duplicated from `room.ts` rather than shared, deliberately: that file is
- * the rooms' and `channel-failure.ts` was made vocabulary-free precisely so a
- * peer surface need not edit it. Hoisting a uuid helper into `src/socket/` is
- * the alternative, and it belongs to whichever unit first has a third caller.
+ * It was duplicated from `room.ts` rather than shared, with the condition for
+ * un-duplicating it written down here: *"hoisting a uuid helper into
+ * `src/socket/` is the alternative, and it belongs to whichever unit first has
+ * a third caller."* The profile surface is that third caller, so the rule now
+ * lives in `src/socket/topic-id.ts` and this is the peer surface's name for it.
  */
 export function normalisePersonId(value: string): string | null {
-  const trimmed = value.trim().toLowerCase();
-
-  return trimmed.length === 36 && UUID.test(trimmed) ? trimmed : null;
+  return normaliseTopicId(value);
 }
 
 /**
