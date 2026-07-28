@@ -7,11 +7,12 @@
  * refused. It knows no topic and no event name of its own, and there is nothing
  * here for rooms, peers or presence.
  *
- * U7 has since landed and `src/features/rooms/` names the topics and the
- * events. Nothing moved down here when it did: a module that knew
- * `"venue_room:"` would have to know `"peer"` and `"employer_venue:"` too, and
- * the one property this file exists to hold — a refusal is a decision, not a
- * thing to wait out — is the same for all of them.
+ * U7 and U8 have since landed and `src/features/rooms/` and
+ * `src/features/peers/` name the topics and the events. Nothing moved down here
+ * when they did: a module that knew `"venue_room:"` would have to know
+ * `"peer:"` and `"employer_venue:"` too, and the one property this file exists
+ * to hold — a refusal is a decision, not a thing to wait out — is the same for
+ * all of them.
  *
  * ## Why a refused join leaves rather than retries
  *
