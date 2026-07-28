@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RoomEntry, RoomRef } from "./room";
 import {
   addRoom,
+  createBrowserRoomStore,
   createLocalStorageRoomStore,
   decodeRoomEntries,
   findRoom,
@@ -174,5 +175,45 @@ describe("what survives a reload", () => {
     expect(
       decodeRoomEntries([{ kind: "venue", id: "11111111-1111-4111-8111-111111111111" }]),
     ).toEqual([entry(VENUE)]);
+  });
+});
+
+/**
+ * Both of these say what `localStorage` is rather than inheriting it, for the
+ * reason `token-store.test.ts` sets out at length: which branch this function
+ * takes depends on whether the runner provides web storage, so a test that read
+ * the ambient global would cover one branch here and the other on another
+ * machine, and report full coverage of a choice it never made.
+ */
+describe("choosing a store for the browser", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the list in the browser's storage, so it survives a reload", () => {
+    const storage = memoryStorage();
+    vi.stubGlobal("localStorage", storage);
+    const entries = [entry(VENUE), entry(SHIFT, "room_closed")];
+
+    createBrowserRoomStore().write(entries);
+
+    expect(storage.getItem("hospitality-coms.rooms")).not.toBeNull();
+
+    // A second build against the same storage is the reload: `main.tsx` calls
+    // this at module scope, and the bookmarks are still there.
+    expect(createBrowserRoomStore().read()).toEqual(entries);
+  });
+
+  it("falls back to memory when there is no localStorage to reach", () => {
+    // A runtime with no web storage leaves the property `undefined`, and
+    // reading `.getItem` off it is a TypeError at module scope — which is the
+    // whole surface rendering as a blank page rather than a lost bookmark list.
+    vi.stubGlobal("localStorage", undefined);
+
+    const store = createBrowserRoomStore();
+
+    store.write([entry(VENUE)]);
+
+    expect(store.read()).toEqual([entry(VENUE)]);
   });
 });

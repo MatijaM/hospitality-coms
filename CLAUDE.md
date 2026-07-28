@@ -31,6 +31,34 @@ mix compile --warnings-as-errors
 
 In dev, `/dev/mailbox` is the only way to read a magic link — nothing renders one.
 
+## CI, and the test database it must not share
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`, in two parallel jobs. Before it existed, **every green suite in this project's history was one machine's local run.**
+
+- **Elixir** — `mix deps.unlock --check-unused`, `mix format --check-formatted`, `mix compile --warnings-as-errors` under `MIX_ENV=test`, `mix test`, then `mix quality`. Versions come from `.tool-versions` through `erlef/setup-beam`'s `version-file`, which is the only place they are written; that input requires `version-type: strict` and the action errors without it. `deps/` and `_build/` are cached on `mix.lock` and the resolved OTP/Elixir versions, and `priv/plts/` is cached separately — without it every run pays several minutes rebuilding the Dialyzer PLT. The application's own build artefacts are deleted before compiling so `--warnings-as-errors` sees every file rather than the ones that push happened to touch; the dependency build stays cached, which is where the minutes are. `mix quality` runs in **dev**, not test, because `elixirc_paths(:test)` adds `test/support` and CI going red for something `mix quality` on a developer's machine cannot reproduce is worse than the coverage is worth.
+- **Client** — `npm ci` then `npm run verify` (typecheck, lint, format check, vitest, build). Three integration files skip themselves when no server answers; that is correct and CI does not stand one up.
+
+Two hazards, both specific to this repository:
+
+- **The service container is `postgres:17` and connects as the image's default superuser, and both halves are load-bearing.** `Zones.employer_privileges/1` asks `has_table_privilege` about `MAINTAIN`, which does not exist before 17 — on 16 the sweep raises rather than answering. And `boundary_test.exs` asserts `rolsuper` is true for `current_user`, because KTD3's argument is that a superuser bypasses row-level security whether or not a policy is `FORCE`d. "Hardening" CI onto a non-superuser fails around twenty-five tests in ways that read as unrelated to the change under review.
+- **Never `mix test --partitions`.** `config/test.exs` interpolates `MIX_TEST_PARTITION` into the database name, so a partitioned run creates a second and third database on the same cluster, each of which runs the grant migrations. Grants are database-local while roles are not, so `PostgresRolesTest`'s `DROP ROLE` then fails, naming the partition databases. A reviewer hit exactly this. One service container per job is a fresh cluster holding one database, which is what keeps that closed; the suite is well under a minute and partitioning buys nothing worth the failure mode.
+
+The same cluster rule applies locally, and it is not theoretical: **two checkouts running `mix test` against one Postgres cannot both be right.** They share `hospitality_coms_test`, so one worktree's `ecto.migrate` puts the other's schema ahead of its own migrations, and the non-sandboxed fixtures' `purge/0` deletes any `u5-venue%` row including the other run's. Give a second checkout its own cluster (a throwaway `initdb` on another port), not its own database on the shared one.
+
+## The test-database guard
+
+`HospitalityComs.TestDatabaseGuard.sweep/0` runs once from `test_helper.exs`, before the sandbox goes to `:manual` and therefore before any test. On a database that is already empty it issues one query and prints nothing.
+
+**What it is for.** Ten test files are not sandboxed and commit for real. A run that dies between the purge that opens a test and the one that closes it leaves rows behind, and the result is roughly 150 errors across nineteen modules that read exactly like a regression in whatever was last committed — measured at 371 failures across 20 modules on this branch, twice in a row, from one leftover engagement plus two hand-typed rows. Two reviewers lost significant time to it before bisecting to a `DELETE`.
+
+**It does not reliably heal by itself, and where it does, it is by accident.** `purge/0` is one transaction: a row it does not know about that references a row it does delete makes the whole thing raise `foreign_key_violation` and roll back, so the next run fails identically. `oban_jobs` is keyed on venues the purge can still find, so a job outliving its venue is unreachable for ever. What *does* clean up on this branch does so incidentally — `engagement_sweeper_test.exs` deletes every `oban_jobs` row for its worker and `accounts_concurrency_test.exs` deletes every person at `example.com` — which is worth knowing but is not a mechanism anybody designed.
+
+**It cleans rather than refusing, and reports what it cleaned.** The correct contents before the first test are empty: nothing seeds this database and no fixture is meant to outlive its test, so there is nothing to weigh up and refusing would make everybody paste the same `DELETE`. What is worth weighing up is silence, which would hide a real leak behind a suite that goes green anyway — so it prints a banner to stderr and splits the residue three ways rather than reporting one number: what the fixtures' own purge removed, what survived it in `oban_jobs`, and what survived it anywhere else. The third is the loud one; it is where a hand-typed `psql` row lands, and where everything lands when the purge raised before reaching it.
+
+**Two implementation facts that are not incidental.** The table list comes from `pg_class` rather than from `Zones`, because a table created by a migration with no schema module holds rows just the same and a branch switch leaves this database carrying tables the checkout has never heard of. And the fallback for what the purge cannot reach is one `TRUNCATE ... CASCADE` over every table at once — one statement, so there is no foreign-key order to get wrong and nothing to deadlock against — with identifiers quoted by Postgres's own `format('%I')`. Do not replace the purge with a second hand-written ordering; reuse is what keeps the `ON DELETE RESTRICT` chain through `employer_grants` in one place.
+
+`test_database_guard_test.exs` reproduces each of the three residues and the raising purge. It is `async: false` and non-sandboxed, which is what makes its `TRUNCATE` legitimate: ExUnit finishes every async module before starting a synchronous one, so the only committed rows while it runs are its own.
+
 ## Layout worth knowing
 
 - `lib/` — the application. Compiled in every environment, including `:prod`.

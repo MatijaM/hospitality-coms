@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch cancels the first. `main` is excluded from
+# cancellation by including the ref in the group: a cancelled run on main would
+# leave the branch with no green build of record.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  elixir:
+    name: Elixir
+    runs-on: ubuntu-latest
+
+    # PostgreSQL 17 is a hard minimum, not a preference.
+    # `HospitalityComs.Zones.employer_privileges/1` asks `has_table_privilege`
+    # about MAINTAIN, which is a PostgreSQL 17 privilege; on 16 the server
+    # answers `unrecognized privilege type` and the whole boundary proof suite
+    # raises instead of reporting.
+    #
+    # The role stays the image's default `postgres` superuser on purpose.
+    # `HospitalityComs.BoundaryTest` asserts `rolsuper` is true for
+    # `current_user`, and KTD3's argument — that a view is the tier and
+    # row-level security could not be one, because a superuser bypasses RLS
+    # whether or not a policy is FORCEd — is written against that fact. Running
+    # the suite as a non-superuser fails around twenty-five tests in ways that
+    # look unrelated to the change under review.
+    #
+    # One service container per job is also what keeps the roles hazard closed.
+    # `employer_role` and `person_role` are cluster-global while their grants
+    # are database-local, so a grant in any other database on the cluster makes
+    # the `DROP ROLE` in `HospitalityComs.PostgresRolesTest` fail. A fresh
+    # container holds exactly one database, so there is nothing to collide with.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Elixir and OTP
+        uses: erlef/setup-beam@v1
+        id: beam
+        with:
+          # `.tool-versions` is the one place the versions are written.
+          # setup-beam requires `version-type: strict` alongside a version file
+          # and exits with an error otherwise.
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            mix-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      # Keyed the same way, and separate because the PLT survives a `mix.lock`
+      # change badly but a source change not at all: without it every run pays
+      # several minutes rebuilding it from OTP and the dependency tree.
+      - name: Cache Dialyzer PLT
+        uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: plt-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            plt-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      - name: Install dependencies
+        run: |
+          mkdir -p priv/plts
+          mix deps.get
+
+      - name: Check for unused dependencies
+        run: mix deps.unlock --check-unused
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      # The application's own build artefacts are discarded so that
+      # `--warnings-as-errors` sees every file in the project rather than only
+      # the ones this push happened to touch. Compiled dependencies stay in the
+      # cache, which is where the minutes are.
+      - name: Compile with warnings as errors
+        env:
+          MIX_ENV: test
+        run: |
+          rm -rf _build/test/lib/hospitality_coms
+          mix compile --warnings-as-errors
+
+      # `mix test` is aliased to `ecto.create --quiet`, `ecto.migrate --quiet`,
+      # `test`.
+      #
+      # Do not add `--partitions`. `config/test.exs` interpolates
+      # MIX_TEST_PARTITION into the database name, so a partitioned run creates
+      # a second and third database on this cluster, each of which runs the
+      # grant migrations. Grants are database-local and roles are not, so the
+      # `DROP ROLE employer_role` in `HospitalityComs.PostgresRolesTest` then
+      # fails, naming the partition databases. A reviewer hit exactly this. The
+      # suite takes well under a minute; partitioning buys nothing worth that.
+      - name: Run tests
+        env:
+          MIX_ENV: test
+        run: mix test
+
+      # Credo and Dialyzer, in the dev environment, which is where `mix quality`
+      # runs locally. It matters: `elixirc_paths(:test)` adds `test/support`, so
+      # running this under MIX_ENV=test would analyse modules that `mix quality`
+      # on a developer's machine never sees, and CI would go red for something
+      # the documented command cannot reproduce.
+      - name: Credo and Dialyzer
+        run: mix quality
+
+  client:
+    name: Client
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # `client/package.json` asks for >= 20.19; 22 is the active LTS.
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # typecheck, lint, format:check, test, build.
+      #
+      # Three integration files — the API client, the session socket and the
+      # peer surface — skip themselves when no server answers, and that is the
+      # intended behaviour rather than something for CI to work around. They
+      # exist to be run against a live server by hand.
+      - name: Verify
+        run: npm run verify
