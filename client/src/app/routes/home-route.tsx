@@ -8,6 +8,8 @@
  * nothing is broken.
  */
 
+import { Link } from "react-router";
+
 import { useSession } from "../../session/session-context";
 
 export function HomeRoute() {
@@ -32,6 +34,13 @@ export function HomeRoute() {
         Log out
       </button>
 
+      <h2>Rooms</h2>
+      <p>
+        <Link to="/rooms">Your venue and shift rooms</Link>. The list of rooms lives in
+        this browser, because the API serves no endpoint that lists them; everything about
+        each room comes from its channel.
+      </p>
+
       <h2>Not built yet</h2>
       <p>
         Everything below needs an endpoint or a channel that this API does not serve yet.
@@ -39,7 +48,6 @@ export function HomeRoute() {
         to remove than to write.
       </p>
       <ul>
-        <li>Shift and venue rooms, and sending a message — waiting on U7.</li>
         <li>The peer directory and peer conversations — waiting on U8.</li>
         <li>
           The profile, its attested entries and its disclosure controls — waiting on U9.

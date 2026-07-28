@@ -4,7 +4,9 @@ import { BrowserRouter } from "react-router";
 
 import { createApiClient } from "./api/client";
 import { App } from "./app/app";
+import { createBrowserRoomStore } from "./features/rooms/room-store";
 import { SessionProvider } from "./session/session-context";
+import { SocketProvider } from "./socket/socket-context";
 import { createBrowserTokenStore } from "./session/token-store";
 import "./index.css";
 
@@ -18,6 +20,7 @@ import "./index.css";
 // refusing rather than by reading `window.localStorage` directly.
 const api = createApiClient({ baseUrl: import.meta.env.VITE_API_BASE_URL ?? "" });
 const tokenStore = createBrowserTokenStore();
+const roomStore = createBrowserRoomStore();
 
 const container = document.getElementById("root");
 
@@ -27,7 +30,9 @@ createRoot(container).render(
   <StrictMode>
     <BrowserRouter>
       <SessionProvider api={api} tokenStore={tokenStore}>
-        <App />
+        <SocketProvider>
+          <App roomStore={roomStore} />
+        </SocketProvider>
       </SessionProvider>
     </BrowserRouter>
   </StrictMode>,
