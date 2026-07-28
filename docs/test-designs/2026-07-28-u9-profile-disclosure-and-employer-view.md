@@ -322,7 +322,87 @@ Controls, so no assertion can pass for the wrong reason:
 
 Recorded rather than silently applied, because the gate exists to be departed from explicitly.
 
-*(Filled in during implementation — see the end of this file.)*
+1. **"Extend `attested_entry.ex`, do not move it" turned out to mean documentation only.** The
+   schema was already the right shape — keyed on `engagements (id, venue_id)`, unique on the
+   engagement, written by the claim and by nothing else — so U9 added no field, no changeset,
+   and no constraint to it. What changed is its moduledoc, which had a "Who owns this module"
+   section written by U5 in the future tense and now records what the context actually does.
+   The absence of a schema change is the finding: the unit's whole content is the rules about
+   who may read the row.
+
+2. **`app_current_instant()` has to be compared `AT TIME ZONE 'UTC'`, and this was a latent
+   bug rather than a style choice.** Ecto's `:utc_datetime` is `timestamp` **without** time
+   zone in Postgres while the function returns `timestamptz`; comparing them makes Postgres
+   convert the `timestamp` using the session's `TimeZone`, which nothing in this application
+   sets. Measured under `SET LOCAL TimeZone = 'America/New_York'` with `app.now` at
+   `2026-03-01T12:00:00Z`: `timestamp '2026-03-01 12:00:00' <= app_current_instant()` answers
+   **false**, and the same comparison with `AT TIME ZONE 'UTC'` answers **true**. This
+   server's default `TimeZone` is `Etc/UTC`, so the suite would never have caught it. The
+   view now converts, which is the manoeuvre `create_engagements` already uses for the
+   generated `period` column, and CLAUDE.md records that any future comparison against that
+   function needs the same.
+
+3. **Every instant selected out of a view needs `type/2`.** A schemaless query carries no
+   field types, so `timestamp` columns come back as `NaiveDateTime` — which meant the employer
+   read and the person read were handing back two different types inside one `VisibleEntry`.
+   Found by a failing assertion rather than by inspection, and the reason `VisibleEntry` exists
+   at all is that three readers should produce one shape.
+
+4. **The disclosure ledger governs attested entries alone, and declared entries carry none.**
+   The brief left this implicit under criterion 4; it is a decision and is now written into
+   `DeclaredEntry`'s moduledoc. A declared entry is a statement its author can amend or empty
+   at will, so a per-audience switch over it would be a second mechanism for something the
+   first already does. Peers see them whole; employers never see them, which follows the plan's
+   own zone diagram — only `attested_entries` has an arrow into the view.
+
+5. **There are no multi-step writes in this unit, so there is no `Ecto.Multi` and no fourth
+   `.dialyzer_ignore.exs` entry.** The brief carried the constraint from `AGENTS.md`; it did
+   not apply. Setting a disclosure is one `INSERT … ON CONFLICT`, resolving a correction is one
+   conditional `UPDATE … RETURNING`, and every read is one statement. `returning: true` on the
+   upsert **is** load-bearing: a `binary_id` primary key is generated in Elixir, so without it
+   the struct that comes back carries the id the insert *attempted* rather than the id of the
+   row `ON CONFLICT` updated.
+
+6. **`conflict_target` uses `{:unsafe_fragment, …}`, because the index is partial.** Postgres
+   needs the predicate to match a partial unique index and Ecto's keyword form cannot carry
+   one. The fragment is a literal in `Disclosure.conflict_target/1`, next to the constraint
+   names it has to agree with; nothing interpolates a caller's value into it.
+
+7. **An employer scope cannot be placed before its venue's grant was issued**, which changed
+   how the two emptiness tests are built. `Venues.fetch_acting_grant/1` resolves the grant
+   live at the scope's instant, so `end_engagement/2` with a past-dated scope answers
+   `:no_grant`. Both empty-term tests therefore use a term in the *future*, ended at the
+   present instant — `end_engagement/2` closes at the later of the caller's instant and the
+   engagement's own start, which is exactly how the empty range is reachable.
+
+8. **A bare-struct insert raises `Ecto.ConstraintError`, not `Postgrex.Error`.** Row 27's test
+   asserts the former. The distinction is the point of the test: the struct declares no
+   constraints, so what refuses it is the database rather than the changeset.
+
+9. **`session_controller_test.exs`'s `populated_tables/0` grew a `table_type = 'BASE TABLE'`
+   filter.** Not anticipated. `information_schema.tables` lists views, U9's two are the first
+   in the tree, and selecting from one on a connection with no scope raises
+   `app.now is not set` — which is the guarantee U3 built that function to give, arriving in a
+   test that never expected to meet a view. **This is not a weakened assertion:** before U9
+   the catalogue returned exactly the base tables, and the filter restores that set precisely.
+
+10. **`Peers.connected?/2` was added, as the brief anticipated**, plus two tests in
+    `peers_test.exs` rather than one — the second is the control that it answers false for an
+    id naming nobody and for the caller themselves, which `visible?/2` already has.
+
+11. **Two rows of the matrix are one test body each in the other direction, and some bodies
+    have no row.** The table implies a 1:1 mapping and U8 recorded that it is not one; the same
+    correction applies here. 66 rows produced **53** bodies in `profiles_test.exs` plus 15 in
+    `boundary_test.exs`, 2 in `peers_test.exs` and 1 in `people_auth_tables_test.exs` — 71
+    bodies against 66 rows, and they do not line up row by row. Rows 5+6, 8+9+10, 55+56+57,
+    59+60+61 and 62+63 each collapse where the assertions are about one object; rows 64 and 65
+    are one body each in files that already existed; and bodies with no row include "refuses an
+    employer scope holding no grant, by function clause", "refuse a blank body and one over the
+    bound", "grant on the views the migration says it granted on", and the three structural
+    `Records` tests.
+
+12. **Every claim about what a test would catch was checked by breaking the code**, and each
+    mutation was reverted. Recorded in the final report with the tests each one failed.
 
 ## Quality scores (self-assessed)
 
