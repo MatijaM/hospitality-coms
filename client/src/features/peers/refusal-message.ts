@@ -91,6 +91,65 @@ export function isPeerErrorCode(code: string): code is PeerErrorCode {
   return (PEER_ERROR_CODES as readonly string[]).includes(code);
 }
 
+/**
+ * The most recent thing that went wrong, and what this client had asked for.
+ *
+ * Two members, because a **refusal** and an **answer this client cannot read**
+ * are different events. `malformed_reply` is not a `ChannelFailure` and could
+ * not be one: adding a member to that union would break `features/rooms/`'s
+ * exhaustive switches, which is exactly the coupling `channel-failure.ts` was
+ * made codeless to avoid. It lives here rather than with the hook's state so
+ * that every sentence this surface can show is written in one file.
+ */
+export type PeerNotice =
+  | {
+      readonly kind: "refused";
+      readonly action: PeerAction;
+      readonly failure: PeerFailure;
+    }
+  | { readonly kind: "malformed_reply"; readonly action: PeerAction };
+
+/** The one sentence for whatever the surface most recently ran into. */
+export function noticeMessage(notice: PeerNotice): string {
+  switch (notice.kind) {
+    case "refused":
+      return refusalMessage(notice.action, notice.failure);
+    case "malformed_reply":
+      return malformedReplyMessage(notice.action);
+  }
+}
+
+/**
+ * The server answered, and the answer was not a shape this client was promised.
+ *
+ * `decode.ts` says every decoder returns `null` for "this is not that" so the
+ * caller can turn it into a **named absence** rather than `undefined` in a
+ * heading. This is that name. Without it the list loaders kept the previous
+ * list and said nothing, so one row carrying a `state` this client has no case
+ * for left an empty list on screen under the sentence "Nobody has asked you to
+ * connect" — the documented property and the implemented one disagreeing, which
+ * is the class of defect this project keeps finding.
+ */
+function malformedReplyMessage(action: PeerAction): string {
+  switch (action) {
+    case "list":
+      return "The server answered in a shape this client does not understand, so one of these lists could not be updated. What is on screen may be out of date.";
+    case "history":
+      return "The server answered in a shape this client does not understand, so this conversation may be missing messages.";
+    case "join":
+    case "request":
+    case "accept":
+    case "decline":
+    case "send":
+    case "disconnect":
+      // Unreachable today: an action's reply is decoded by `run`, which treats
+      // an undecodable answer as success with no value — the server accepted
+      // it, and the lists are re-asked anyway. Kept as a sentence so that a
+      // caller which starts reporting one is not silent.
+      return "That went through, but the server described it in a shape this client does not understand.";
+  }
+}
+
 export function refusalMessage(action: PeerAction, failure: PeerFailure): string {
   switch (failure.kind) {
     case "channel_timeout":
@@ -180,10 +239,24 @@ function conflictMessage(action: PeerAction): string {
 /**
  * Whether a refusal means this session can no longer hold the peer surface.
  *
- * Only `unauthorized`, which `PeerChannel` emits at `join/3` alone — the
- * session was re-derived and is not live, or the topic is not this session's
- * own. Either way there is nothing to retry and no local state to drop: this
- * feature persists nothing.
+ * Only `unauthorized`, which `PeerChannel` emits at `join/3` alone: the session
+ * was re-derived against `people_tokens` and is not live, or the topic is not
+ * this session's own.
+ *
+ * **It is asked on the join path and nowhere else, and that is the whole of
+ * where it belongs.** No event outcome can produce `unauthorized` on this
+ * channel — every `handle_in/3` refusal goes through `refused/1`, which has no
+ * clause for it — so a call site in `run` would be unreachable code pretending
+ * to be a safeguard. The path that is real is the **rejoin**: `phoenix`
+ * re-joins on its own backoff after a dropped link, and a session revoked in
+ * between is refused there. `usePeerSurface`'s `onRefused` is the caller, and
+ * what it does is clear the rendered graph.
+ *
+ * Nothing here touches the session itself. Whether this person is still signed
+ * in is `GET /api/me`'s answer and `RequireSession`'s to act on; a channel
+ * refusal is not this client's licence to throw a live credential away, which
+ * is the line `SessionProvider` already draws between a 401 and a server it
+ * could not reach.
  */
 export function endsSession(failure: PeerFailure): boolean {
   return (

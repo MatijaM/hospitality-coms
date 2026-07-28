@@ -18,10 +18,12 @@
  * the pair's one current request row, which this client does not hold and
  * cannot reconstruct: a block is a column on that row, it survives new
  * co-rostering, and it is cleared by an exchange this surface may never have
- * seen. So the "Ask to connect" control is offered whenever the client is not
- * already holding a pending approach or an open conversation, and a refusal is
- * rendered as the sentence it is. `forbidden` — KTD19's block — says the next
- * approach has to come from them.
+ * seen. So the "Ask to connect" control is offered unless the server has just
+ * said something that settles it — an open conversation, an approach this
+ * person already sent, or **one they have already received**, which is an
+ * approach that exists in the other direction. Everything else is asked, and a
+ * refusal is rendered as the sentence it is. `forbidden` — KTD19's block — says
+ * the next approach has to come from them.
  *
  * **Whether a request has expired.** `lapsed` is derived server-side at the
  * instant of the event, and it can go back to `pending` without anything being
@@ -49,8 +51,9 @@ import { useSession } from "../../session/session-context";
 import { ConversationView, FieldMessages } from "./conversation-view";
 import type { Conversation, Peer, PeerRequest } from "./peer";
 import { peerKey, requestStateLabel, requestStateMessage, shortId } from "./peer";
-import { refusalMessage } from "./refusal-message";
-import type { PeerConnection, PeerNotice, PeerSurface } from "./use-peer-surface";
+import type { PeerNotice } from "./refusal-message";
+import { noticeMessage, refusalMessage } from "./refusal-message";
+import type { PeerConnection, PeerSurface } from "./use-peer-surface";
 import { usePeerSurface } from "./use-peer-surface";
 
 export function PeersRoute() {
@@ -85,6 +88,18 @@ function PeerSurfaceView({ personId }: { readonly personId: string }) {
       <ConnectionState connection={surface.connection} />
       <Notice notice={surface.notice} onDismiss={surface.clearNotice} />
 
+      {/*
+        The sections are rendered whatever the connection is doing, and the
+        graph leaving the screen after a refused rejoin is `usePeerSurface`
+        emptying what it holds rather than this file hiding it.
+
+        Hiding them here as well was the first shape and it was worse, for a
+        reason worth keeping: two mechanisms for one rule, of which only the
+        outer one was observable, so a test could not tell "not rendered" from
+        "not held" and the clear — the half that actually stops a peer graph
+        outliving the session in memory — was unfalsifiable. One mechanism, and
+        the empty sections under the alert are its evidence.
+      */}
       <PeopleYouCanSee surface={surface} onOpenConversation={setOpenId} />
       <IncomingRequests surface={surface} />
       <OutgoingRequests requests={surface.outgoing} />
@@ -154,8 +169,8 @@ function Notice({
 
   return (
     <div>
-      <p role="alert">{refusalMessage(notice.action, notice.failure)}</p>
-      {notice.failure.kind === "channel_field_error" && (
+      <p role="alert">{noticeMessage(notice)}</p>
+      {notice.kind === "refused" && notice.failure.kind === "channel_field_error" && (
         <FieldMessages failure={notice.failure} />
       )}
       <button type="button" onClick={onDismiss}>
@@ -220,6 +235,18 @@ function PeerEntry({
         (request.state === "pending" || request.state === "lapsed"),
     ) ?? null;
 
+  // Everything on `list_incoming_requests/1` is outstanding — the server's
+  // query is narrower than the outgoing one and returns only what this person
+  // can still answer — so any entry from this peer means the approach has
+  // already been made, in the other direction.
+  //
+  // Offering "Ask … to connect" beside it was wrong twice over. The server
+  // refuses it `conflict` (`:already_requested`), so the button could only ever
+  // produce an error; and it reads as though the two of you have not spoken,
+  // when in fact somebody is waiting on an answer a few lines further down.
+  const asked =
+    surface.incoming.find((request) => request.requesterId === peer.personId) ?? null;
+
   async function ask(): Promise<void> {
     setAsking(true);
     await surface.requestConnection(peer.personId);
@@ -244,6 +271,11 @@ function PeerEntry({
         >
           Open conversation with {shortId(peer.personId)}
         </button>
+      ) : asked !== null ? (
+        // Its own sentence rather than `requestStateLabel`, which names the
+        // state of a request *this person sent* — "Pending" beside somebody who
+        // is waiting on you reads as though you are the one waiting.
+        <span>They asked you to connect — answer under &ldquo;Asked you&rdquo;.</span>
       ) : pending === null ? (
         <button
           type="button"
@@ -271,34 +303,75 @@ function IncomingRequests({ surface }: { readonly surface: PeerSurface }) {
         <ul aria-label="Requests to you">
           {surface.incoming.map((request) => (
             <li key={request.requestId}>
-              <strong>{shortId(request.requesterId)}</strong>{" "}
-              <span>
-                asked on <time dateTime={request.requestedAt}>{request.requestedAt}</time>
-              </span>{" "}
-              <span>{requestStateLabel(request.state)}</span>{" "}
-              {request.state === "lapsed" && (
-                <span>{requestStateMessage(request.state)}</span>
-              )}{" "}
-              <button
-                type="button"
-                onClick={() => {
-                  void surface.acceptRequest(request.requestId);
-                }}
-              >
-                Accept {shortId(request.requesterId)}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  void surface.declineRequest(request.requestId);
-                }}
-              >
-                Decline {shortId(request.requesterId)}
-              </button>
+              <IncomingRequest request={request} surface={surface} />
             </li>
           ))}
         </ul>
       )}
+    </>
+  );
+}
+
+/**
+ * One request to answer, and the two ways of answering it.
+ *
+ * A component of its own so that "an answer is in flight" is per request rather
+ * than per surface. Both controls close while one is running, and both close
+ * for **either** answer: accepting and declining are the same conditional
+ * `UPDATE` on the server (`Records.answerable/2`), so the second click of a
+ * double-click loses whichever it was and gets `:not_found` — the same answer a
+ * request addressed to somebody else gets. That refusal is indistinguishable
+ * from an id that names nothing (AE1), so the surface could not explain it if
+ * it wanted to. It is cheaper not to send it.
+ *
+ * The controls are **not** disabled for a `lapsed` request, which they easily
+ * could have been: accepting one is refused `gone`. `lapsed` is derived at the
+ * instant the list was read and can go back to `pending` with nothing written,
+ * so disabling on it would be this client caching a guess about the future —
+ * which is the mistake `features/rooms/` had to build a "Check again" button to
+ * undo. Declining is accepted at any time regardless.
+ */
+function IncomingRequest({
+  request,
+  surface,
+}: {
+  readonly request: PeerRequest;
+  readonly surface: PeerSurface;
+}) {
+  const [answering, setAnswering] = useState(false);
+
+  async function answer(reply: () => Promise<unknown>): Promise<void> {
+    setAnswering(true);
+    await reply();
+    setAnswering(false);
+  }
+
+  return (
+    <>
+      <strong>{shortId(request.requesterId)}</strong>{" "}
+      <span>
+        asked on <time dateTime={request.requestedAt}>{request.requestedAt}</time>
+      </span>{" "}
+      <span>{requestStateLabel(request.state)}</span>{" "}
+      {request.state === "lapsed" && <span>{requestStateMessage(request.state)}</span>}{" "}
+      <button
+        type="button"
+        disabled={answering}
+        onClick={() => {
+          void answer(() => surface.acceptRequest(request.requestId));
+        }}
+      >
+        Accept {shortId(request.requesterId)}
+      </button>
+      <button
+        type="button"
+        disabled={answering}
+        onClick={() => {
+          void answer(() => surface.declineRequest(request.requestId));
+        }}
+      >
+        Decline {shortId(request.requesterId)}
+      </button>
     </>
   );
 }
