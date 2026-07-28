@@ -19,9 +19,10 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": { target: apiProxyTarget, changeOrigin: false },
-      // The socket has no server side yet (U7 mounts it). The proxy entry is
-      // here because a websocket upgrade needs `ws: true` and forgetting it is
-      // an afternoon lost; the path is the Phoenix default and U7 owns it.
+      // U7 mounts two sockets under this prefix — `/socket/person` and
+      // `/socket/employer` (KTD9) — and nothing at `/socket` itself. The
+      // prefix covers both. `ws: true` is what makes the upgrade proxy rather
+      // than 404 on the handshake.
       "/socket": { target: apiProxyTarget, changeOrigin: false, ws: true },
     },
   },
