@@ -132,6 +132,17 @@ export class FakeChannel implements ChannelLike {
   }
 }
 
+type Deferred = { readonly promise: Promise<void>; resolve: () => void };
+
+function deferred(): Deferred {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+
+  return { promise, resolve };
+}
+
 export class FakeSocket implements SocketLike {
   endpoint: string;
   options: SocketOptions;
@@ -139,17 +150,46 @@ export class FakeSocket implements SocketLike {
   disconnects = 0;
   channels: FakeChannel[] = [];
 
+  private readonly firstConnect = deferred();
+  private readonly firstDisconnect = deferred();
+
   constructor(endpoint: string, options: SocketOptions) {
     this.endpoint = endpoint;
     this.options = options;
   }
 
+  /**
+   * Resolves the first time `connect()` is called, and never on a timer.
+   *
+   * A React test needs a synchronisation point for a fact an **effect**
+   * produces, and the rendered tree is not one: React commits the DOM and
+   * flushes passive effects in two separate steps, so a `waitFor` watching the
+   * DOM can resolve in the window between them. `SocketProvider` publishes the
+   * socket from a `useMemo` — during render — and connects it from an effect,
+   * which is exactly that window, and asserting `connects` after a DOM wait
+   * failed about one run in ten.
+   *
+   * Awaiting this instead waits for the call itself. It cannot pass because
+   * the machine was fast, and if the effect never runs the test times out
+   * rather than reporting a wrong number.
+   */
+  get opened(): Promise<void> {
+    return this.firstConnect.promise;
+  }
+
+  /** Resolves the first time `disconnect()` is called. See `opened`. */
+  get closed(): Promise<void> {
+    return this.firstDisconnect.promise;
+  }
+
   connect(): void {
     this.connects += 1;
+    this.firstConnect.resolve();
   }
 
   disconnect(callback?: () => void): void {
     this.disconnects += 1;
+    this.firstDisconnect.resolve();
     callback?.();
   }
 

@@ -103,6 +103,20 @@ npm run verify      # typecheck, lint, format:check, test, build
 or individually: `npm run typecheck`, `npm run lint`, `npm run format:check`,
 `npm test`, `npm run build`.
 
+**A React test must synchronise on the fact it asserts, not on a render that
+precedes it.** This project has no CI (#26), so every green suite is somebody's
+local run and a one-in-ten failure is a coin flip that eventually lands on
+someone with no context. One such flake has already been found and fixed:
+`socket-context.test.tsx` waited for the rendered tree to say the transport was
+up and then asserted a counter that an **effect** increments. React commits the
+DOM and flushes passive effects as two separate steps, so `waitFor`'s
+MutationObserver can fire in between — nine times in ten the scheduler got there
+first. `FakeSocket.opened` and `.closed` are the fix: promises that resolve when
+`connect()` and `disconnect()` are actually called, with no polling and no
+timeout to lengthen. Await those. Do not raise a timeout, and note that
+`act(async () => await p)` deadlocks — `act` awaits its callback before draining
+the queue, so the effect that would resolve `p` never runs.
+
 `npm test` skips `src/api/client.integration.test.ts`, which runs the whole
 log-in flow against a live server and reads the magic link out of
 `/dev/mailbox/json`. Run it with the server up:

@@ -31,17 +31,22 @@ function renderApp(
 ) {
   const api = options.api ?? createFakeApi();
   const tokenStore = options.tokenStore ?? createMemoryTokenStore();
+  // Built once, not inline in the tree: a store rebuilt on every render is a
+  // new store, and `RoomsRoute` reads its initial list in a `useState`
+  // initialiser. Nothing here asserts on it, which is exactly why it would
+  // have sat unnoticed until something did.
+  const roomStore = createMemoryRoomStore();
   const tree = (
     <MemoryRouter initialEntries={[options.path ?? "/"]}>
       <SessionProvider api={api} tokenStore={tokenStore}>
-        <App roomStore={createMemoryRoomStore()} />
+        <App roomStore={roomStore} />
       </SessionProvider>
     </MemoryRouter>
   );
 
   render(options.strict === true ? <StrictMode>{tree}</StrictMode> : tree);
 
-  return { api, tokenStore };
+  return { api, tokenStore, roomStore };
 }
 
 const signedIn = { currentPerson: () => Promise.resolve(ok(somePerson)) };

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { describe, expect, it } from "vitest";
@@ -58,13 +58,43 @@ function renderProbe(
   return { socket };
 }
 
+/**
+ * Waits for something an effect did, rather than for a render that precedes it.
+ *
+ * **This file used to `waitFor` the rendered tree and then assert a counter an
+ * effect writes, and it failed about one run in ten.** `SocketProvider`
+ * publishes the socket from a `useMemo`, which runs during render, and calls
+ * `connect()` from an effect. React commits the DOM and flushes passive effects
+ * as two separate steps, so the probe reads "up" — and `waitFor`'s
+ * MutationObserver fires — while `connects` is still 0. Nine times in ten the
+ * scheduler got there first, which is the definition of a test that passes
+ * because the machine was fast.
+ *
+ * `FakeSocket.opened` resolves when `connect()` is *called*, so awaiting it is
+ * the fact itself: no polling, no interval, and no timeout to lengthen. If the
+ * effect never runs the test times out, which is the honest failure.
+ *
+ * The await is deliberately **outside** `act`. `act(async () => await p)`
+ * deadlocks: `act` awaits its callback before draining the queue, so the
+ * effect that would resolve `p` never runs — measured here as all four tests
+ * timing out at 5s. React drives the effect on its own scheduler instead, and
+ * `settled()` afterwards drains whatever that left queued.
+ */
+async function until(reached: Promise<void>): Promise<void> {
+  await reached;
+  await settled();
+}
+
+/** Drains anything React still has queued, so a `0` means settled and zero. */
+async function settled(): Promise<void> {
+  await act(() => Promise.resolve());
+}
+
 describe("the session's socket", () => {
   it("opens once the session resolves, carrying the token as authToken", async () => {
     const { socket } = renderProbe();
 
-    await waitFor(() => {
-      expect(screen.getByTestId("transport")).toHaveTextContent("up");
-    });
+    await until(socket.opened);
 
     // `/socket/person`, not `/socket`. Two sockets are mounted under the
     // prefix (KTD9) and there is nothing at the prefix itself; asking for it
@@ -73,10 +103,15 @@ describe("the session's socket", () => {
     expect(socket.endpoint).toBe("/socket/person");
     expect(socket.options).toEqual({ authToken: "c2Vzc2lvbg" });
     expect(socket.connects).toBe(1);
+    expect(screen.getByTestId("transport")).toHaveTextContent("up");
   });
 
-  it("opens nothing at all for a session that has not resolved or does not exist", () => {
+  it("opens nothing at all for a session that has not resolved or does not exist", async () => {
     const { socket } = renderProbe({ tokenStore: createMemoryTokenStore(null) });
+
+    // There is nothing to await here — the claim is that nothing happens — so
+    // the flush is what stops this passing merely by being asserted early.
+    await settled();
 
     expect(screen.getByTestId("transport")).toHaveTextContent("none");
     expect(socket.connects).toBe(0);
@@ -85,15 +120,12 @@ describe("the session's socket", () => {
   it("closes the socket when the session ends", async () => {
     const { socket } = renderProbe();
 
-    await waitFor(() => {
-      expect(screen.getByTestId("transport")).toHaveTextContent("up");
-    });
+    await until(socket.opened);
     await userEvent.click(screen.getByRole("button", { name: /log out/i }));
+    await until(socket.closed);
 
-    await waitFor(() => {
-      expect(screen.getByTestId("transport")).toHaveTextContent("none");
-    });
     expect(socket.disconnects).toBe(1);
+    expect(screen.getByTestId("transport")).toHaveTextContent("none");
   });
 
   it("leaves exactly one connection open through StrictMode's double mount", async () => {
@@ -102,9 +134,8 @@ describe("the session's socket", () => {
     // means every broadcast arrives twice.
     const { socket } = renderProbe({ strict: true });
 
-    await waitFor(() => {
-      expect(screen.getByTestId("transport")).toHaveTextContent("up");
-    });
+    await until(socket.opened);
+    await settled();
 
     expect(socket.connects - socket.disconnects).toBe(1);
   });
