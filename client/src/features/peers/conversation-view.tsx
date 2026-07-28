@@ -57,16 +57,29 @@ export function ConversationView({
   surface,
   onClose,
 }: ConversationViewProps) {
-  const { connectionId } = conversation;
-  const { loadHistory } = surface;
+  const { connectionId, open } = conversation;
+  const { loadHistory, joinGeneration } = surface;
   const messages = surface.messagesOf(connectionId);
 
-  // Keyed on the conversation by the parent, so this runs once per conversation
-  // opened. `loadHistory` is stable — it is a `useCallback` over `run`, which is
-  // a `useCallback` over nothing that changes — so this is not a loop.
+  // `loadHistory` is stable — a `useCallback` over `run`, which is a
+  // `useCallback` over nothing that changes — so the three values beside it are
+  // the whole of when this re-asks, and each is there for its own reason.
+  //
+  //   * `connectionId` — a different conversation. The parent also keys on it,
+  //     so this is a fresh mount, but naming it keeps the effect honest on its
+  //     own terms.
+  //   * `open` — the conversation just closed. This is what makes the
+  //     counterpart's messages leave the screen: `loadHistory` **replaces**
+  //     rather than merges once `open` is false, and the server sends back this
+  //     party's own messages and only their own (R15). Without this dependency
+  //     nothing re-asked, and the cache from while it was open stayed rendered.
+  //   * `joinGeneration` — the socket rejoined. Messages sent while the link
+  //     was down reached no push here, and the history is not one of the three
+  //     lists `onJoined` re-asks, so this is the only thing that backfills
+  //     them. `merged` dedups by `messageId`, so the re-fetch is idempotent.
   useEffect(() => {
-    void loadHistory(connectionId);
-  }, [loadHistory, connectionId]);
+    void loadHistory(connectionId, open);
+  }, [loadHistory, connectionId, open, joinGeneration]);
 
   return (
     <section aria-label={`Conversation with ${shortId(conversation.peerId)}`}>
@@ -87,8 +100,8 @@ export function ConversationView({
             : conversation.disconnectedById === ownPersonId
               ? " — you ended it"
               : " — they ended it"}
-          . You still have everything you wrote here; each of you keeps your own messages,
-          and nothing was deleted.
+          . You keep everything you wrote and they keep everything they wrote, so what is
+          below is your half of it. Nothing was deleted.
         </p>
       )}
 
