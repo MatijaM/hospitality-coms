@@ -68,5 +68,17 @@
   # stamps a deletion deadline on its whole room history. Each is irreversible
   # and each has to be all-or-nothing, which is exactly the shape AGENTS.md
   # requires `Ecto.Multi` for.
-  {"lib/hospitality_coms/lifecycle.ex", :call_without_opaque}
+  {"lib/hospitality_coms/lifecycle.ex", :call_without_opaque},
+
+  # The sixth instance of the same `Ecto.Multi` / `MapSet.t()` false positive,
+  # reported twice in this file — once for each of the two sends. Confirmed to
+  # be the same one rather than assumed: both warnings name
+  # `%Ecto.Multi{:names => %MapSet{...}}` as the expected term, which is the
+  # struct's own field and nothing this module constructs or reads.
+  #
+  # Neither call can go away, and this is why the sends became multi-step at
+  # all: a message and the author's own copy of it are written together or not
+  # at all (KTD16), and the venue-room send resolves its venue under `FOR SHARE`
+  # in the same transaction so a closure cannot commit behind it.
+  {"lib/hospitality_coms/rooms.ex", :call_without_opaque}
 ]

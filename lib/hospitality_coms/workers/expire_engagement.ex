@@ -120,35 +120,38 @@ defmodule HospitalityComs.Workers.ExpireEngagement do
     instant = Clock.now()
 
     expiry = Engagements.revoke_if_expired(engagement_id, instant)
-    {:ok, _written} = Lifecycle.retain_own_messages(engagement_id, instant)
+    {:ok, %{written: _, stamped: _}} = Lifecycle.retain_own_messages(engagement_id, instant)
 
     {:ok, expiry}
   end
 
-  # **The one write on this path, and it is not to `engagements`.** KTD16 asks
-  # for the worker's own copy of their messages to be written "inside the
-  # engagement-end transaction", and that is not available: `end_engagement/2`
-  # runs inside `EmployerRepo.scoped_transaction/2` and `employer_role` holds no
-  # privilege on any person-zone table, so the transaction that closes the term
-  # structurally cannot write the archive. An after-commit write through `Repo`
-  # would be a second connection's transaction with no backstop.
+  # **The one write on this path, and it is not to `engagements`.** It is not
+  # where the worker's archive is *taken*, either — that happens in the
+  # transaction that writes each message, because a copy cannot be taken later
+  # than the instant its source may be deleted and a shift message's source dies
+  # thirty days after the room closes, which every ordinary term outlives.
   #
-  # This is the one event in the system that means "the term has closed", and it
-  # already has a scheduled trigger, a periodic backstop, and idempotence. It
-  # covers explicit ending too, because `end_engagement/2` rewrites `ends_at` to
-  # the closing instant and `EngagementSweeper`'s window then finds it.
+  # What this call does is stamp the archive's deletion clock, `ends_at + 90
+  # days`, which is knowable only now: this is the one event in the system that
+  # means "the term has closed", and it is the state after which `ends_at` can
+  # no longer move. It also copies anything with no copy — words written before
+  # U10 existed, or a copy whose own transaction rolled back.
+  #
+  # It covers explicit ending too, because `end_engagement/2` rewrites `ends_at`
+  # to the closing instant and `EngagementSweeper`'s window then finds it.
   #
   # **It is called unconditionally, and not only on `:revoked`.** Dispatching on
   # the expiry looks tidier and was written that way first; it made the guard
   # inside `retain_own_messages/2` unreachable, so *neither* guard was
   # load-bearing and a mutation of either killed nothing. One guard, in the
-  # function whose invariant it is: an archive is written when a term has
-  # closed, whoever asks and however often — which is also the rule U11's demo
-  # control needs when it drives the worker directly, and which a dispatch here
-  # would not have covered.
+  # function whose invariant it is: an archive is dated when a term has closed,
+  # whoever asks and however often — which is also the rule U11's demo control
+  # needs when it drives the worker directly, and which a dispatch here would
+  # not have covered.
   #
-  # It is idempotent — one copy per (engagement, message) under a unique index —
-  # so a retry after a failure writes no second copy, and it answers `{:ok, 0}`
-  # for a term that is still open, for an engagement that no longer exists, and
-  # for an erased person.
+  # It is idempotent — one copy per (engagement, message) under a unique index,
+  # and the stamp is conditional on the deadline still being null — so a retry
+  # after a failure writes no second copy and moves no deadline. It answers
+  # zeroes for a term that is still open, for an engagement that no longer
+  # exists, and for an erased person.
 end

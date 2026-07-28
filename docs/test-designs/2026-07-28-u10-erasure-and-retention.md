@@ -485,3 +485,83 @@ Recorded rather than silently applied, because the gate exists to be departed fr
 
 10. **Every behavioural claim was checked by breaking the code.** 33 mutations, each restored,
     reported per test in the final summary. One of them found revision 1.
+
+## Revisions made after review
+
+Three independent reviewers ran against the branch at 54765b8 and produced a fix brief; twenty-four
+mutations were re-measured and six of them killed nothing. What follows is what changed and why,
+recorded in the same spirit as the list above.
+
+11. **The archive was written at the wrong event and lost data — KTD16's named failure, by the
+    trigger rather than by the schema.** `ExpireEngagement` wrote the copy when the *engagement*
+    closed, and a shift message's source row dies at `closes_at + 30 days`; every ordinary term
+    outlives its shifts by months, so the venue's copy was swept before the announcement fired and
+    the worker's copy was never created. Measured: 365-day term, shift on day one, sweep on day
+    forty — one copy written, body `["in the venue"]`.
+
+    Two directions were open. **Archiving at message insert was taken**, over "archive at shift
+    close with a provisional deadline re-stamped at term end", for three reasons. It cannot be late,
+    because there is no earlier instant than the one the source row is created at. It needs no new
+    scheduled trigger, where the other direction needs one per shift room *and* a second at venue
+    closure, because a venue-room message's source dies on the venue's clock and has exactly the
+    same failure. And both rows go through `Repo`, so the copy is written in the same transaction as
+    the message — which is closer to KTD16's "inside the engagement-end transaction" than the
+    announcement ever was.
+
+    The provisional-deadline problem the brief anticipated is **removed rather than managed**:
+    `retained_message_copies.delete_after` is now nullable and null while the term is open, exactly
+    as `room_messages.delete_after` is null while its venue trades. `ends_at` can move while a term
+    is open and cannot once it has closed — `renew_engagement/3` answers on activeness,
+    `end_engagement/2` on "has not closed" — so the deadline is stamped once, by
+    `retain_own_messages/2`, from a value that can never be revised. No `GREATEST`, no re-stamp, no
+    monotonicity argument. `retain_own_messages/2` keeps its place as the *backstop*: it stamps, and
+    it copies anything with no copy yet.
+
+12. **A closed venue kept trading and its new messages were undeletable.** `close_venue/2` stamps
+    the rows that exist when it runs and then refuses to run again, and `delete_after < instant`
+    never matches a null. `Rooms.send_venue_room_message/3` now refuses `:room_closed` — the atom
+    already in `Rooms.refusal()` — and resolves the venue under `FOR SHARE` inside the transaction
+    that writes the message, which also orders the pure-race form against the closure's own
+    `FOR NO KEY UPDATE`. `VenueRoomChannel` answers it with the same sentence `:not_a_member` gets,
+    for AE1's reason. Reads are untouched.
+
+    **The shift-room send is deliberately not gated**: a shift message's deadline is stamped at
+    insert, so there are no undeletable rows to prevent, and the room shuts by itself at
+    `ends_at + grace`.
+
+13. **Four tests certified nothing and were replaced or extended rather than reworded.** The 90-day
+    window was pinned by nothing (30 and 2 both killed zero); the KTD21 carve-out bound was vacuous
+    over fourteen empty tables; nothing asserted `attested_entries` survive erasure; and the erasure
+    tests asserted what is nulled and never what survives on the person row. Each fix is a new or
+    widened assertion with its own mutation, listed in the summary.
+
+14. **The KTD21 sweep gained a second reader, over source rather than over the `imports` chunk.**
+    The chunk cannot see `repo.delete_all/1` inside a `Multi.run`, which is the idiom `Lifecycle`
+    itself uses five times. Making `Lifecycle` use `Multi.delete_all/4` instead — the brief's other
+    option — would have removed the bad example without closing the hole, so the reader was built.
+
+15. **"A person-zone key into the employer zone would be a second crossing" is wrong**, and the
+    section above (`## source_message_id is deliberately not a foreign key`, first bullet) is one of
+    the four places it was stated — the others being `add_retention_columns.exs`,
+    `retained_message_copy.ex`, `zones.ex` and `CLAUDE.md`. KTD2's single crossing is about naming a
+    **person**; arrows point into the employer zone freely, and
+    `attested_entry_disclosures.audience_venue_id` is already exactly such a key, argued for at
+    length by `create_profiles.exs`. The *decision* stands on the two `ON DELETE` reasons, each
+    independently sufficient. The first bullet is struck rather than the body rewritten, so that a
+    later unit cannot cite it to refuse a legitimate key.
+
+16. **`{:error, :request_gone}` is already tested** (`peers_test.exs:863`, revision 8 above), so
+    that residual is declined rather than acted on. `retention_runs_counts_not_negative` gained its
+    `check_constraint/3` declaration and a test; the other two constraints are unreachable from
+    Elixir, because `outcome` and `ceiling` are guarded in `changeset/4`'s own head.
+
+17. **No `expire_engagement_test.exs` was created.** Both of that worker's jobs are driven through
+    `Oban.Testing.perform_job/2` in `retention_sweeper_test.exs` — the announcement by "are dated by
+    the expiry announcement, once, and stay so", the refusal by "carry no deletion clock at all
+    while the term is still open" — and by `lifecycle_test.exs`'s erased-person suppression. A third
+    file naming the module would hold the same three assertions in a different place.
+
+18. **One guard is deliberately unobservable and is not claimed to be otherwise.**
+    `stamp_undated_copies/3`'s `is_nil(delete_after)` cannot be reached twice with two different
+    values, because a closed term's `ends_at` cannot move — so removing it kills no test. It stays
+    as the property that makes the stamp idempotent by construction rather than by argument.

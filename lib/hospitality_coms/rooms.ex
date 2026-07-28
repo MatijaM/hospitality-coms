@@ -59,10 +59,18 @@ defmodule HospitalityComs.Rooms do
   application's own role**, under a `HospitalityComs.Accounts.PersonScope`, and
   it is the same reason U5's claim does: the work spans both zones. Sending a
   message reads the bridge, reads `venue_room_suspensions` in the person zone,
-  and writes `room_messages` in the employer zone — and no session on either
-  side holds the privileges for all three. `employer_role` deliberately holds
-  nothing at all on `room_messages`, so the send could not run as the employer
-  even if a caller wanted it to.
+  writes `room_messages` in the employer zone, and — since U10 — writes the
+  author's own copy of it into `retained_message_copies` in the person zone.
+  No session on either side holds the privileges for all four. `employer_role`
+  deliberately holds nothing at all on `room_messages`, so the send could not
+  run as the employer even if a caller wanted it to.
+
+  **Both sends are `Ecto.Multi`s rather than a single insert**, and each of the
+  two extra steps is a KTD16 rule: the archive is taken in the same transaction
+  as the message, because a copy cannot be taken later than the instant its
+  source may be deleted; and the venue-room send resolves its venue under
+  `FOR SHARE`, because a venue-room message written after — or during — a
+  closure carries a deadline nothing can ever match.
 
   There is deliberately **no employer-side venue-room membership function**, and
   it would be redundant rather than dangerous: the venue room's roll is the
@@ -104,12 +112,14 @@ defmodule HospitalityComs.Rooms do
 
   require Logger
 
+  alias Ecto.Multi
   alias HospitalityComs.Accounts.EmployerScope
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.EmployerRepo
   alias HospitalityComs.Engagements
   alias HospitalityComs.Engagements.Engagement
+  alias HospitalityComs.Lifecycle
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms.Records
   alias HospitalityComs.Rooms.RoomMessage
@@ -385,18 +395,76 @@ defmodule HospitalityComs.Rooms do
   The author is the sender's own engagement at that venue, resolved against the
   database at the scope's instant — so an engagement that ended a second ago
   cannot send, with no job having run, and a suspended person cannot either.
+
+  ## A closed venue has no room, and that is a retention rule
+
+  `:room_closed` once `HospitalityComs.Lifecycle.close_venue/2` has run. Closure
+  is the *only* trigger venue-room history has: it stamps `delete_after` on the
+  rows whose deadline is still null, and a message written afterwards would
+  carry a null deadline for ever, because `delete_after < instant` never matches
+  a null and `close_venue/2` refuses to run twice. A closed venue that kept
+  trading therefore accumulated messages nothing in the system could ever
+  delete, and falsified the sentence closure exists to make true.
+
+  The venue is resolved **under `FOR SHARE` inside the transaction that writes
+  the message**, so the pure-race form is closed too: an unlocked read would let
+  a send whose snapshot predates the closure commit a message the closure's
+  stamping statement had already passed over. `FOR SHARE` conflicts with the
+  `FOR NO KEY UPDATE` the closure's own `UPDATE venues` takes, so the send
+  either commits first and is stamped, or parks and then finds the venue shut.
+  Both take the venue row before touching `room_messages`, which is what keeps
+  the two orderings from deadlocking. Reading a closed venue's room is
+  untouched: the messages are there for thirty days and history is what closure
+  puts a clock on.
+
+  ## The author's own copy is written here
+
+  In the same transaction, through `HospitalityComs.Lifecycle.retain_message/3`
+  — KTD16's archive, taken with the message rather than when the term ends,
+  because a term outlives its shifts by longer than a shift's history survives.
+  See that function.
   """
   @spec send_venue_room_message(PersonScope.t(), Ecto.UUID.t(), String.t()) ::
           {:ok, RoomMessage.t()}
-          | {:error, :not_a_member | Ecto.Changeset.t(RoomMessage.t())}
+          | {:error, :not_a_member | :room_closed | Ecto.Changeset.t(RoomMessage.t())}
   def send_venue_room_message(%PersonScope{} = scope, venue_id, body)
       when is_binary(venue_id) and is_binary(body) do
-    with {:ok, engagement} <- fetch_membership(scope, venue_id) do
-      engagement
-      |> RoomMessage.venue_room_changeset(body, scope.now)
-      |> Repo.insert()
-    end
+    Multi.new()
+    |> Multi.run(:venue, fn repo, _changes -> fetch_trading_venue(repo, venue_id) end)
+    |> Multi.run(:engagement, fn _repo, _changes -> fetch_membership(scope, venue_id) end)
+    |> Multi.insert(:message, fn %{engagement: engagement} ->
+      RoomMessage.venue_room_changeset(engagement, body, scope.now)
+    end)
+    |> retaining()
+    |> Repo.transaction()
+    |> sent()
   end
+
+  # The venue row, locked against a closure that has not committed yet.
+  @spec fetch_trading_venue(Ecto.Repo.t(), Ecto.UUID.t()) ::
+          {:ok, Venue.t()} | {:error, :room_closed}
+  defp fetch_trading_venue(repo, venue_id) do
+    venue_id |> Records.trading_venue() |> repo.one() |> trading_or_refuse()
+  end
+
+  @spec trading_or_refuse(Venue.t() | nil) :: {:ok, Venue.t()} | {:error, :room_closed}
+  defp trading_or_refuse(%Venue{} = venue), do: {:ok, venue}
+  defp trading_or_refuse(nil), do: {:error, :room_closed}
+
+  # The archive step both sends share. It is the last step rather than the
+  # first, because it needs the message the insert minted.
+  @spec retaining(Multi.t()) :: Multi.t()
+  defp retaining(multi) do
+    Multi.run(multi, :retained, fn repo, %{message: message, engagement: engagement} ->
+      Lifecycle.retain_message(repo, message, engagement)
+    end)
+  end
+
+  @spec sent({:ok, map()} | {:error, atom(), term(), map()}) ::
+          {:ok, RoomMessage.t()}
+          | {:error, refusal() | :not_rostered | Ecto.Changeset.t(RoomMessage.t())}
+  defp sent({:ok, %{message: %RoomMessage{} = message}}), do: {:ok, message}
+  defp sent({:error, _step, reason, _changes}), do: {:error, reason}
 
   # Membership rather than engagement: a suspended person is engaged and is not
   # in the room, and every venue-room operation is about the room.
@@ -731,18 +799,33 @@ defmodule HospitalityComs.Rooms do
   supplies the id. So the lookup is confined to the person's own venues first,
   and inside that boundary the two remaining answers tell them only what their
   own venue's published shift times already do.
+
+  The author's own copy is written in the same transaction, through
+  `HospitalityComs.Lifecycle.retain_message/3`. This is the room kind that made
+  the archive's old trigger lose data, and the one whose source rows die first.
+
+  There is deliberately **no** venue-closure gate here, unlike
+  `send_venue_room_message/3`. A shift message's deadline is stamped at insert,
+  so a message written into a running shift at a venue that closed an hour ago
+  is deleted on the shift's own clock like every other one; there are no
+  undeletable rows to prevent, and the room shuts by itself at `ends_at + grace`.
   """
   @spec send_shift_room_message(PersonScope.t(), Ecto.UUID.t(), String.t()) ::
           {:ok, RoomMessage.t()}
           | {:error, refusal() | :not_rostered | Ecto.Changeset.t(RoomMessage.t())}
   def send_shift_room_message(%PersonScope{} = scope, shift_room_id, body)
       when is_binary(shift_room_id) and is_binary(body) do
-    with {:ok, room} <- fetch_open_room(scope, shift_room_id),
-         {:ok, engagement} <- fetch_shift_room_member(scope, shift_room_id) do
-      room
-      |> RoomMessage.shift_room_changeset(engagement, body, scope.now)
-      |> Repo.insert()
-    end
+    Multi.new()
+    |> Multi.run(:room, fn _repo, _changes -> fetch_open_room(scope, shift_room_id) end)
+    |> Multi.run(:engagement, fn _repo, _changes ->
+      fetch_shift_room_member(scope, shift_room_id)
+    end)
+    |> Multi.insert(:message, fn %{room: room, engagement: engagement} ->
+      RoomMessage.shift_room_changeset(room, engagement, body, scope.now)
+    end)
+    |> retaining()
+    |> Repo.transaction()
+    |> sent()
   end
 
   # The open room, or why it is not available. Both queries are confined to the

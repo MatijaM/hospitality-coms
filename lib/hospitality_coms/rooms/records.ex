@@ -462,6 +462,31 @@ defmodule HospitalityComs.Rooms.Records do
       order_by: [asc: venue.name, asc: venue.id]
   end
 
+  @doc """
+  One venue that is still trading, taken under `FOR SHARE`.
+
+  What every venue-room *write* resolves before it writes. A venue-room message
+  has no deletion clock until `HospitalityComs.Lifecycle.close_venue/2` stamps
+  one, and closure stamps only the rows that exist when it runs — so a message
+  written after it carries a null deadline nothing can ever match, and
+  `close_venue/2` refuses to run a second time.
+
+  The lock mode is the whole of the race half. `FOR SHARE` conflicts with the
+  `FOR NO KEY UPDATE` the closure's `UPDATE venues` takes, so a send whose
+  snapshot predates the closure parks and then re-evaluates `closed_at IS NULL`
+  against the committed row rather than inserting behind the stamping statement.
+  Several sends may hold it at once, which is why it is `FOR SHARE` and not
+  `FOR UPDATE`: two people talking in a venue room must not serialise on the
+  venue.
+  """
+  @spec trading_venue(Ecto.UUID.t()) :: Ecto.Query.t()
+  def trading_venue(venue_id) when is_binary(venue_id) do
+    from venue in Venue,
+      where: venue.id == ^venue_id,
+      where: is_nil(venue.closed_at),
+      lock: "FOR SHARE"
+  end
+
   ## Shift rooms, from both ends
 
   @doc """

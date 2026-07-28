@@ -35,7 +35,12 @@ defmodule HospitalityComs.Repo.Migrations.AddRetentionColumns do
       extended nor shortened by the venue closing, and the "shorter deadline
       silently wins" failure KTD16 names cannot arise from this direction.
     * `retained_message_copies.delete_after` is the engagement's closed upper
-      bound plus ninety days.
+      bound plus ninety days, and — like the venue-room column above — **null
+      until the event that starts the clock happens**. A copy is written when
+      the message is, while the term is still open and `ends_at` can still
+      move; the deadline is stamped once, when the term closes and `ends_at`
+      can no longer move. Null therefore means one thing in both columns: no
+      clock yet, because the event that starts it has not occurred.
 
   Engagements and attested entries get no deadline at all, deliberately: they
   are the person's portable record.
@@ -48,15 +53,27 @@ defmodule HospitalityComs.Repo.Migrations.AddRetentionColumns do
   their own copy on the shift's clock. So the copy holds the body and the
   instant it was sent, and outlives the row it came from.
 
-  `source_message_id` is the idempotence key and is **not** a foreign key. Three
-  reasons and each is sufficient:
+  **The copy is written in the same transaction as the message.** Writing it
+  when the *engagement* closed reintroduced the exact failure the sentence above
+  names: a shift message dies at `closes_at + 30 days` and an ordinary term
+  outlives its shifts by more than a month, so the venue's copy was swept long
+  before the archive was taken and the worker's copy was never created at all.
+  The trigger has to fire no later than the source row's own deadline, and the
+  earliest such instant is the insert.
 
-    * a person-zone key into the employer zone would be a crossing, and KTD2
-      permits exactly one;
+  `source_message_id` is the idempotence key and is **not** a foreign key. Two
+  reasons, each independently sufficient:
+
     * `ON DELETE RESTRICT` would make the shift-history sweep fail the moment a
       copy outlived its original, which is the copy's entire purpose;
     * `ON DELETE CASCADE` would delete the worker's archive on the venue's
       clock, which is the failure the separation exists to prevent.
+
+  It is **not** because a person-zone key into the employer zone would be a
+  second crossing. It would not be: KTD2's single crossing is about naming a
+  *person*, arrows point into the employer zone freely, and
+  `attested_entry_disclosures.audience_venue_id` is already exactly such a key.
+  The two reasons above are the whole of it.
 
   Ownership is still a database rule rather than an application one:
   `(engagement_id, person_id)` is a `MATCH FULL` composite key into
@@ -77,11 +94,51 @@ defmodule HospitalityComs.Repo.Migrations.AddRetentionColumns do
   written at. Those differ whenever the clock is injected, which is every run in
   the suite and every run of U11's demo control, and the useful one is the first.
 
-  ## `down` gives the three columns and the two tables back
+  ## `roster_entries.delete_after` is `NOT NULL` with no default, and that
+  ## constrains the deploy order
 
-  `roster_entries.delete_after` is `NOT NULL`, so `up` backfills from
-  `shift_rooms` before adding the constraint rather than defaulting it: a
-  default would be a deadline nobody derived, on rows the sweeper deletes.
+  `up` backfills from `shift_rooms` before adding the constraint rather than
+  defaulting it: a default would be a deadline nobody derived, on rows the
+  sweeper deletes. The consequence is that **code which predates U10 cannot
+  insert a roster entry once this migration has run** — `Rosters.add_to_roster/3`
+  stamps the column, and a build without that change writes a null and is
+  refused. So this migration is deploy-before-migrate: ship the application
+  first, migrate second. The three-phase alternative — add nullable, deploy the
+  writer, backfill and `SET NOT NULL` in a second migration — buys a
+  rolling-deploy window and costs two migrations and a period in which the
+  column means nothing; it is the right shape at scale and is deliberately not
+  taken here.
+
+  `add_room_deadlines/0` is the same trade one step further: `ADD COLUMN`, a
+  full backfill, `SET NOT NULL` and two index builds against `room_messages` —
+  every chat message in the product — inside one transaction holding
+  `ACCESS EXCLUSIVE`, with no `@disable_ddl_transaction` and no `CONCURRENTLY`.
+  At production scale that is a write outage on the messaging path. Recorded
+  rather than fixed: `CONCURRENTLY` cannot run inside a migration's transaction,
+  so fixing it means the same three-phase split.
+
+  ## `down` gives the three columns and the two tables back, and **loses data**
+
+  The schema comes back byte for byte. Two things do not:
+
+    * `retained_message_copies` returns **empty**, and where the shift sweep has
+      already taken the source rows the words are gone from both tables. Rolling
+      forward again re-creates copies only for messages that still exist.
+    * `venues.closed_at` returns **empty**, so a venue that was wound up reverts
+      to trading and its venue-room messages revert to a null deadline —
+      indefinite retention, which is a data-protection regression rather than a
+      tidy-up. Rolling forward again does not restore it: `close_venue/2` has to
+      be run a second time, at a new instant.
+
+  Capture both before rolling back, and restore them by hand afterwards:
+
+      COPY (SELECT * FROM retained_message_copies) TO '/tmp/copies.csv' CSV HEADER;
+      COPY (SELECT id, closed_at FROM venues WHERE closed_at IS NOT NULL)
+        TO '/tmp/closures.csv' CSV HEADER;
+
+  `room_messages.delete_after` and `roster_entries.delete_after` are the
+  reversible half: `up` recomputes both from `shift_rooms.closes_at`, which does
+  not move. Venue-room deadlines are not, for the reason above.
   """
 
   use Ecto.Migration
@@ -197,7 +254,14 @@ defmodule HospitalityComs.Repo.Migrations.AddRetentionColumns do
       add(:sent_at, :utc_datetime, null: false)
 
       add(:retained_at, :utc_datetime, null: false)
-      add(:delete_after, :utc_datetime, null: false)
+
+      # Null while the engagement is open, exactly as `room_messages` is null
+      # while the venue trades. The copy is written with the message, when
+      # `ends_at` can still move; the deadline is stamped when the term closes,
+      # from a bound that can no longer move — `renew_engagement/3` answers on
+      # activeness and `end_engagement/2` on "has not closed", so neither can
+      # reach a closed term.
+      add(:delete_after, :utc_datetime)
 
       timestamps(type: :utc_datetime)
     end
@@ -236,9 +300,15 @@ defmodule HospitalityComs.Repo.Migrations.AddRetentionColumns do
 
     # A deadline before the message was sent would be a copy retained for a
     # negative length of time, which the sweeper would delete on its first run.
+    #
+    # The `IS NULL` disjunct is spelled out rather than left to Postgres. A
+    # CHECK is satisfied by null, so `delete_after >= sent_at` would already
+    # admit an unstamped copy — writing it down is what stops a later reader
+    # concluding the column must be set, which is the trap
+    # `connection_requests_decline_blocks_requester` was written into once.
     create(
       constraint(:retained_message_copies, :retained_message_copies_deadline_after_sending,
-        check: "delete_after >= sent_at"
+        check: "delete_after IS NULL OR delete_after >= sent_at"
       )
     )
   end

@@ -45,8 +45,9 @@ defmodule HospitalityComs.Lifecycle do
   changeset this context could forget to use.
 
   What it *does* delete is bounded and enumerated: auth tokens, the erasing
-  party's own peer messages, their declared entries, their retained own-message
-  copies, and their scheduled Oban rows.
+  party's own peer messages, their declared entries, the disclosure rows that
+  hand one of their own entries *over* to a named peer, their retained
+  own-message copies, and their scheduled Oban rows.
 
   What it deliberately does **not** delete is the interesting half:
 
@@ -60,21 +61,54 @@ defmodule HospitalityComs.Lifecycle do
     * `connection_requests` — the row *is* KTD19's block, and
       `peer_connections.request_id` is `NOT NULL ON DELETE RESTRICT`. Deleting
       it would destroy the counterpart's protection and orphan the connection.
-    * `attested_entry_disclosures` — from **both** sides, and this is the
-      counter-intuitive one. A disclosure row only ever narrows what an audience
-      sees, so deleting one *discloses more*; peer visibility runs thirty days
-      past an engagement's end, so a tidy-up here would re-reveal, to every
-      peer, exactly the entries the worker had hidden, at the moment they asked
-      for erasure. Rows naming them as the *audience* belong to somebody else
-      besides.
+    * `attested_entry_disclosures` **where `disclosed` is false**, from both
+      sides, and this is the counter-intuitive one. A `false` row narrows what
+      an audience sees, so deleting one *discloses more*; peer visibility runs
+      thirty days past an engagement's end, so a tidy-up here would re-reveal,
+      to every peer, exactly the entries the worker had hidden, at the moment
+      they asked for erasure. Rows naming them as the *audience* belong to
+      somebody else besides, whichever way those rows point.
+
+      **A `true` row is the opposite and is deleted.** `Profiles.Records`'s peer
+      rule reads it as an override that beats the computed concurrency default,
+      so keeping one leaves an erased person affirmatively disclosing an entry
+      to a named peer for the whole tail, with no session left to withdraw it.
+      The old claim — "a disclosure row only ever narrows" — was true of one of
+      the two values and the test wrote only that one.
     * `correction_requests` — addressed to a venue, which is the other party, on
-      the same test KTD15c applies to a message body.
+      the same test KTD15c applies to a message body. `Profiles` also serves one
+      to any peer who can see the entry it contests (R16), so this is not purely
+      a two-party record: an erased person's own free text reaches third parties
+      for the thirty-day tail, while their declared entries — the same kind of
+      self-authored text with no other party to it — are deleted. The asymmetry
+      is deliberate rather than overlooked. A correction request is an assertion
+      *against* a venue's attestation, and R16 exists so a reader of the
+      attestation sees it is contested; deleting the contest while keeping the
+      attestation leaves the record worse for the erased person than leaving
+      both. It is written down here because it is the one place erasure keeps
+      free text the erasing party wrote.
+    * `venue_room_suspensions` — keyed on the engagement and naming no person,
+      so it discloses nothing once the label is reduced, and deleting one would
+      silently put an erased person back on a room roll they had opted out of.
+      Listed because the two enumerations above read as exhaustive and this is
+      the table that was in neither.
 
   **The thirty-day tail is a disclosure, not a defect.** A peer co-engaged with
   the erased person keeps seeing their attested entries — venue names,
   employer-authored role labels, dates — for thirty days after the last
   engagement ends. No email, no declared entries. That is identifier erasure
   applied consistently, and it is written down here rather than found later.
+
+  **A second residue of the same tail**: an erased person stays on a co-engaged
+  peer's `Peers.list_visible_peers/1` for those thirty days, so a request can be
+  sent to somebody who has no session left to answer it — leaving a permanently
+  current `connection_requests` row that nothing supersedes. Nothing leaks: the
+  list carries the `person_id` and the employer-authored role label the venue
+  room already disclosed, and no email. Filtering erased people out of visibility
+  is the obvious fix and is **not** taken here, because visibility is derived
+  from engagements alone and adding a `people` predicate to it makes erasure
+  reach into a query that has nothing else to do with a person's row — a U8
+  decision rather than a retention one.
 
   ## Erasure is exempt from the last-grant-holder invariant (KTD17)
 
@@ -109,11 +143,16 @@ defmodule HospitalityComs.Lifecycle do
   `HospitalityComs.Lifecycle.Records` and every one of them filters on the
   column alone.
 
-    * own-message copies, ninety days past the engagement's end;
+    * own-message copies, ninety days past the engagement's end — and **null
+      until the term closes**, because that is the instant after which `ends_at`
+      can no longer move;
     * shift-room messages, thirty days past the room's `closes_at`;
     * roster entries, on the same instant from the same room;
     * venue-room messages, thirty days past `close_venue/2` — and **null until
       then**, so the sweep passes over them for ever while the venue trades.
+
+  Two of the four are null until an event happens, and it means the same thing
+  in both: no clock yet, because the event that starts it has not occurred.
 
   Engagements and attested entries carry no deadline at all: they are the
   person's portable record.
@@ -136,28 +175,44 @@ defmodule HospitalityComs.Lifecycle do
   unrecorded; on the refusal path it is written after the rollback, because the
   case a record matters most for is the one where everything else was undone.
 
-  ## Why the archive is written by the expiry announcement
+  ## The archive is taken with the message, and dated when the term closes
 
   KTD16 says the retained copy is written "inside the engagement-end
   transaction". That is not available, and the reason is the zone partition
   rather than an oversight: `HospitalityComs.Engagements.end_engagement/2` runs
   inside `EmployerRepo.scoped_transaction/2`, and `employer_role` holds no
   privilege on any person-zone table. An after-commit write through `Repo` would
-  be a second connection's transaction with no backstop — a silent partial
-  failure nothing detects and nothing retries.
+  be a second connection's transaction with no backstop.
 
-  So `retain_own_messages/2` is called by
-  `HospitalityComs.Workers.ExpireEngagement` on its `:revoked` path: the one
-  event in the system that means "this term has closed", already carrying a
-  scheduled trigger, a periodic backstop, and idempotence. It covers natural
-  expiry and explicit ending alike, because `end_engagement/2` rewrites `ends_at`
-  to the closing instant and `EngagementSweeper`'s window then finds it.
+  Writing it when the expiry was *announced* was the first answer and it lost
+  data. **A copy cannot be taken later than the instant its source may be
+  deleted**, and the earliest such instant is a shift message's
+  `closes_at + 30 days` — which every ordinary term outlives by months. So the
+  venue's copy was swept before the announcement fired and the worker's copy was
+  never created: the failure KTD16 names in its own words, arriving through the
+  trigger rather than through the schema.
+
+  So `retain_message/3` is called by `HospitalityComs.Rooms` inside the
+  transaction that inserts the message. Both rows go through `Repo`, so this is
+  one transaction rather than two connections, which is closer to what KTD16
+  asked for than the announcement ever was. The copy's `delete_after` is null
+  until the term closes.
+
+  `retain_own_messages/2` stays, and is now the backstop rather than the
+  mechanism: `HospitalityComs.Workers.ExpireEngagement` calls it when a term has
+  closed, it stamps the deadline once, and it copies anything with no copy —
+  words written before this existed, or a copy whose own transaction rolled
+  back. It covers natural expiry and explicit ending alike, because
+  `end_engagement/2` rewrites `ends_at` to the closing instant and
+  `EngagementSweeper`'s window then finds it.
 
   The permanent-loss gap CLAUDE.md records for expiry *announcements* does not
-  reach the archive: that gap is a lost broadcast, and the job still ran.
-  Uniqueness suppresses a replacement only once the job has `:completed` — after
-  the copy was written — and `:discarded` is excluded, so a permanently failed
-  job is re-inserted by the sweeper.
+  reach the archive's contents: the copies are already written. What a lost
+  announcement leaves is an archive with **no deadline**, which over-retains
+  rather than losing anything, and which the next announcement of that
+  engagement stamps. Uniqueness suppresses a replacement only once the job has
+  `:completed`, and `:discarded` is excluded, so a permanently failed job is
+  re-inserted by the sweeper.
   """
 
   alias Ecto.Multi
@@ -200,6 +255,12 @@ defmodule HospitalityComs.Lifecycle do
   # tick and the sweep would never make progress again.
   @default_ceiling 5_000
 
+  # Rows per `insert_all` on the archive's backfill path. `insert_all` binds one
+  # parameter per field per row and Postgres refuses more than 65535 of them, so
+  # ten fields put the hard wall at 6553; this is the same order of magnitude as
+  # every other bound in the unit and comfortably under it.
+  @copy_chunk_size 500
+
   @typedoc """
   What one erasure did.
 
@@ -216,12 +277,19 @@ defmodule HospitalityComs.Lifecycle do
           labels_reduced: non_neg_integer(),
           peer_messages_deleted: non_neg_integer(),
           declared_entries_deleted: non_neg_integer(),
+          disclosures_withdrawn: non_neg_integer(),
           retained_copies_deleted: non_neg_integer(),
           jobs_cancelled: non_neg_integer()
         }
 
   @typedoc "What closing a venue did."
   @type closure() :: %{venue: Venue.t(), messages_stamped: non_neg_integer()}
+
+  @typedoc """
+  What one archive pass did: copies it wrote, and copies whose deletion clock it
+  started. Both are zero on a term that has not closed and on an erased person.
+  """
+  @type archive() :: %{written: non_neg_integer(), stamped: non_neg_integer()}
 
   ## Constants the rest of the tree reads rather than restates
 
@@ -288,7 +356,8 @@ defmodule HospitalityComs.Lifecycle do
   One transaction. It ends every engagement the person holds at every venue,
   reduces every engagement's label, nulls the address and stamps `erased_at`,
   deletes every auth token, disconnects every live peer connection and deletes
-  the messages this person wrote in them, deletes their declared entries and
+  the messages this person wrote in them, deletes their declared entries, the
+  disclosure rows handing one of their own entries over to a named peer, and
   their retained own-message copies, and deletes the Oban rows scheduled against
   their engagements.
 
@@ -319,6 +388,9 @@ defmodule HospitalityComs.Lifecycle do
     end)
     |> Multi.run(:declared_entries_deleted, fn repo, _changes ->
       count(repo.delete_all(Records.declared_entries_of(person_id)))
+    end)
+    |> Multi.run(:disclosures_withdrawn, fn repo, _changes ->
+      count(repo.delete_all(Records.asserted_disclosures_of(person_id)))
     end)
     |> Multi.run(:retained_copies_deleted, fn repo, _changes ->
       count(repo.delete_all(Records.retained_copies_of(person_id)))
@@ -388,6 +460,7 @@ defmodule HospitalityComs.Lifecycle do
        labels_reduced: changes.labels_reduced,
        peer_messages_deleted: changes.peer_messages_deleted,
        declared_entries_deleted: changes.declared_entries_deleted,
+       disclosures_withdrawn: changes.disclosures_withdrawn,
        retained_copies_deleted: changes.retained_copies_deleted,
        jobs_cancelled: changes.jobs_cancelled
      }}
@@ -487,20 +560,61 @@ defmodule HospitalityComs.Lifecycle do
   ## The worker's archive
 
   @doc """
-  Writes this engagement's author's own copy of every message it sent.
+  Writes the author's own copy of one message, in the transaction that wrote it.
 
-  Called by `HospitalityComs.Workers.ExpireEngagement` when it finds the term
-  closed — see the moduledoc for why it is not called from
-  `HospitalityComs.Engagements.end_engagement/2`.
+  Called by `HospitalityComs.Rooms` from inside the send's `Ecto.Multi`, on both
+  room kinds. **The instant a copy is taken has to be no later than the instant
+  its source can be deleted**, and the earliest deadline any source carries is a
+  shift message's `closes_at + 30 days` — which an ordinary term outlives by
+  months. Taking the archive when the *engagement* closed therefore lost exactly
+  the rows KTD16 names: "a person whose engagement ended long after a shift
+  would lose their own copy on the shift's clock". Writing it with the message
+  is the only trigger that cannot be late.
 
-  Idempotent: one copy per (engagement, message) under a unique index, with
-  `ON CONFLICT DO NOTHING`, so re-running an announcement costs a statement and
-  writes nothing. The count is what this call actually wrote, which is zero on
-  every run after the first.
+  `delete_after` is **null** here, exactly as a venue-room message's is while its
+  venue trades: the copy's clock is `ends_at + 90 days` and `ends_at` can still
+  move while the term is open. `retain_own_messages/2` stamps it once the term
+  has closed, which is the state after which it cannot move again.
 
-  `{:ok, 0}` also covers the three cases where there is nothing to write, and
-  they are deliberately not told apart — the contract is "this engagement's
-  archive is up to date", not "here is why it is empty":
+  `{:ok, 0}` for an **erased person**, resolved under `FOR SHARE` so a concurrent
+  `erase_person/1` cannot commit between the check and the insert. See
+  `HospitalityComs.Lifecycle.Records.unerased_person_shared/1`.
+  """
+  @spec retain_message(Ecto.Repo.t(), RoomMessage.t(), Engagement.t()) ::
+          {:ok, non_neg_integer()}
+  def retain_message(repo, %RoomMessage{} = message, %Engagement{} = engagement) do
+    engagement.person_id
+    |> Records.unerased_person_shared()
+    |> repo.one()
+    |> retained(repo, message, engagement)
+  end
+
+  @spec retained(Person.t() | nil, Ecto.Repo.t(), RoomMessage.t(), Engagement.t()) ::
+          {:ok, non_neg_integer()}
+  defp retained(nil, _repo, _message, _engagement), do: {:ok, 0}
+
+  defp retained(%Person{}, repo, message, engagement) do
+    {:ok, insert_copies(repo, [copy_of(message, engagement, message.sent_at, nil)])}
+  end
+
+  @doc """
+  Brings this engagement's archive up to date, and stamps its deletion clock.
+
+  Called by `HospitalityComs.Workers.ExpireEngagement`, which is the one event
+  in the system that means "this term has closed" and already carries a
+  scheduled trigger, a periodic backstop and idempotence. Two things happen and
+  the second is the one that matters:
+
+    * every message of this engagement with no copy yet is copied — the backstop
+      for words written before U10 existed, and for a copy whose own transaction
+      rolled back;
+    * every copy of this engagement with no deadline is stamped
+      `ends_at + 90 days`. `is_nil(delete_after)` is the whole condition, so it
+      runs once and can never move a deadline that already exists.
+
+  `%{written: 0, stamped: 0}` covers the three cases where there is nothing to
+  do, and they are deliberately not told apart — the contract is "this
+  engagement's archive is up to date", not "here is why it is empty":
 
     * an engagement whose term has not closed at `instant`;
     * an id that names nothing;
@@ -510,51 +624,89 @@ defmodule HospitalityComs.Lifecycle do
       step with the row it is about. A `suppressed` column on `engagements`
       would be a second place for one fact to live, and the sweeper would have
       to remember to read it.
+
+  Always `{:ok, _}`; a refusal is one of the three above rather than an error.
   """
-  @spec retain_own_messages(Ecto.UUID.t(), DateTime.t()) :: {:ok, non_neg_integer()}
+  @spec retain_own_messages(Ecto.UUID.t(), DateTime.t()) :: {:ok, archive()}
   def retain_own_messages(engagement_id, %DateTime{} = instant) when is_binary(engagement_id) do
-    Engagement |> Repo.get(engagement_id) |> retain_for(instant)
+    Multi.new()
+    |> Multi.run(:engagement, fn repo, _changes -> closed(repo, engagement_id, instant) end)
+    |> Multi.run(:person, fn repo, %{engagement: engagement} ->
+      unerased_or_skip(repo, engagement.person_id)
+    end)
+    |> Multi.run(:written, fn repo, %{engagement: engagement} ->
+      {:ok, backfill_copies(repo, engagement, instant)}
+    end)
+    |> Multi.run(:stamped, fn repo, %{engagement: engagement} ->
+      count(repo.update_all(deadline_stamp(engagement, instant), []))
+    end)
+    |> Repo.transaction()
+    |> archived()
   end
 
-  @spec retain_for(Engagement.t() | nil, DateTime.t()) :: {:ok, non_neg_integer()}
-  defp retain_for(nil, _instant), do: {:ok, 0}
-
-  defp retain_for(%Engagement{} = engagement, instant) do
-    engagement
-    |> archivable?(instant)
-    |> archive(engagement, instant)
+  @spec closed(Ecto.Repo.t(), Ecto.UUID.t(), DateTime.t()) ::
+          {:ok, Engagement.t()} | {:error, :still_open}
+  defp closed(repo, engagement_id, instant) do
+    engagement_id |> Records.closed_engagement(instant) |> repo.one() |> closed_term()
   end
 
-  @spec archivable?(Engagement.t(), DateTime.t()) :: boolean()
-  defp archivable?(%Engagement{ends_at: ends_at, person_id: person_id}, instant) do
-    DateTime.compare(ends_at, instant) != :gt and
-      not Repo.exists?(Records.erased_person(person_id))
+  @spec closed_term(Engagement.t() | nil) :: {:ok, Engagement.t()} | {:error, :still_open}
+  defp closed_term(%Engagement{} = engagement), do: {:ok, engagement}
+  defp closed_term(nil), do: {:error, :still_open}
+
+  @spec unerased_or_skip(Ecto.Repo.t(), Ecto.UUID.t()) :: {:ok, Person.t()} | {:error, :erased}
+  defp unerased_or_skip(repo, person_id) do
+    person_id |> Records.unerased_person_shared() |> repo.one() |> present_person()
   end
 
-  @spec archive(boolean(), Engagement.t(), DateTime.t()) :: {:ok, non_neg_integer()}
-  defp archive(false, _engagement, _instant), do: {:ok, 0}
+  @spec present_person(Person.t() | nil) :: {:ok, Person.t()} | {:error, :erased}
+  defp present_person(%Person{} = person), do: {:ok, person}
+  defp present_person(nil), do: {:error, :erased}
 
-  defp archive(true, %Engagement{} = engagement, instant) do
-    rows =
-      engagement.id
-      |> Records.messages_of_engagement()
-      |> Repo.all()
-      |> Enum.map(&copy_of(&1, engagement, instant))
+  @spec deadline_stamp(Engagement.t(), DateTime.t()) :: Ecto.Query.t()
+  defp deadline_stamp(%Engagement{} = engagement, instant) do
+    Records.stamp_undated_copies(engagement.id, archive_deadline(engagement.ends_at), instant)
+  end
 
+  # Chunked, because `insert_all` binds one parameter per field per row and
+  # Postgres refuses more than 65535 of them — ten fields put the wall at 6553
+  # messages, which is an ordinary year at a busy venue. Past it the statement
+  # raised `Postgrex.QueryError` out of `perform/1`, the job failed every
+  # attempt, was discarded, was re-inserted by the sweeper and failed again.
+  # `on_conflict: :nothing` is what makes partial progress safe.
+  #
+  # The read is still one `Repo.all`: a bound on the statement, not on memory.
+  # An engagement with millions of messages would want a cursor, and this is a
+  # POC with a sweep bounded at five hundred rows a tick.
+  @spec backfill_copies(Ecto.Repo.t(), Engagement.t(), DateTime.t()) :: non_neg_integer()
+  defp backfill_copies(repo, %Engagement{} = engagement, instant) do
+    deadline = archive_deadline(engagement.ends_at)
+    stamped_at = DateTime.truncate(instant, :second)
+
+    engagement.id
+    |> Records.messages_of_engagement()
+    |> repo.all()
+    |> Enum.map(&copy_of(&1, engagement, stamped_at, deadline))
+    |> Enum.chunk_every(@copy_chunk_size)
+    |> Enum.reduce(0, fn chunk, written -> written + insert_copies(repo, chunk) end)
+  end
+
+  @spec insert_copies(Ecto.Repo.t(), [map()]) :: non_neg_integer()
+  defp insert_copies(repo, rows) do
     {written, _rows} =
-      Repo.insert_all(RetainedMessageCopy, rows,
+      repo.insert_all(RetainedMessageCopy, rows,
         on_conflict: :nothing,
         conflict_target: [:engagement_id, :source_message_id]
       )
 
-    {:ok, written}
+    written
   end
 
   # `insert_all` is not on Ecto's insert path, so a `binary_id` primary key is
   # not autogenerated and is minted here.
-  @spec copy_of(RoomMessage.t(), Engagement.t(), DateTime.t()) :: map()
-  defp copy_of(%RoomMessage{} = message, %Engagement{} = engagement, instant) do
-    stamped_at = DateTime.truncate(instant, :second)
+  @spec copy_of(RoomMessage.t(), Engagement.t(), DateTime.t(), DateTime.t() | nil) :: map()
+  defp copy_of(%RoomMessage{} = message, %Engagement{} = engagement, retained_at, deadline) do
+    stamped_at = DateTime.truncate(retained_at, :second)
 
     %{
       id: Ecto.UUID.generate(),
@@ -564,11 +716,18 @@ defmodule HospitalityComs.Lifecycle do
       body: message.body,
       sent_at: message.sent_at,
       retained_at: stamped_at,
-      delete_after: archive_deadline(engagement.ends_at),
+      delete_after: deadline,
       inserted_at: stamped_at,
       updated_at: stamped_at
     }
   end
+
+  @spec archived({:ok, map()} | {:error, atom(), term(), map()}) :: {:ok, archive()}
+  defp archived({:ok, %{written: written, stamped: stamped}}) do
+    {:ok, %{written: written, stamped: stamped}}
+  end
+
+  defp archived({:error, _step, _reason, _changes}), do: {:ok, %{written: 0, stamped: 0}}
 
   @doc """
   A person's own archive of what they said, oldest first.

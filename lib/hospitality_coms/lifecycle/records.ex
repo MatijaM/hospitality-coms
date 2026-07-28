@@ -41,6 +41,7 @@ defmodule HospitalityComs.Lifecycle.Records do
   alias HospitalityComs.Lifecycle.RetainedMessageCopy
   alias HospitalityComs.Peers.PeerMessage
   alias HospitalityComs.Profiles.DeclaredEntry
+  alias HospitalityComs.Profiles.Disclosure
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComs.Rosters.RosterEntry
   alias HospitalityComs.Venues.EmployerGrant
@@ -64,16 +65,32 @@ defmodule HospitalityComs.Lifecycle.Records do
   end
 
   @doc """
-  Whether this person has been erased.
+  The person, share-locked, if they have not been erased.
 
-  Read rather than stored on the copy path, because erasure is irreversible: a
-  derived answer cannot fall out of step with the row it is about, and a
-  `suppressed` column on `engagements` would be a second place for the same fact
-  to live.
+  What every write to the archive resolves first. Read rather than stored,
+  because erasure is irreversible: a derived answer cannot fall out of step with
+  the row it is about, and a `suppressed` column on `engagements` would be a
+  second place for the same fact to live.
+
+  `FOR SHARE` rather than a plain read, and the lock mode is the whole of it. An
+  unlocked check followed by an insert is two unsynchronised statements: a
+  concurrent `erase_person/1` that commits between them leaves copies behind
+  that erasure's own `delete_all` has already run past, and nothing blocks —
+  the copy's foreign key takes `FOR KEY SHARE`, which does not conflict with the
+  `FOR NO KEY UPDATE` erasure's own update takes. `FOR SHARE` does conflict with
+  the `FOR UPDATE` `unerased_person/1` takes, so the archive either wins the row
+  and is finished before erasure starts, or parks and then matches nothing.
+
+  Several archive writes may hold it at once, which is what makes `FOR SHARE`
+  the right mode rather than `FOR UPDATE`: two messages sent in the same second
+  by one person must not serialise on their own person row.
   """
-  @spec erased_person(Ecto.UUID.t()) :: Ecto.Query.t()
-  def erased_person(person_id) when is_binary(person_id) do
-    from person in Person, where: person.id == ^person_id, where: not is_nil(person.erased_at)
+  @spec unerased_person_shared(Ecto.UUID.t()) :: Ecto.Query.t()
+  def unerased_person_shared(person_id) when is_binary(person_id) do
+    from person in Person,
+      where: person.id == ^person_id,
+      where: is_nil(person.erased_at),
+      lock: "FOR SHARE"
   end
 
   @doc """
@@ -141,6 +158,29 @@ defmodule HospitalityComs.Lifecycle.Records do
   @spec declared_entries_of(Ecto.UUID.t()) :: Ecto.Query.t()
   def declared_entries_of(person_id) when is_binary(person_id) do
     from entry in DeclaredEntry, where: entry.person_id == ^person_id
+  end
+
+  @doc """
+  The disclosure rows this person wrote about their **own** entries that hand an
+  entry *over* rather than take one away.
+
+  The ledger is otherwise kept, and the argument for keeping it holds for
+  `disclosed = false` alone: a `false` row narrows what an audience sees, so
+  deleting one discloses *more*, and peer visibility runs thirty days past an
+  engagement's end. A `true` row is the opposite — `Profiles.Records`'s peer rule
+  reads it as an override that beats the computed concurrency default, so
+  keeping one means an erased person goes on affirmatively disclosing an entry
+  to a named peer for the tail, with no session left to take it back.
+
+  Rows naming this person as the *audience* are somebody else's decision about
+  their own entries and are untouched in both directions, which is why this is
+  reached through their engagements rather than through `audience_person_id`.
+  """
+  @spec asserted_disclosures_of(Ecto.UUID.t()) :: Ecto.Query.t()
+  def asserted_disclosures_of(person_id) when is_binary(person_id) do
+    from disclosure in Disclosure,
+      where: disclosure.disclosed == true,
+      where: disclosure.engagement_id in subquery(engagement_ids_of(person_id))
   end
 
   @doc """
@@ -262,10 +302,18 @@ defmodule HospitalityComs.Lifecycle.Records do
   was revoked is *not* orphaned: it has no authority for anybody to be the last
   holder of, which is a venue that was wound up rather than one that needs a
   manager.
+
+  A venue that was **closed** is not orphaned either, for the same reason and by
+  a different route. `close_venue/2` leaves the grant live — it starts a
+  retention clock, it does not revoke anybody — so a wound-up venue whose
+  manager's term has since ended satisfies every other clause here and would be
+  handed to an operator as something to re-seed. Closure is the explicit form of
+  the state revocation reaches by accident.
   """
   @spec orphaned_venues(DateTime.t()) :: Ecto.Query.t()
   def orphaned_venues(%DateTime{} = instant) do
     from(venue in Venue, as: :venue)
+    |> where([venue], is_nil(venue.closed_at))
     |> where([venue], exists(live_grant(instant)))
     |> where([venue], not exists(live_grant_holder(instant)))
     |> order_by([venue], asc: venue.name, asc: venue.id)
@@ -371,6 +419,40 @@ defmodule HospitalityComs.Lifecycle.Records do
     from message in RoomMessage,
       where: message.author_engagement_id == ^engagement_id,
       order_by: [asc: message.sent_at, asc: message.id]
+  end
+
+  @doc """
+  One engagement, if its term has closed by `instant`.
+
+  The archive's deadline is `ends_at + 90 days`, and it is stamped exactly once
+  because this is the state after which `ends_at` can no longer move:
+  `renew_engagement/3` answers on activeness and `end_engagement/2` on "has not
+  closed", so neither reaches a term already behind the instant asking.
+  """
+  @spec closed_engagement(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  def closed_engagement(engagement_id, %DateTime{} = instant) when is_binary(engagement_id) do
+    from engagement in Engagement,
+      where: engagement.id == ^engagement_id,
+      where: engagement.ends_at <= ^instant
+  end
+
+  @doc """
+  Gives this engagement's unstamped copies the deadline its closing created.
+
+  `is_nil(delete_after)` is the whole condition, so this is idempotent and can
+  never move a deadline that already exists — the property KTD16 asks of every
+  write near a retention clock, and the same predicate
+  `stamp_undated_messages/3` uses one table over.
+  """
+  @spec stamp_undated_copies(Ecto.UUID.t(), DateTime.t(), DateTime.t()) :: Ecto.Query.t()
+  def stamp_undated_copies(engagement_id, %DateTime{} = deadline, %DateTime{} = instant)
+      when is_binary(engagement_id) do
+    stamped = DateTime.truncate(instant, :second)
+
+    from copy in RetainedMessageCopy,
+      where: copy.engagement_id == ^engagement_id,
+      where: is_nil(copy.delete_after),
+      update: [set: [delete_after: ^DateTime.truncate(deadline, :second), updated_at: ^stamped]]
   end
 
   ## The sweep

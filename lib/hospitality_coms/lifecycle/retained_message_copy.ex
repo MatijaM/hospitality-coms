@@ -17,18 +17,41 @@ defmodule HospitalityComs.Lifecycle.RetainedMessageCopy do
   engagement's end, and the gap between the two numbers is what makes the
   separation observable rather than merely argued.
 
+  ## The row is written with the message; `delete_after` is written later
+
+  A copy cannot be taken later than the instant its source may be deleted, and
+  the earliest such instant is a shift message's `closes_at + 30 days` — which
+  every ordinary term outlives. So `HospitalityComs.Rooms` writes the copy in
+  the same transaction as the message, through
+  `HospitalityComs.Lifecycle.retain_message/3`.
+
+  `delete_after` is **null** until the engagement's term closes, exactly as
+  `room_messages.delete_after` is null until the venue closes. The reason is the
+  same in both: the clock has an origin that has not happened yet. Here it is
+  `ends_at`, which a renewal can still move while the term is open and which
+  nothing can move once it has closed — `renew_engagement/3` answers on
+  activeness and `end_engagement/2` on "has not closed". So the stamp is written
+  exactly once, by `HospitalityComs.Lifecycle.retain_own_messages/2`, from a
+  value that can never be revised.
+
   ## `source_message_id` is not a foreign key
 
   It is the idempotence key and nothing else — one copy per (engagement,
   message), which is what makes re-running an expiry announcement free. A
-  foreign key here would be wrong three separate ways:
+  foreign key here would be wrong two separate ways, and either alone settles
+  it:
 
-    * a person-zone key into the employer zone is a second crossing, and KTD2
-      permits one;
     * `ON DELETE RESTRICT` would make the shift-history sweep fail the instant a
       copy outlived its original;
     * `ON DELETE CASCADE` would delete this row on the venue's clock, which is
       the failure the separation exists to prevent.
+
+  It is **not** because a person-zone key into the employer zone would be a
+  second crossing. KTD2's single crossing is about naming a *person*; arrows
+  point into the employer zone freely, and
+  `attested_entry_disclosures.audience_venue_id` is already such a key and is
+  documented as deliberate. Leaving that reason standing would let a later unit
+  cite it to refuse a legitimate key.
 
   ## Ownership is a composite key, not an `exists?`
 

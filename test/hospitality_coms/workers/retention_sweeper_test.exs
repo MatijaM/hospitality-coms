@@ -25,13 +25,38 @@ defmodule HospitalityComs.Workers.RetentionSweeperTest do
   survives; the same row a second later does not. Both directions are asserted,
   because a sweeper that deleted nothing at all satisfies the first alone.
 
-  ## The two windows differ on purpose
+  ## The two windows differ on purpose, and the assertion has to range over the
+  ## difference
 
   Shift history is deleted thirty days after the room closes; the worker's own
   copy of the same message lives ninety days past their engagement's end. That
   gap is what makes KTD16's argument for physically separate rows observable
   rather than asserted: a filtered view over one row would carry two deadlines
   and the shorter would silently win.
+
+  Saying so is not enough, and one test here used to be all there was. The two
+  deadlines hang off *different origins* — `closes_at + 30d` against
+  `ends_at + 90d` — and this file's calendar already separates them by a month
+  before either constant applies, so a sweep placed just past the shift's
+  deadline was satisfied by the engagement being longer than the shift. Measured:
+  `@own_copy_retention_days` mutated from ninety to **two** killed nothing. So
+  the pair of tests named for the gap sweeps at instants derived from the
+  *archive's* deadline — `ends_at + 89 days` and `ends_at + 90 days + 1s`, both
+  long past the shift's — and the ninety is pinned from both sides.
+
+  ## Where the archive is taken, which is not where it was
+
+  The copy is written in the transaction that writes the message, not when the
+  engagement's expiry is announced. It cannot be later: a shift message's source
+  row dies at `closes_at + 30 days` and an ordinary term outlives its shifts by
+  months, so an archive taken at the announcement found the words already swept
+  and wrote nothing — KTD16's named failure, arriving through the trigger rather
+  than through the schema. `history/1` takes a term length precisely so one test
+  here can be the year-long shape the old trigger lost.
+
+  What the announcement still does is *date* the archive: `delete_after` is null
+  while the term is open, because `ends_at` can still move, and is stamped once
+  when it closes and cannot.
 
   ## Why the workers are driven directly
 
@@ -74,9 +99,17 @@ defmodule HospitalityComs.Workers.RetentionSweeperTest do
   @in_a_month DateTime.add(@now, 30, :day)
   @after_the_end DateTime.add(@in_a_month, 1, :hour)
 
+  # The year-long term, whose shift is on day one. The shift's history is due on
+  # day thirty-one and the term does not close until day three hundred and
+  # sixty-five, so an archive taken when the expiry was announced would have
+  # found the venue's copy long gone. That is the shape this file's fixture used
+  # to be arranged to avoid.
+  @in_a_year DateTime.add(@now, 365, :day)
+  @after_the_year DateTime.add(@in_a_year, 1, :hour)
+  @a_month_after_the_shift DateTime.add(@now, 40, :day)
+
   # The shift: opens an hour from `@now`, runs eight hours, thirty minutes of
-  # grace. Comfortably inside the engagement's term, so the worker's archive is
-  # written before the venue's copy of the same message is due for deletion.
+  # grace.
   @grace_minutes 30
   @shift_starts DateTime.add(@now, 1, :hour)
   @shift_ends DateTime.add(@now, 9, :hour)
@@ -146,7 +179,68 @@ defmodule HospitalityComs.Workers.RetentionSweeperTest do
       assert "on the shift" in bodies
     end
 
-    test "are written when the expiry is announced, once per message" do
+    test "outlive the venue's copy by the whole of the ninety days, and no longer" do
+      # The test above is satisfied by the *engagement* being longer than the
+      # shift: both instants it names are fixed by this file's calendar and
+      # neither is derived from `own_copy_retention_days/0`, so ninety mutated to
+      # two killed nothing. This one sweeps either side of the archive's own
+      # deadline — `ends_at + 90 days`, which is day 120 — with the venue's copy
+      # of the same words already gone at both, so the assertion ranges over the
+      # gap rather than over the fixture's head start. The day counts are
+      # literals on purpose: derived from the constant they would move with it.
+      %{person: person, shift_message: message} = history_with_archive()
+
+      day_119 = DateTime.add(@in_a_month, 89, :day)
+      just_past_day_120 = @in_a_month |> DateTime.add(90, :day) |> DateTime.add(1, :second)
+
+      assert {:ok, run} = Lifecycle.sweep(day_119)
+      assert run.shift_messages == 1
+      assert run.own_message_copies == 0
+      assert Repo.get(RoomMessage, message.id) == nil
+      assert length(Lifecycle.list_retained_messages(person_at(person, day_119))) == 2
+
+      assert {:ok, run} = Lifecycle.sweep(just_past_day_120)
+      assert run.own_message_copies == 2
+      assert Lifecycle.list_retained_messages(person_at(person, just_past_day_120)) == []
+    end
+
+    test "are written with the message, so a term outliving its shift keeps both" do
+      # A1, and the failure KTD16 names in its own words: "a person whose
+      # engagement ended long after a shift would lose their own copy on the
+      # shift's clock". A year-long term, its shift on day one, the venue's copy
+      # of the shift message swept on day forty — and the archive taken at the
+      # term's end still holds both bodies, because it was never taken then.
+      %{person: person, engagement: engagement, shift_message: message} = history(@in_a_year)
+
+      assert {:ok, run} = Lifecycle.sweep(@a_month_after_the_shift)
+      assert run.shift_messages == 1
+      assert Repo.get(RoomMessage, message.id) == nil
+
+      assert {:ok, %{written: 0, stamped: 2}} =
+               Lifecycle.retain_own_messages(engagement.id, @after_the_year)
+
+      bodies =
+        person
+        |> person_at(@after_the_year)
+        |> Lifecycle.list_retained_messages()
+        |> Enum.map(& &1.body)
+
+      assert Enum.sort(bodies) == ["in the venue", "on the shift"]
+    end
+
+    test "are written by the send even when no announcement ever runs" do
+      %{person: person} = history(@in_a_year)
+
+      bodies =
+        person
+        |> person_at(@during_shift)
+        |> Lifecycle.list_retained_messages()
+        |> Enum.map(& &1.body)
+
+      assert Enum.sort(bodies) == ["in the venue", "on the shift"]
+    end
+
+    test "are dated by the expiry announcement, once, and stay so" do
       %{employer: employer, person: person, engagement: engagement} = engaged()
 
       {:ok, _} =
@@ -155,23 +249,52 @@ defmodule HospitalityComs.Workers.RetentionSweeperTest do
       Clock.Offset.set(@after_the_end)
 
       assert {:ok, :revoked} = perform_job(ExpireEngagement, expiry_args(engagement))
-      assert length(Lifecycle.list_retained_messages(person_at(person, @after_the_end))) == 1
+      assert [%RetainedMessageCopy{delete_after: %DateTime{} = due}] = copies_of(engagement)
+      assert DateTime.compare(due, Lifecycle.archive_deadline(@in_a_month)) == :eq
 
       assert {:ok, :revoked} = perform_job(ExpireEngagement, expiry_args(engagement))
-      assert length(Lifecycle.list_retained_messages(person_at(person, @after_the_end))) == 1
+      assert [%RetainedMessageCopy{delete_after: ^due}] = copies_of(engagement)
     end
 
-    test "are not written while the term is still open" do
-      # The control for the test above: an announcement that archived
-      # unconditionally would satisfy it, and would archive a working
-      # engagement's messages every five minutes for as long as the sweeper ran.
+    test "are backfilled past the parameter cap one statement cannot carry" do
+      # `insert_all` binds one parameter per field per row and Postgres refuses
+      # more than 65535 of them, so ten fields put the wall at 6553 messages —
+      # an ordinary year at a busy venue. Past it the statement raised
+      # `Postgrex.QueryError` straight out of `perform/1`, which has no rescue
+      # and whose call site matches on `{:ok, _}`: the job failed every attempt,
+      # was discarded, was re-inserted by the sweeper, and failed again.
+      #
+      # The messages are written straight through `Repo` rather than sent, both
+      # because six thousand sends would take minutes and because that is the
+      # shape the backfill exists for — words that have no copy yet.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+
+      insert_bare_messages(employer.venue_id, engagement.id, 6_600)
+
+      assert {:ok, %{written: 6_600, stamped: 0}} =
+               Lifecycle.retain_own_messages(engagement.id, @after_the_end)
+
+      assert length(Lifecycle.list_retained_messages(person_at(person, @after_the_end))) == 6_600
+    end
+
+    test "carry no deletion clock at all while the term is still open" do
+      # The control for the test above, and the whole reason the column is
+      # nullable. An announcement that stamped unconditionally would satisfy it,
+      # and would date a working engagement's archive from a bound a renewal can
+      # still move — which is the sweep destroying a copy while its author is
+      # still employed. Null never matches `delete_after < instant`, so an
+      # unstamped archive survives every sweep there will ever be.
       %{employer: employer, person: person, engagement: engagement} = engaged()
 
       {:ok, _} =
         Rooms.send_venue_room_message(person_at(person, @now), employer.venue_id, "hello")
 
       assert {:ok, :still_active} = perform_job(ExpireEngagement, expiry_args(engagement))
-      assert Lifecycle.list_retained_messages(person_at(person, @now)) == []
+      assert [%RetainedMessageCopy{delete_after: nil}] = copies_of(engagement)
+
+      assert {:ok, run} = Lifecycle.sweep(DateTime.add(@now, 36_500, :day))
+      assert run.own_message_copies == 0
+      assert length(Lifecycle.list_retained_messages(person_at(person, @now))) == 1
     end
   end
 
@@ -338,6 +461,24 @@ defmodule HospitalityComs.Workers.RetentionSweeperTest do
       assert Lifecycle.list_retained_messages(person_at(person, at)) == []
     end
 
+    test "refuses a negative count as a changeset error rather than a raw exception" do
+      # `retention_runs_counts_not_negative` had no `check_constraint/3`
+      # declaration, so a violation arrived as a `Postgrex.Error` out of a
+      # function whose contract is a struct. The other two constraints are
+      # unreachable from here — `outcome` and `ceiling` are both guarded in
+      # `changeset/4`'s own head — which is why this is the one with a test.
+      changeset =
+        RetentionRun.changeset(@now, :completed, 1, %{
+          own_message_copies: -1,
+          shift_messages: 0,
+          roster_entries: 0,
+          venue_room_messages: 0
+        })
+
+      assert {:error, refused} = Repo.insert(changeset)
+      assert [own_message_copies: {_message, _opts}] = refused.errors
+    end
+
     test "takes its instant from the clock when the worker drives it" do
       # KTD5 at a new unit-of-work boundary. Moving the offset moves the sweep,
       # with nothing else changing — which is also what U11's demo control needs.
@@ -367,7 +508,7 @@ defmodule HospitalityComs.Workers.RetentionSweeperTest do
     }
   end
 
-  defp engaged do
+  defp engaged(ends_at \\ @in_a_month) do
     {employer, _creation} = scoped_venue_fixture(@now)
     person = person_scope_fixture(@now)
 
@@ -375,7 +516,7 @@ defmodule HospitalityComs.Workers.RetentionSweeperTest do
       engagement_fixture(employer, person, %{
         role_label: "Bartender",
         starts_at: @now,
-        ends_at: @in_a_month,
+        ends_at: ends_at,
         code_expires_at: DateTime.add(@now, 7, :day)
       })
 
@@ -384,8 +525,12 @@ defmodule HospitalityComs.Workers.RetentionSweeperTest do
 
   # One venue-room message with no deadline, one shift-room message and one
   # roster entry on the shift's clock. The shape every trigger needs.
-  defp history do
-    %{employer: employer, person: person, engagement: engagement} = engaged()
+  #
+  # The term's length is a parameter because it is the whole of A1: the shift is
+  # on day one whatever it is, so a month-long term outlives the shift's history
+  # by hours and a year-long one by eleven months.
+  defp history(ends_at \\ @in_a_month) do
+    %{employer: employer, person: person, engagement: engagement} = engaged(ends_at)
 
     shift_type = shift_type_fixture(employer, @grace_minutes)
     room = shift_room_fixture(employer, shift_type, @shift_starts, @shift_ends)
@@ -408,24 +553,50 @@ defmodule HospitalityComs.Workers.RetentionSweeperTest do
     }
   end
 
-  # …plus the worker's archive of both, written when the term closed.
+  # …plus the worker's archive of both, **already written** by the two sends and
+  # dated by the announcement. `written: 0` is the assertion that matters here:
+  # the announcement found nothing left to copy, because the copies were taken
+  # with the messages.
   defp history_with_archive do
     context = history()
 
-    {:ok, 2} = Lifecycle.retain_own_messages(context.engagement.id, @after_the_end)
+    {:ok, %{written: 0, stamped: 2}} =
+      Lifecycle.retain_own_messages(context.engagement.id, @after_the_end)
 
-    copies =
-      Repo.all(
-        from(c in RetainedMessageCopy,
-          where: c.engagement_id == ^context.engagement.id,
-          order_by: [asc: c.sent_at, asc: c.id]
-        )
+    Map.put(context, :copies, copies_of(context.engagement))
+  end
+
+  defp copies_of(%Engagement{id: engagement_id}) do
+    Repo.all(
+      from(c in RetainedMessageCopy,
+        where: c.engagement_id == ^engagement_id,
+        order_by: [asc: c.sent_at, asc: c.id]
       )
-
-    Map.put(context, :copies, copies)
+    )
   end
 
   defp unwrap({:ok, value}), do: value
+
+  # Venue-room messages with no copies behind them, in chunks small enough that
+  # the fixture is not the thing that hits the parameter cap.
+  defp insert_bare_messages(venue_id, engagement_id, count) do
+    stamped_at = DateTime.truncate(@now, :second)
+
+    1..count
+    |> Enum.map(fn index ->
+      %{
+        id: Ecto.UUID.generate(),
+        venue_id: venue_id,
+        author_engagement_id: engagement_id,
+        body: "bulk #{index}",
+        sent_at: stamped_at,
+        inserted_at: stamped_at,
+        updated_at: stamped_at
+      }
+    end)
+    |> Enum.chunk_every(1_000)
+    |> Enum.each(&Repo.insert_all(RoomMessage, &1))
+  end
 
   # Stands in for a backdating path the application does not expose. See the
   # moduledoc: the deadline is stamped precisely so that whether one exists

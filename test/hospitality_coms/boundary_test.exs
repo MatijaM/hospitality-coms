@@ -1421,6 +1421,92 @@ defmodule HospitalityComs.BoundaryTest do
       assert "closed_at" in columns("venues")
       assert Zones.privileges(Repo, @retention_tables) == []
     end
+
+    test "refuse to let the profile tables be rolled down beneath them" do
+      # Half of `@retention_migrations`' comment is assertable and this is the
+      # half. `retained_message_copies`'s composite key references
+      # `engagements (id, person_id)` through the unique index `create_profiles`
+      # created, so `create_profiles`' `down` meets `RESTRICT`. The other three
+      # profile migrations come off first, so the refusal cannot be the view's
+      # dependency wearing this one's name.
+      #
+      # The *second* dependency in that comment is **not** loud, and the comment
+      # now says so: rolling `create_roster_entries` down underneath this
+      # migration drops `delete_after` with it and raises nothing at all. Safe
+      # as written because both sit on one nesting layer, and pinned here from
+      # the side that can be pinned.
+      [
+        {@profile_zone_migration, GrantProfileZone},
+        {@employer_view_migration, CreateEmployerVisibleView},
+        {@profile_row_security_migration, EnableProfileRowLevelSecurity}
+      ]
+      |> Enum.each(&migrate_engagement_zone(&1, :down))
+
+      error =
+        assert_raise Postgrex.Error, fn ->
+          migrate_engagement_zone({@profile_tables_migration, CreateProfiles}, :down)
+        end
+
+      assert Exception.message(error) =~ "retained_message_copies"
+    end
+
+    test "recompute the shift's deadlines from rows that were already there" do
+      # The round trip above runs on an empty database, so `up`'s
+      # `UPDATE … FROM shift_rooms` join and the `SET NOT NULL` that follows it
+      # were only ever proved on zero rows — which is the one thing a backfill
+      # cannot be proved on.
+      history = seed_room_history()
+
+      before = %{
+        roster: roster_row(history.roster_entry_id),
+        shift_message: message_row(history.shift_message_id),
+        venue_message: message_row(history.venue_message_id)
+      }
+
+      assert before.roster["delete_after"]
+      assert before.shift_message["delete_after"]
+      refute before.venue_message["delete_after"]
+
+      rolled = rolled_back_retention_zone(fn -> :rolled end)
+      assert rolled == :rolled
+
+      # Recomputed from `shift_rooms.closes_at`, which does not move — so the
+      # two shift deadlines come back identical and the venue-room one comes
+      # back null, which is what it means for that column to have no clock.
+      assert roster_row(history.roster_entry_id)["delete_after"] == before.roster["delete_after"]
+
+      assert message_row(history.shift_message_id)["delete_after"] ==
+               before.shift_message["delete_after"]
+
+      refute message_row(history.venue_message_id)["delete_after"]
+
+      # `joined_at` is `timestamp(6)` and is the one column in the schema that
+      # is not truncated, because flooring it would backdate a rostering.
+      # Nothing in this migration touches it and this is what says so.
+      assert roster_row(history.roster_entry_id)["joined_at"] == before.roster["joined_at"]
+      assert before.roster["joined_at"].microsecond == {123_456, 6}
+    end
+
+    test "and a rollback loses the archive and the closure, which is not symmetric" do
+      # `down` restores the schema byte for byte and two things come back empty
+      # and unrecomputable. On an empty database that is invisible, which is why
+      # it was never noticed: a rollback silently extends retention
+      # indefinitely, and that is a data-protection regression rather than a
+      # tidy-up. The migration's moduledoc carries the capture SQL.
+      history = seed_room_history()
+
+      Repo.query!("UPDATE venues SET closed_at = $1 WHERE id = $2", [
+        history.instant,
+        history.venue_id
+      ])
+
+      assert count_of("retained_message_copies") == 1
+
+      rolled_back_retention_zone(fn -> :rolled end)
+
+      assert count_of("retained_message_copies") == 0
+      assert %{"closed_at" => nil} = venue_row(history.venue_id)
+    end
   end
 
   describe "the employer-visible view" do
@@ -2450,6 +2536,13 @@ defmodule HospitalityComs.BoundaryTest do
   #     and back up underneath this one would silently drop the column and leave
   #     every later assertion running against a schema
   #     `HospitalityComs.Rosters.RosterEntry` no longer matches.
+  #
+  # **Only the first of those two is loud**, and the difference is worth having
+  # written down rather than inferred: `create_profiles`' `down` meets
+  # `RESTRICT` and raises naming `retained_message_copies`, which "refuse to let
+  # the profile tables be rolled down beneath them" asserts. The second raises
+  # nothing at all — `DROP TABLE roster_entries` takes the column with it — so
+  # the ordering above is what protects it, and there is no failure to pin.
   @retention_migrations [
     {@retention_tables_migration, AddRetentionColumns},
     {@retention_zone_migration, GrantRetentionZone}
@@ -2463,6 +2556,157 @@ defmodule HospitalityComs.BoundaryTest do
     capture_log(fn -> Enum.each(@retention_migrations, &migrate_engagement_zone(&1, :up)) end)
 
     result
+  end
+
+  # One venue's worth of room history, written straight through `Repo` rather
+  # than through the fixtures: this file is sandboxed, so the two repos cannot
+  # see each other's rows and the ordinary claim path is unavailable. The rows
+  # exist only to give the backfill something to backfill.
+  #
+  # `joined_at` carries microseconds on purpose. It is the one column in the
+  # schema that is not truncated — flooring it would backdate a rostering — so
+  # a migration that rewrote the table would be visible here.
+  defp seed_room_history do
+    ids =
+      Map.new(
+        ~w(person venue grant invitation engagement type room roster shift venue_msg copy)a,
+        &{&1, uuid()}
+      )
+
+    at = NaiveDateTime.truncate(DateTime.to_naive(@now), :second)
+    joined = %{at | microsecond: {123_456, 6}}
+
+    Repo.query!(
+      "INSERT INTO people (id, email, inserted_at, updated_at) VALUES ($1, 'bt-retention@example.com', $2, $2)",
+      [ids.person, at]
+    )
+
+    Repo.query!(
+      "INSERT INTO venues (id, name, timezone, inserted_at, updated_at) VALUES ($1, 'bt-retention', 'Etc/UTC', $2, $2)",
+      [ids.venue, at]
+    )
+
+    Repo.query!(
+      "INSERT INTO employer_grants (id, venue_id, granted_at, inserted_at, updated_at) VALUES ($1, $2, $3, $3, $3)",
+      [ids.grant, ids.venue, at]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO invitations
+        (id, venue_id, issued_by_grant_id, role_label, starts_at, ends_at,
+         claim_code_digest, code_expires_at, issued_at, inserted_at, updated_at)
+      VALUES ($1, $2, $3, 'Bartender', $4, $5, $6, $7, $4, $4, $4)
+      """,
+      [
+        ids.invitation,
+        ids.venue,
+        ids.grant,
+        at,
+        NaiveDateTime.add(at, 30, :day),
+        :crypto.strong_rand_bytes(32),
+        NaiveDateTime.add(at, 7, :day)
+      ]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO engagements
+        (id, person_id, venue_id, invitation_id, role_label, starts_at, ends_at,
+         accepted_at, inserted_at, updated_at)
+      VALUES ($1, $2, $3, $4, 'Bartender', $5, $6, $5, $5, $5)
+      """,
+      [ids.engagement, ids.person, ids.venue, ids.invitation, at, NaiveDateTime.add(at, 30, :day)]
+    )
+
+    Repo.query!(
+      "INSERT INTO shift_types (id, venue_id, name, grace_period_minutes, inserted_at, updated_at) VALUES ($1, $2, 'Evening', 30, $3, $3)",
+      [ids.type, ids.venue, at]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO shift_rooms
+        (id, venue_id, shift_type_id, starts_at, ends_at, grace_period_minutes,
+         inserted_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, 30, $4, $4)
+      """,
+      [ids.room, ids.venue, ids.type, at, NaiveDateTime.add(at, 8, :hour)]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO roster_entries
+        (id, venue_id, shift_room_id, engagement_id, joined_at, delete_after,
+         inserted_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+      """,
+      [ids.roster, ids.venue, ids.room, ids.engagement, joined, shift_deadline(at), at]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO room_messages
+        (id, venue_id, author_engagement_id, shift_room_id, body, sent_at,
+         delete_after, inserted_at, updated_at)
+      VALUES ($1, $2, $3, $4, 'on the shift', $5, $6, $5, $5)
+      """,
+      [ids.shift, ids.venue, ids.engagement, ids.room, at, shift_deadline(at)]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO room_messages
+        (id, venue_id, author_engagement_id, body, sent_at, inserted_at, updated_at)
+      VALUES ($1, $2, $3, 'in the venue', $4, $4, $4)
+      """,
+      [ids.venue_msg, ids.venue, ids.engagement, at]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO retained_message_copies
+        (id, engagement_id, person_id, source_message_id, body, sent_at,
+         retained_at, inserted_at, updated_at)
+      VALUES ($1, $2, $3, $4, 'on the shift', $5, $5, $5, $5)
+      """,
+      [ids.copy, ids.engagement, ids.person, ids.shift, at]
+    )
+
+    %{
+      instant: at,
+      venue_id: ids.venue,
+      roster_entry_id: ids.roster,
+      shift_message_id: ids.shift,
+      venue_message_id: ids.venue_msg
+    }
+  end
+
+  # `closes_at` is generated as `ends_at + grace`, so this is the deadline the
+  # migration's own backfill recomputes.
+  defp shift_deadline(at),
+    do:
+      at
+      |> NaiveDateTime.add(8, :hour)
+      |> NaiveDateTime.add(30, :minute)
+      |> NaiveDateTime.add(30, :day)
+
+  defp uuid, do: Ecto.UUID.bingenerate()
+
+  defp roster_row(id), do: one_row("roster_entries", id)
+  defp message_row(id), do: one_row("room_messages", id)
+  defp venue_row(id), do: one_row("venues", id)
+
+  defp one_row(table, id) do
+    %{columns: columns, rows: [row]} =
+      Repo.query!("SELECT * FROM #{table} WHERE id = $1", [id])
+
+    columns |> Enum.zip(row) |> Map.new()
+  end
+
+  defp count_of(table) do
+    %{rows: [[count]]} = Repo.query!("SELECT count(*) FROM #{table}", [])
+    count
   end
 
   # Partial unique indexes on a table, by name. A partial index is what makes

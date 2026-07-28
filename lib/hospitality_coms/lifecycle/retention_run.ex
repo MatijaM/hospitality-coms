@@ -13,6 +13,14 @@ defmodule HospitalityComs.Lifecycle.RetentionRun do
   entries and no messages is a different event from one that deleted four
   hundred messages.
 
+  **One of the four is called `roster_entries`, which is also a table name.** It
+  resolves correctly everywhere it is used — Ecto reads it as a column of this
+  schema, and `SELECT roster_entries FROM retention_runs` is unambiguous — but
+  hand-written SQL joining the two would need an alias, and a reader skimming a
+  query could take it for the table. Named here rather than renamed: the column
+  is the count of the trigger, the trigger is named for the table, and a count
+  called `roster_entry_count` beside three that are not would be worse.
+
   ## A refused run writes one of these too
 
   `:refused` is the blast-radius ceiling firing: the counts are what the run
@@ -101,5 +109,6 @@ defmodule HospitalityComs.Lifecycle.RetentionRun do
     )
     |> check_constraint(:outcome, name: :retention_runs_outcome_known)
     |> check_constraint(:ceiling, name: :retention_runs_ceiling_positive)
+    |> check_constraint(:own_message_copies, name: :retention_runs_counts_not_negative)
   end
 end

@@ -174,10 +174,16 @@ defmodule HospitalityComs.Zones do
   copy of their own words, keyed on `(engagement_id, person_id)` into the
   bridge, and it carries no employer key of any kind. The one thing worth
   writing down is what it *deliberately lacks* — `source_message_id` is a plain
-  `binary_id` with no foreign key into `room_messages`, because a person-zone
-  key into the employer zone would be a second crossing, and because either
+  `binary_id` with no foreign key into `room_messages`, because either
   `ON DELETE` behaviour would defeat the reason the copy exists (see
   `*_add_retention_columns.exs`).
+
+  That absence is **not** a KTD2 consequence, and an earlier version of this
+  paragraph said it was. A person-zone key into the employer zone is not a
+  second crossing: KTD2's single crossing is about naming a *person*, arrows
+  point into the employer zone freely, and `attested_entry_disclosures`
+  carries exactly such a key one section above, argued for at length. The
+  `ON DELETE` reasons are the whole of it.
 
   `retention_runs` is the interesting one, because it holds no personal data at
   all: an instant, four counts and an outcome. It is person zone anyway, and the
