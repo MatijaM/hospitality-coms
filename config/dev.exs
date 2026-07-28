@@ -10,9 +10,13 @@ config :hospitality_coms, HospitalityComs.Repo,
   show_sensitive_data_on_connection_error: true,
   pool_size: 10
 
+# A different Postgres role from the one above (#17). See `config/test.exs` for
+# why the password is a literal here; roles are cluster-global, so the
+# `employer_login` created by the test database's migration is the same role
+# this connects as.
 config :hospitality_coms, HospitalityComs.EmployerRepo,
-  username: "postgres",
-  password: "postgres",
+  username: "employer_login",
+  password: "employer_login",
   hostname: "localhost",
   database: "hospitality_coms_dev",
   stacktrace: true,

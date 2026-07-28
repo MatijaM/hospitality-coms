@@ -280,6 +280,7 @@ defmodule HospitalityComs.Zones do
   @employer_views ~w(employer_visible_attested_entries employer_visible_correction_requests)
 
   @employer_role "employer_role"
+  @employer_login_role "employer_login"
 
   # Every table-level privilege Postgres can grant. The sweep asks about all of
   # them rather than about `SELECT`, because `INSERT` on `people` is a way to
@@ -297,10 +298,36 @@ defmodule HospitalityComs.Zones do
   @column_privileges ~w(SELECT INSERT UPDATE REFERENCES)
 
   @doc """
-  The Postgres role the employer zone connects as.
+  The Postgres role the employer zone acts as.
+
+  What `HospitalityComs.EmployerRepo`'s connections *become*, not what they log
+  in as — see `employer_login_role/0`.
   """
   @spec employer_role() :: String.t()
   def employer_role, do: @employer_role
+
+  @doc """
+  The Postgres role `HospitalityComs.EmployerRepo` authenticates as.
+
+  A credential and nothing else. It is `NOINHERIT`, it is a member of
+  `employer_role/0` and of no other role, and it holds no privilege on any
+  relation in its own name — so `RESET ROLE` on an employer connection lands on
+  a role holding *less* than the one it started with rather than more.
+
+  That is the whole of issue #17. Before it, `EmployerRepo` borrowed the
+  application's own superuser credentials and assumed `employer_role`
+  afterwards, so a single raw `RESET ROLE` — which neither BEAM guard sees —
+  put the owner of every table in this database back on the connection, and the
+  grant tier was defeatable from the same code position as the guards it was
+  supposed to sit beneath.
+
+  It is granted no object privilege, deliberately, including `CONNECT` on the
+  database and `USAGE` on the schema: it holds both through `PUBLIC`, and a
+  grant of its own would write a `pg_shdepend` row and make
+  `DROP ROLE employer_login` fail from every *other* database on the cluster.
+  """
+  @spec employer_login_role() :: String.t()
+  def employer_login_role, do: @employer_login_role
 
   @doc """
   Schemas whose tables the employer role holds no privilege on.
@@ -538,9 +565,19 @@ defmodule HospitalityComs.Zones do
   Sharing one implementation is deliberate. If the sweep ever stops seeing a
   kind of grant, the employer-zone inventory goes short at the same moment the
   person-zone audit goes quiet, and one of the two is a test that fails.
+
+  **Role rather than `employer_role`, since #17.** The model has a second role
+  in it — `employer_login_role/0`, the credential `EmployerRepo` authenticates
+  as — and the claim about it is stronger than the claim about `employer_role`:
+  it holds nothing on *any* relation, in either zone, rather than nothing on
+  the person zone. That claim is an absence like every other one here, so it
+  needs the same control, and a control that grants the login role a privilege
+  proves nothing against a sweep hard-coded to ask about `employer_role`. The
+  parameter is what lets one sweep answer for both and lets the control fail
+  when it should.
   """
-  @spec privileges(Ecto.Repo.t(), [String.t()]) :: [offence()]
-  def privileges(repo, relations) do
+  @spec privileges(Ecto.Repo.t(), [String.t()], String.t()) :: [offence()]
+  def privileges(repo, relations, role \\ @employer_role) do
     %{rows: rows} =
       repo.query!(
         """
@@ -552,7 +589,7 @@ defmodule HospitalityComs.Zones do
                AND has_any_column_privilege($3, r.name, p.privilege))
         ORDER BY r.rord, p.pord
         """,
-        [relations, @table_privileges, @employer_role, @column_privileges]
+        [relations, @table_privileges, role, @column_privileges]
       )
 
     Enum.map(rows, fn [relation, privilege] -> {relation, privilege} end)

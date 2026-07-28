@@ -55,6 +55,7 @@ defmodule HospitalityComs.PostgresRolesTest do
 
   import ExUnit.CaptureLog
 
+  alias HospitalityComs.Repo.Migrations.CreateEmployerLoginRole
   alias HospitalityComs.Repo.Migrations.CreatePostgresRoles
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
@@ -64,25 +65,44 @@ defmodule HospitalityComs.PostgresRolesTest do
   alias HospitalityComs.Repo.Migrations.GrantRoomZone
 
   @roles_migration "create_postgres_roles"
+  @login_role "employer_login"
   @employer_grants_migration "grant_employer_zone"
   @engagement_grants_migration "grant_engagement_zone"
   @room_grants_migration "grant_room_zone"
   @peer_grants_migration "grant_peer_zone"
   @profile_grants_migration "grant_profile_zone"
   @retention_grants_migration "grant_retention_zone"
+  @login_role_migration "create_employer_login_role"
 
   # In the order Ecto applies them, which is the reverse of the order
   # `rolled_back_grants/0` unwinds them in. Every unit that grants adds an
   # entry: a grant is a `pg_shdepend` row, roles are cluster-global while
   # grants are database-local, and one row anywhere makes `DROP ROLE` fail
   # everywhere.
+  #
+  # #17's `create_employer_login_role` is the last entry and it is here for a
+  # different reason from the rest, measured rather than inferred. It grants a
+  # *membership*, and a membership writes no `pg_shdepend` row — so it is not
+  # what makes `DROP ROLE employer_role` fail, and the drop succeeds with it
+  # applied. What it does instead is worse for being silent:
+  #
+  #   `DROP ROLE employer_role` removes `employer_login`'s membership without
+  #   complaint, and re-applying the roles migration's `up` does not restore
+  #   it. The re-created role is a fresh role with no members.
+  #
+  # So a roles migration rolled back underneath a live login role leaves a
+  # credential that can no longer assume anything and an `EmployerRepo` that
+  # cannot start. Listing it here is what keeps the unwind in an order where
+  # that cannot happen; `"loses the login role's membership ..."` below pins the
+  # property itself.
   @grant_migrations [
     {@employer_grants_migration, GrantEmployerZone},
     {@engagement_grants_migration, GrantEngagementZone},
     {@room_grants_migration, GrantRoomZone},
     {@peer_grants_migration, GrantPeerZone},
     {@profile_grants_migration, GrantProfileZone},
-    {@retention_grants_migration, GrantRetentionZone}
+    {@retention_grants_migration, GrantRetentionZone},
+    {@login_role_migration, CreateEmployerLoginRole}
   ]
 
   @migrations [{@roles_migration, CreatePostgresRoles} | @grant_migrations]
@@ -110,6 +130,12 @@ defmodule HospitalityComs.PostgresRolesTest do
 
       refute role_exists?("employer_role")
       refute role_exists?("person_role")
+
+      # #17's login role comes off with the rest. It is dropped by its own
+      # migration's `down`, which `rolled_back_grants/0` ran first — so the
+      # property U1 tests for is unchanged by a third role having joined the
+      # model: migrating up and then down leaves none of them behind.
+      refute role_exists?(@login_role)
     end
 
     test "restores both roles when migrated down and up again" do
@@ -125,6 +151,41 @@ defmodule HospitalityComs.PostgresRolesTest do
 
       assert role_exists?("employer_role")
       assert role_exists?("person_role")
+    end
+
+    test "loses the login role's membership when rolled back underneath it, and does not restore it" do
+      # Issue #20's question, answered with the measurement that decides it.
+      #
+      # `DROP ROLE` refuses while a `pg_shdepend` row exists and says so. It
+      # does **not** refuse on account of a membership: memberships are removed
+      # silently, and the role that comes back from a re-applied `up` is a fresh
+      # role with no members. So rolling the roles migration back underneath a
+      # live `employer_login` is not a loud failure that gets fixed — it is a
+      # quiet one that leaves a credential able to authenticate and unable to
+      # assume anything, and `EmployerRepo` cannot open a connection again until
+      # somebody re-runs the login migration.
+      #
+      # Every *grant* migration is rolled back here except the login one, which
+      # is deliberately left applied: that is the state this test is about, and
+      # it is the state `@grant_migrations` exists to make unreachable in the
+      # real unwind order.
+      @grant_migrations
+      |> Enum.reject(fn {name, _module} -> name == @login_role_migration end)
+      |> Enum.reverse()
+      |> Enum.each(fn {name, _module} -> migrate(name, :down) end)
+
+      assert_no_foreign_dependencies()
+      assert memberships_of(@login_role) == ["employer_role"]
+
+      migrate(@roles_migration, :down)
+
+      assert role_exists?(@login_role)
+      assert memberships_of(@login_role) == []
+
+      capture_log(fn -> migrate(@roles_migration, :up) end)
+
+      assert role_exists?("employer_role")
+      assert memberships_of(@login_role) == []
     end
 
     test "bounds how long the employer role can hold a connection" do
@@ -216,18 +277,41 @@ defmodule HospitalityComs.PostgresRolesTest do
            """
   end
 
+  # #17's login role is in this list because the answer for it is not "few" but
+  # "none, ever". It is granted membership of `employer_role` and no privilege
+  # on any object, so that `DROP ROLE employer_login` cannot be blocked from
+  # another database on the cluster. `HospitalityComs.BoundaryTest` sweeps that
+  # claim across every relation with a control; here it only has to not spoil
+  # the count.
   defp table_grant_count do
     %{rows: [[count]]} =
       Repo.query!(
         """
         SELECT count(*)
         FROM information_schema.role_table_grants
-        WHERE grantee IN ('employer_role', 'person_role')
+        WHERE grantee IN ('employer_role', 'person_role', 'employer_login')
         """,
         []
       )
 
     count
+  end
+
+  defp memberships_of(role) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT g.rolname
+        FROM pg_auth_members m
+        JOIN pg_roles g ON g.oid = m.roleid
+        JOIN pg_roles member ON member.oid = m.member
+        WHERE member.rolname = $1
+        ORDER BY 1
+        """,
+        [role]
+      )
+
+    Enum.map(rows, &hd/1)
   end
 
   defp role_exists?(name) do

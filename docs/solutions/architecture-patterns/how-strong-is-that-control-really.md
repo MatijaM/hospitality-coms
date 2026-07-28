@@ -46,6 +46,37 @@ depth it did not have.
 be strong against *accident* and weak against intent — that is a fine thing to build, as long as
 you write down which one you have.
 
+### The fix, and the detail that decides whether it is one
+
+The dedicated login role landed later. Two things about it generalise.
+
+**Make the login role `NOINHERIT`, not `INHERIT`.** Both close the escape and they do not close it
+equally. With `INHERIT` the login role carries the restricted role's privileges without assuming
+them, so `SET ROLE` is decoration, `RESET ROLE` is *neutral*, and a privilege granted directly to
+the login role by some later migration widens the zone with nothing to notice — because the audit
+sweep asks about the restricted role. With `NOINHERIT` the login role holds the right to *become*
+the restricted role and no privilege in its own name, so `RESET ROLE` lands on strictly less than
+it started with. Measured both ways.
+
+That is also what makes the fix testable rather than merely asserted: "after `RESET ROLE`, an
+*allowed* table is denied" has `NOINHERIT` as its mechanism and fails when somebody removes it,
+where "after `RESET ROLE`, a forbidden table is still denied" passes under either spelling and
+passes on a database where nothing was ever granted.
+
+**Grant the login role nothing — not even `CONNECT`.** It needs `CONNECT` on the database and
+`USAGE` on the schema, and `PUBLIC` already confers both. Granting either explicitly writes a
+`pg_shdepend` row, which is database-local while the role is cluster-global, so it would make
+`DROP ROLE` fail from every *other* database on the cluster (see
+`../database-issues/postgres-roles-are-cluster-global-grants-are-database-local.md`). Role
+*membership* writes no such row — measured — so the grant that makes the login role useful costs
+nothing on that axis.
+
+**And invert the test rather than deleting it.** The suite had a test asserting the escape
+worked, because the project had decided to record the defect rather than hide it. Once fixed, a
+test asserting it still works would assert the bug back into existence. Inverting it in place —
+same `describe`, opposite claim, with the controls the original did not need — leaves the history
+legible to anyone reading `git log -p` on that file.
+
 ## 2. Row-level security under a superuser is theatre
 
 A migration described its RLS policies as belt-and-braces behind hand-written query filters. For

@@ -348,4 +348,63 @@ Six assertions here can pass vacuously, and every one has a control beside it.
 
 ## Revisions made during implementation
 
-_Appended in a later commit. Nothing yet._
+Four, and the first is the only one that changed what an acceptance criterion asserts.
+
+**1. Criterion 5 is a privilege bit, not a refused read, and the brief was wrong about why.**
+
+The brief said `RESET ROLE` would leave `venues` unreadable and treated that as a behavioural
+assertion beside the `people` one. It is unreadable, but **not with the error the brief assumed,
+and not for the reason it assumed**. Measured twice while writing the test:
+
+- As `employer_role`, an unwrapped `SELECT count(*) FROM venues` does not succeed either — the
+  table's row-level security policy is granted to `PUBLIC` and its predicate calls
+  `app_current_employer_id()`, which raises where `app.employer_id` is unset. So the *baseline*
+  half of the assertion could not be written as a read at all.
+- After `RESET ROLE`, the same statement still fails with `P0001 app.employer_id is not set`
+  rather than `permission denied for table venues`. The planner folds the policy's predicate
+  before the executor reaches the privilege check, so the `NOINHERIT` claim is invisible
+  behaviourally: the statement fails identically whether the role holds the privilege or not.
+
+Every employer-zone table carries such a policy, so there was no substitute relation. The claim
+is therefore asserted as `has_table_privilege` on the employer connection, before and after, which
+is what this file's own moduledoc argues for in any case — "a refused query is evidence that
+*this* query was refused, and the privilege bit is evidence that every query is". The `people`
+half keeps both spellings, because `people` carries no policy and the refusal surfaces.
+
+This is not a weakening: the mutation the criterion exists to catch still kills the test. See 3.
+
+**2. `runtime_config_test.exs` was missing from the regression-risk list and needed changing.**
+
+It reads the real `config/runtime.exs` with a fixed set of environment variables and asserts the
+production block raises without each one. Adding a required variable makes *every* test in it fail
+until the variable joins that set — which is the file working correctly, and which the brief's
+"regression risks, by path" section should have named and did not. Two tests were added there
+rather than only the fixture being widened: one for the raise, one asserting the two repos do not
+resolve to the same URL, since a variable that is required and then ignored would pass the first.
+
+**3. The `INHERIT` mutation kills more than the matrix predicted, and the extra kills are the
+interesting ones.**
+
+The matrix predicted row 1 only. Applying it killed four tests: the inverted `RESET ROLE` test and
+the `rolinherit` attribute test as expected, and also **"holds no privilege of its own on any
+relation in either zone"** and its control. That is the argument for `NOINHERIT` showing up as a
+test result rather than as prose — under `INHERIT` the login role effectively holds the whole
+employer zone, so the sweep over it stops being empty. The brief argued this; the mutation
+demonstrated it.
+
+**4. `Zones.privileges/2` became `privileges/3` with a default rather than a new function.**
+
+The brief said the sweep "gains a parameter" without saying how. A default argument keeps all
+five existing call sites unchanged and keeps one implementation, which is the property the
+function's own docs call load-bearing: if the sweep ever stops seeing a kind of grant, the
+employer-zone inventory goes short at the same moment the person-zone audit goes quiet.
+
+## Verification note
+
+One from-zero run (roles and database dropped, `mix test` from the alias) reported a single
+failure whose output was lost to a truncated capture. It did not reproduce across two further
+from-zero runs — one of them also recompiling mid-run, which the failing run had done — or across
+three ordinary full-suite runs. The most likely explanation is a timing flake on a loaded machine;
+the run in question took 125 seconds against a 78-second baseline, and the suite parks real
+processes on real Postgres locks in three files. Recorded rather than dismissed, because an
+unidentified failure is not the same as no failure.

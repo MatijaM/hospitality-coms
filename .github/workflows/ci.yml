@@ -34,11 +34,33 @@ jobs:
     # the suite as a non-superuser fails around twenty-five tests in ways that
     # look unrelated to the change under review.
     #
+    # That is `HospitalityComs.Repo` alone. Since #17,
+    # `HospitalityComs.EmployerRepo` authenticates as `employer_login` — a
+    # NOINHERIT role holding no privilege of its own — so `RESET ROLE` on an
+    # employer connection lands somewhere strictly worse than where it started.
+    # **Nothing is needed here for that to work**, and the ordering is why:
+    # `employer_login` is created by a migration, `:ecto_repos` names the
+    # primary repo alone, and the `mix test` alias is
+    # `ecto.create`, `ecto.migrate`, `test` — so the role exists before
+    # anything tries to authenticate as it. The image authenticates host
+    # connections with a password by default, which `config/test.exs` supplies
+    # as a literal beside the `postgres` one; the local development cluster
+    # uses `trust` and ignores it. Verified by dropping all three roles and the
+    # database and running the alias from zero.
+    #
     # One service container per job is also what keeps the roles hazard closed.
-    # `employer_role` and `person_role` are cluster-global while their grants
-    # are database-local, so a grant in any other database on the cluster makes
-    # the `DROP ROLE` in `HospitalityComs.PostgresRolesTest` fail. A fresh
-    # container holds exactly one database, so there is nothing to collide with.
+    # `employer_role`, `person_role` and `employer_login` are cluster-global
+    # while their grants are database-local, so a grant in any other database on
+    # the cluster makes the `DROP ROLE` in `HospitalityComs.PostgresRolesTest`
+    # fail. A fresh container holds exactly one database, so there is nothing to
+    # collide with.
+    #
+    # **This is the fact issue #20 was decided on.** Its case for moving role
+    # creation out of the migration sequence was that keeping it there would go
+    # bad "the moment CI runs parallel test databases". This job is what stops
+    # that happening, together with the `--partitions` prohibition below, so
+    # #20 closed as wontfix and roles are still dropped in `down`. Changing
+    # either of those two things reopens the question.
     services:
       postgres:
         image: postgres:17
