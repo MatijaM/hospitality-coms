@@ -381,4 +381,108 @@ Controls, so no assertion can pass for the wrong reason:
 
 Recorded rather than silently applied, because the gate exists to be departed from explicitly.
 
-_(to be completed during implementation)_
+1. **The counter is one row per caller, not one per caller and window.** The brief did not say
+   which, and the difference turned out to decide two other things. Keyed on `{ip, window}` the
+   table grows with every pair since boot and needs a sentinel to know which windows are stale —
+   and a sentinel keyed on "the newest window seen" is order-dependent, so the reclamation test
+   would have raced whichever other test moved the clock first. Keyed on `ip`, with
+   `{ip, window, count}`, a stale bucket is **reset in place** by the next request from that
+   caller, so reclaiming it and leaving it are the same thing to the count. `prune/0` therefore
+   needs no clock and no agreement with one, and the test that drives it is deterministic.
+
+   The reset that follows a stale read is not atomic — the increment is, through
+   `:ets.update_counter/4` reading the stored window in the same call — so a handful of increments
+   can be lost by requests in flight exactly as a window rolls. Bounded, only reachable at the
+   instant the budget resets anyway, and written into the moduledoc rather than closed with a lock
+   in front of every log-in attempt.
+
+2. **Row 12's assertion is against the plug directly rather than through the router.** "The plug
+   reads the instant off the scope" cannot be shown end-to-end, because a request that reaches the
+   pipeline has already had its scope built from the clock — the two agree by construction there.
+   Two hand-built conns one window apart, with `Clock.now/0` asserted not to have moved between
+   them, is the only shape that distinguishes the two sources.
+
+3. **Rows 13 and 14 are one test body, not two.** They are the reclamation and its control, and as
+   separate bodies they race each other for the table's newest window under ExUnit's shuffle. One
+   body with two callers at two windows, based far enough in the future that no other file in the
+   suite has written a later one, makes it order-independent.
+
+4. **Two tests the brief did not ask for, both added because a mutation killed nothing.** The
+   token statement's `limit` could be removed and no test failed — row 27's bounds test exercised
+   the *people* statement alone, and two statements in one function are two bounds. And every
+   assertion in the limiter's file derives its loop from `limit/0` and its advance from
+   `window_seconds/0`, which is what stops those drifting and leaves both **unpinned**: `@limit`
+   raised to a million passes all of them while limiting nothing. Both are now covered
+   (mutations 30 and 32 below), the second in the form the moduledoc claims — the window *is* the
+   magic link's validity, so "one caller can cause at most `limit` emails inside the lifetime of
+   any link they caused" is a sentence about the pair.
+
+5. **Row 34 landed in `boundary_test.exs`'s retention nest rather than as a standalone file.**
+   The migration is index-only and depends on nothing in that nest — the indexes are on `people`
+   and `people_tokens`, which no rollback there touches — so it rolls on its own, inside the file
+   that already owns the migrator machinery. It compares `pg_indexes.indexdef` rather than the
+   names, because the partial index's `WHERE` **is** the reap's own two `IS NULL` clauses and a
+   predicate that drifted would still be present under the same name; mutation 34 is that drift.
+
+6. **Rows do not map one-to-one onto test bodies**, as U8, U9 and U10 all recorded. The 35-row
+   matrix produced **18** bodies in `lifecycle_reap_test.exs`, **15** in `login_rate_limit_test.exs`
+   and **1** in `boundary_test.exs` — 34 against 35, with rows 13 and 14 collapsing (revision 3)
+   and rows 32 and 33 needing no new body, because `lifecycle_test.exs`'s two existing KTD21 sweeps
+   already quantify over every module compiled from `lib/` and therefore covered the new worker and
+   the new plug on the day they were written. That is the property those sweeps were built for, and
+   it is asserted by their continuing to answer `[Accounts]` and the same two files.
+
+7. **The tree moved underneath this branch.** PR #39 was merged upstream during implementation and
+   another checkout switched this working copy to `main` and pulled, so the first two commits
+   landed on local `main` at `f8e6e87` rather than on the branch. Moved onto
+   `feat/15-rate-limit-and-reapers` and `main` reset to `origin/main`; nothing was rebased and no
+   commit was rewritten. The branch is therefore based on `f8e6e87` — current `origin/main`,
+   including #39 — rather than on `5645223` as the ticket named it. Nothing in this unit touches
+   `Profiles`, `PeerChannel` or `Rosters`.
+
+## Mutation record
+
+Thirty-four mutations, each applied, measured against the two new files (and `boundary_test.exs`
+for the migration's two), then restored. Every one of the 34 test bodies is killed by at least one.
+
+| # | Mutation | Tests killed |
+|---|----------|--------------|
+| 1 | `verdict(false)` answers `:admitted` — the limiter never refuses | 9 |
+| 2 | `count <= @limit` → `count < @limit` — refuses one request early | 2 |
+| 3 | the counter keyed on a constant rather than `conn.remote_ip` | 5 |
+| 4 | the stored window ignored — a stale bucket is added to, never reset | 2 |
+| 5 | the bucket reset on every request | 9 |
+| 6 | the `retry-after` header dropped | 1 |
+| 7 | the refusal body hand-rolled instead of `ErrorEnvelope` | 1 |
+| 8 | `prune/0` reclaims nothing | 1 |
+| 9 | `prune/0` reclaims the current window too | 1 |
+| 10 | a row per caller *and* window rather than per caller | 2 |
+| 11 | the counter keyed on the address in the body as well as the caller | 6 |
+| 12 | the plug reads `Clock.now/0` rather than the scope's instant | 2 |
+| 13 | the limiter applied to `POST /api/log-in/token` as well | 1 |
+| 14 | `ConnCase` stops partitioning the key space | 4 (one in `session_controller_test`) |
+| 15 | `ConnCase` hands every test the same address | 4 (one in `session_controller_test`) |
+| 16 | login tokens reaped strictly past the horizon rather than at it | 2 |
+| 17 | the `session` disjunct removed | 2 |
+| 18 | the `change:` disjunct removed | 2 |
+| 19 | the catch-all disjunct removed | 1 |
+| 20 | the token predicate widened to every row | 16 |
+| 21 | `confirmed_at IS NULL` dropped from the people reap | 1 |
+| 22 | `erased_at IS NULL` dropped from the people reap | 1 |
+| 23 | the people horizon inclusive rather than half-open | 1 |
+| 24 | the unconfirmed horizon widened to sixty days | 6 |
+| 25 | the unconfirmed horizon shortened below a session's validity | 3 |
+| 26 | the people reap removed | 6 |
+| 27 | the people statement's batch bound dropped | 1 |
+| 28 | a **lower bound** added to the people reap — the floor the sweep must not have | 5 |
+| 29 | the worker reaps at a fixed instant rather than the clock's | 1 |
+| 30 | the token statement's batch bound dropped | 1 (0 before revision 4) |
+| 31 | the limiter's window no longer the link's validity | 1 (0 before revision 4) |
+| 32 | `@limit` raised to a million | 10 (0 before revision 4) |
+| 33 | the migration's `down` drops nothing | 1 |
+| 34 | the partial index's predicate drifts from the reap's clauses | 1 |
+
+Two things are deliberately **not** asserted and are named rather than left to be discovered.
+`schedule_prune/0`'s interval is not exercised — `prune/0` is, and the interval is a timer with no
+decision in it. And `Workers.AccountReaper`'s `Logger.info` is not asserted; it is the trace, and
+a test that read it back would be asserting a sentence.

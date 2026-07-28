@@ -578,6 +578,19 @@ defmodule HospitalityComs.Lifecycle.Records do
   """
   @spec expired_tokens(DateTime.t(), pos_integer()) :: Ecto.Query.t()
   def expired_tokens(%DateTime{} = instant, limit) when is_integer(limit) and limit > 0 do
+    from token in PersonToken,
+      where: ^expired_by_context(instant),
+      order_by: [asc: token.inserted_at, asc: token.id],
+      limit: ^limit,
+      select: token.id
+  end
+
+  # Split into the three the application writes and the ones it does not, which
+  # is also the shape of the argument: the first half is the complement of three
+  # named liveness rules, the second is the conservative answer for a context
+  # whose rule nobody has written yet.
+  @spec expired_by_context(DateTime.t()) :: Ecto.Query.dynamic_expr()
+  defp expired_by_context(instant) do
     session = horizon(instant, PersonToken.session_validity_in_days(), :day)
     login = horizon(instant, PersonToken.magic_link_validity_in_minutes(), :minute)
     change = horizon(instant, PersonToken.change_email_validity_in_days(), :day)
@@ -586,16 +599,31 @@ defmodule HospitalityComs.Lifecycle.Records do
     # minimum of the three rather than a fourth constant.
     longest = Enum.min([session, login, change], DateTime)
 
-    from token in PersonToken,
-      where:
-        (token.context == "session" and token.inserted_at <= ^session) or
-          (token.context == "login" and token.inserted_at <= ^login) or
-          (like(token.context, "change:%") and token.inserted_at <= ^change) or
-          (token.context != "session" and token.context != "login" and
-             not like(token.context, "change:%") and token.inserted_at <= ^longest),
-      order_by: [asc: token.inserted_at, asc: token.id],
-      limit: ^limit,
-      select: token.id
+    dynamic(
+      [token],
+      ^known_context_expired(session, login, change) or ^unknown_context_expired(longest)
+    )
+  end
+
+  @spec known_context_expired(DateTime.t(), DateTime.t(), DateTime.t()) ::
+          Ecto.Query.dynamic_expr()
+  defp known_context_expired(session, login, change) do
+    dynamic(
+      [token],
+      (token.context == "session" and token.inserted_at <= ^session) or
+        (token.context == "login" and token.inserted_at <= ^login) or
+        (like(token.context, "change:%") and token.inserted_at <= ^change)
+    )
+  end
+
+  @spec unknown_context_expired(DateTime.t()) :: Ecto.Query.dynamic_expr()
+  defp unknown_context_expired(longest) do
+    dynamic(
+      [token],
+      token.context not in ["session", "login"] and
+        not like(token.context, "change:%") and
+        token.inserted_at <= ^longest
+    )
   end
 
   @doc """

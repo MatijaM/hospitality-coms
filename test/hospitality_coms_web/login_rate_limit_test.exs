@@ -43,6 +43,7 @@ defmodule HospitalityComsWeb.LoginRateLimitTest do
 
   import HospitalityComs.AccountsFixtures
 
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Clock
   alias HospitalityComsWeb.LoginRateLimit
@@ -264,10 +265,7 @@ defmodule HospitalityComsWeb.LoginRateLimitTest do
   # assigned.
   defp limited(ip, instant) do
     %Plug.Conn{Phoenix.ConnTest.build_conn() | remote_ip: ip}
-    |> Plug.Conn.assign(
-      :current_scope,
-      HospitalityComs.Accounts.PersonScope.for_person(nil, instant)
-    )
+    |> Plug.Conn.assign(:current_scope, PersonScope.for_person(nil, instant))
     |> LoginRateLimit.limit_login([])
   end
 
