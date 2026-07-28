@@ -32,9 +32,10 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
   references the bridge adds to it.
 
   U8 adds three more, and they are the first that hang off `people` **directly**
-  rather than through the bridge: `connection_requests`, `peer_connections` and
-  `peer_messages` each hold two or three foreign keys to it, all `ON DELETE
-  RESTRICT`. That is not a widening of the crossing — a peer table naming a
+  rather than through the bridge: `connection_requests` holds three foreign keys
+  to it, `peer_connections` three, and `peer_messages` exactly one — `author_id`,
+  because a peer message names its author where a room message resolves one
+  through an engagement (KTD15b) — all `ON DELETE RESTRICT`. That is not a widening of the crossing — a peer table naming a
   person is the person zone doing what the person zone is for — but it is one
   more thing standing between this migration and a droppable `people`, and the
   list is where that is recorded.

@@ -378,6 +378,73 @@ explicitly.
 12. **Every claim in this brief about what a test would catch was checked by breaking the
     code.** Ten mutations, each reverted, recorded in the final report.
 
+13. **The 73-row matrix is not a 1:1 map onto test bodies, and the table's shape implies it
+    is.** U8 added **82** test bodies against 73 rows, and the two numbers reconcile without
+    a coverage hole — but not row by row, which is what a numbered table with one scenario
+    per line invites a reader to assume. Corrected here rather than by renumbering, because
+    the rows are referenced by number in the controls list and in the final report.
+
+    Seven rows-to-one-body merges, enumerated so the mapping is checkable:
+
+    | Rows | One body |
+    |---|---|
+    | 5, 6 | "persists twenty-nine days after the engagements end and has lapsed at thirty-one" |
+    | 28, 29 | "creates a connection both parties can read" |
+    | 30, 31 | "refuses a request addressed to somebody else, one this person sent, and nothing" |
+    | 33, 34 | "survives both engagements ending, and still carries messages" |
+    | 38, 42 | "closes the conversation for both, from either side" |
+    | 43, 44 | "blocks the counterpart of whoever disconnected, and not the disconnector" |
+    | 47, 48 | "refuses a second disconnect and one by somebody who is not a party" |
+
+    The `…and` prefix on a continuation row was meant to signal the first of these and does
+    not say so anywhere; the other six were undisclosed.
+
+    Two rows are not one body each in the other direction. Row 54 ("the sequential case is
+    told apart from each race") is **three** control bodies, one per race. Row 64 ("the whole
+    boundary suite passes with the peer tables populated") is not a test body at all — it is
+    the issue's stated verification, discharged by the suite run rather than by an assertion.
+
+    And bodies exist with no row: `peers_test.exs`'s "gives one entry per venue when the same
+    pair worked at two of them", "stores the pair in one order whichever way round the
+    request went", and declining's "refuses a request addressed to somebody else, one already
+    answered, and nothing" were all written during implementation and never added to the
+    table.
+
+14. **Eight review findings changed production code after the brief was approved**, and the
+    brief is the record of what the tests were designed to prove, so the additions are
+    listed rather than folded in silently. Each is a test that failed before its fix.
+
+    - **`request_connection/2`'s decision and supersede are one statement.** Two statements
+      left KTD19's block defeatable by racing: the blocked party's `FOR UPDATE` read parked
+      on the row being superseded, correctly found it no longer current on release, and
+      never saw the replacement — which the following `update_all`, on a fresh snapshot, then
+      superseded. `peers_concurrency_test.exs` now races it in the one ordering that shows it
+      and asserts the *reply*, not only the row count.
+    - **`send_message/3` re-resolves the conversation under `FOR SHARE` and announces after
+      the commit.** A send racing a disconnect was stored and pushed to the person who had
+      just cut contact. Raced in `peers_concurrency_test.exs`.
+      `Rooms.send_venue_room_message/3` shares the shape and is deliberately unchanged; the
+      asymmetry is a comment in `Peers`.
+    - **`connection_requests_decline_blocks_requester` was NULL-tolerant.**
+      `blocked_initiator_id = requester_id` is NULL when the column is NULL, and a NULL CHECK
+      passes. `IS NOT DISTINCT FROM` now, with a test that writes the row through `Repo`.
+    - **Both emptiness clauses are tested.** Row 9 only ever bound the empty term to `peer`,
+      so a mutation dropping `own.starts_at < own.ends_at` passed the suite.
+    - **The matrix compares against `Visibility.visible_at?/2`.** It compared against
+      `covers?/2` and restated the overlap half in the test file, so half of row 13 was the
+      SQL against its own test's idea of it. Two strictly positive gap shapes added.
+    - **`Records.request_of/2` filters `superseded_at IS NULL`**, so `fetch_request/2` agrees
+      with the writes and the lists about superseded rows as well as lapsed ones.
+    - **`list_visible_peers/1` returns one entry per counterpart per venue.** Row 11's
+      projection could return the same `person_id` twice with two `visible_until` values.
+    - **The channel topic is `peer:<person_id>`.** Row 65's KTD10 claim is unchanged; what
+      changed is that the exact topic `"peer"` put every peer channel in the cluster into one
+      Phoenix group, which no test could see and only a comment forbade.
+
+    Two more that are contract rather than behaviour: `rendered_message/1` names its entity
+    `message_id` in every shape, and `rendered_request/1` carries `accepted_at` and
+    `declined_at`. `peer_channel_test.exs` asserts the exact key sets, which nothing did.
+
 ## Quality scores (self-assessed)
 
 - Coverage of stated scenarios: all 13 from the issue, plus the issue's stated verification,
