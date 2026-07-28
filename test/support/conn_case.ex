@@ -109,7 +109,7 @@ defmodule HospitalityComsWeb.ConnCase do
   """
   @spec log_in_person(Plug.Conn.t(), Person.t(), DateTime.t()) :: Plug.Conn.t()
   def log_in_person(conn, person, now \\ Clock.now()) do
-    token = Accounts.generate_person_session_token(person, now)
+    token = Accounts.generate_person_session_token(PersonScope.for_person(person, now))
     put_bearer_token(conn, PersonAuth.encode_token(token))
   end
 

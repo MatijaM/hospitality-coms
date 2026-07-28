@@ -43,7 +43,11 @@ defmodule HospitalityComs.AccountsDeliveryTest do
       take_the_provider_down()
 
       assert {:error, :delivery_failed} =
-               Accounts.request_login_instructions(unique_person_email(), url_builder(), @now)
+               Accounts.request_login_instructions(
+                 anonymous_scope(@now),
+                 unique_person_email(),
+                 url_builder()
+               )
     end
 
     test "answers the same way for an address that already exists" do
@@ -51,7 +55,11 @@ defmodule HospitalityComs.AccountsDeliveryTest do
       take_the_provider_down()
 
       assert {:error, :delivery_failed} =
-               Accounts.request_login_instructions(person.email, url_builder(), @now)
+               Accounts.request_login_instructions(
+                 anonymous_scope(@now),
+                 person.email,
+                 url_builder()
+               )
     end
   end
 
@@ -62,10 +70,9 @@ defmodule HospitalityComs.AccountsDeliveryTest do
 
       assert {:error, :delivery_failed} =
                Accounts.deliver_person_update_email_instructions(
-                 %{person | email: unique_person_email()},
-                 person.email,
-                 url_builder(),
-                 @now
+                 person_scope_fixture(person, @now),
+                 unique_person_email(),
+                 url_builder()
                )
     end
   end
@@ -76,12 +83,12 @@ defmodule HospitalityComs.AccountsDeliveryTest do
       take_the_provider_down()
 
       assert {:error, :delivery_failed} =
-               Accounts.request_login_instructions(email, url_builder(), @now)
+               Accounts.request_login_instructions(anonymous_scope(@now), email, url_builder())
 
       # The mail is delivered after the transaction commits, so the rows are
       # still here. What must never happen is half of them: a person nobody can
       # log in as, or a token belonging to nobody.
-      assert %Person{id: person_id} = Accounts.get_person_by_email(email)
+      assert %Person{id: person_id} = Accounts.get_person_by_email(anonymous_scope(@now), email)
       assert [%PersonToken{context: "login"}] = Repo.all_by(PersonToken, person_id: person_id)
     end
 
@@ -89,7 +96,11 @@ defmodule HospitalityComs.AccountsDeliveryTest do
       take_the_provider_down()
 
       assert {:error, %Ecto.Changeset{}} =
-               Accounts.request_login_instructions("not an address", url_builder(), @now)
+               Accounts.request_login_instructions(
+                 anonymous_scope(@now),
+                 "not an address",
+                 url_builder()
+               )
 
       assert Repo.aggregate(Person, :count) == 0
       assert Repo.aggregate(PersonToken, :count) == 0

@@ -37,15 +37,21 @@ defmodule HospitalityComsWeb.PersonAuth do
 
   The scope is assigned for every request, authenticated or not: the log-in
   endpoint has no person and still needs the instant to stamp a token with.
+
+  Which is why the request's scope starts anonymous and is *replaced* on a
+  successful lookup rather than being built after it. The lookup itself is a
+  person-zone read and takes a scope like every other one, so the anonymous
+  form is the only thing that can be handed to the call that produces the
+  person the real scope will carry.
   """
   @spec fetch_person_scope(Plug.Conn.t(), keyword()) :: Plug.Conn.t()
   def fetch_person_scope(conn, _opts) do
-    now = Clock.now()
+    anonymous = PersonScope.for_person(nil, Clock.now())
     token = bearer_token(conn)
 
     conn
     |> assign(:person_token, token)
-    |> assign(:current_scope, PersonScope.for_person(authenticate(token, now), now))
+    |> assign(:current_scope, authenticate(anonymous, token))
   end
 
   @doc """
@@ -104,16 +110,21 @@ defmodule HospitalityComsWeb.PersonAuth do
     "session:#{encode_token(digest)}"
   end
 
-  @spec authenticate(binary() | nil, DateTime.t()) :: Person.t() | nil
-  defp authenticate(nil, _now), do: nil
+  @spec authenticate(PersonScope.t(), binary() | nil) :: PersonScope.t()
+  defp authenticate(%PersonScope{} = anonymous, nil), do: anonymous
 
-  defp authenticate(token, now) do
-    token |> Accounts.get_person_by_session_token(now) |> person_from_lookup()
+  defp authenticate(%PersonScope{} = anonymous, token) do
+    anonymous
+    |> Accounts.get_person_by_session_token(token)
+    |> scope_from_lookup(anonymous)
   end
 
-  @spec person_from_lookup({Person.t(), DateTime.t()} | nil) :: Person.t() | nil
-  defp person_from_lookup({%Person{} = person, _inserted_at}), do: person
-  defp person_from_lookup(nil), do: nil
+  @spec scope_from_lookup({Person.t(), DateTime.t()} | nil, PersonScope.t()) :: PersonScope.t()
+  defp scope_from_lookup({%Person{} = person, _inserted_at}, %PersonScope{now: now}) do
+    PersonScope.for_person(person, now)
+  end
+
+  defp scope_from_lookup(nil, %PersonScope{} = anonymous), do: anonymous
 
   @spec bearer_token(Plug.Conn.t()) :: binary() | nil
   defp bearer_token(conn) do

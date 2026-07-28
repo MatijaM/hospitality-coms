@@ -148,8 +148,12 @@ defmodule HospitalityComsWeb.ChannelAuth do
   defp resolve(nil), do: :error
 
   defp resolve(token) do
-    token
-    |> Accounts.get_person_by_session_token(Clock.now())
+    # Anonymous, because this is the lookup that decides who the socket is.
+    # One clock read, on the boundary module the check allows it in.
+    anonymous = PersonScope.for_person(nil, Clock.now())
+
+    anonymous
+    |> Accounts.get_person_by_session_token(token)
     |> session(Accounts.session_token_digest(token))
   end
 
@@ -187,18 +191,23 @@ defmodule HospitalityComsWeb.ChannelAuth do
   """
   @spec join_scope(Socket.t()) :: {:ok, PersonScope.t()} | {:error, :no_session}
   def join_scope(%Socket{assigns: %{token_digest: digest}}) when is_binary(digest) do
-    now = Clock.now()
+    # The join's instant, on an anonymous scope, because the row this reads is
+    # what says whether there is a person at all. Same row and same fourteen-day
+    # horizon as before; the scope carries the instant that used to be the
+    # second argument, and nothing about what the re-derivation proves (KTD8)
+    # changes with it.
+    anonymous = PersonScope.for_person(nil, Clock.now())
 
-    digest
-    |> Accounts.get_person_by_session_token_digest(now)
-    |> live_session(now)
+    anonymous
+    |> Accounts.get_person_by_session_token_digest(digest)
+    |> live_session(anonymous)
   end
 
-  @spec live_session({Person.t(), DateTime.t()} | nil, DateTime.t()) ::
+  @spec live_session({Person.t(), DateTime.t()} | nil, PersonScope.t()) ::
           {:ok, PersonScope.t()} | {:error, :no_session}
-  defp live_session(nil, _now), do: {:error, :no_session}
+  defp live_session(nil, _anonymous), do: {:error, :no_session}
 
-  defp live_session({%Person{} = person, _inserted_at}, now) do
+  defp live_session({%Person{} = person, _inserted_at}, %PersonScope{now: now}) do
     {:ok, PersonScope.for_person(person, now)}
   end
 

@@ -392,7 +392,9 @@ defmodule HospitalityComs.EngagementsFixtures do
 
     {:ok, person} =
       Repo.transaction(fn ->
-        {:ok, person} = Accounts.register_person(%{email: email}, now)
+        {:ok, person} =
+          Accounts.register_person(PersonScope.for_person(nil, now), %{email: email})
+
         person
       end)
 

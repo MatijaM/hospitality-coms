@@ -9,29 +9,72 @@ defmodule HospitalityComs.Accounts do
   with an address nobody has used yet, and the row is unconfirmed until whoever
   reads that mailbox redeems the link.
 
-  Every function that depends on the current instant takes it as an argument.
-  The instant is captured once, at the HTTP boundary, and carried on the scope
-  (KTD5); nothing in this module reads a clock. That is also why the context is
-  testable without touching the offsettable clock at all — expiry is asserted
-  by passing an instant, not by moving global state.
-
   This context is person zone. It reads and writes through
   `HospitalityComs.Repo` only. `HospitalityComs.EmployerRepo` must never appear
   here; U3 turns that from a convention into a Postgres privilege.
 
-  ## What the scope split does and does not do here
+  ## The scope-first shape, and what it covers
 
-  `sudo_mode?/2` takes a `PersonScope` and refuses an `EmployerScope` by
-  function clause. It is the only function in this module that does. Everything
-  else takes a bare address, a bare token, or a bare `DateTime`, so an employer
-  caller reaches it by passing `employer_scope.now` and nothing refuses.
+  Every function here that reaches a repo takes a
+  `HospitalityComs.Accounts.PersonScope` first, so an employer caller holding
+  an `EmployerScope` is refused by function clause — a `FunctionClauseError`
+  raised before the body runs, at the top of a function nobody had to remember
+  to guard. That is U3's mechanism, and until #18 it protected `sudo_mode?/2`
+  alone, which reads nothing.
 
-  So the split makes that refusal available rather than enforced, and this
-  module is not the boundary in any case: it goes through `Repo`, which holds
-  every privilege on every table. What keeps an employer session out of
-  `people` is the grant on `EmployerRepo`'s role. Converting the rest of this
-  API to the scope-first shape is worth doing and is a change to every caller
-  of the person zone, so it is filed rather than smuggled in here.
+  `session_token_digest/1` is the only exception, and it is enumerated rather
+  than incidental: it is a hash of its argument, reaching no repo, no row and
+  no clock. `person_zone_test.exs` sweeps the module's export list and pins
+  that exception as a literal.
+
+  The instant arrives on the scope and nothing here reads a clock (KTD5), so
+  the context is testable without touching the offsettable clock at all —
+  expiry is asserted by passing an instant, not by moving global state.
+
+  ## Two head shapes, because the person zone has an anonymous half
+
+  Registration and log-in are anonymous. `request_login_instructions/3` may be
+  the call that creates the row; `get_person_by_email/2` is asked about an
+  address that may name nobody; and `get_person_by_session_token/2` is the call
+  that *produces* the person a scope will carry, so it cannot be handed one
+  that already has it. A scope answers three questions — which zone, when, and
+  sometimes who — and only the first two are always answerable. The refusal is
+  about the first, so the anonymous half is not an exception to it:
+  `PersonScope.for_person(nil, now)` is what every unauthenticated request
+  already carries.
+
+  So the head says which of the two it is, per function:
+
+    * **The scope's person is the subject.** `%PersonScope{person: %Person{}}`,
+      and there is no person argument — `sudo_mode?/2`,
+      `generate_person_session_token/1`, `update_person_email/2`,
+      `deliver_login_instructions/2` and
+      `deliver_person_update_email_instructions/3`.
+    * **The subject is a credential, an address or an id handed in.**
+      `%PersonScope{}`, and the scope's person is deliberately *not* read.
+      Everything else.
+
+  A head of the first shape on the log-in door would be a lie no caller could
+  satisfy; a head of the second on `generate_person_session_token/1` would put
+  a person argument beside a scope carrying a different one.
+
+  The second shape does not require `person: nil`. `delete_person_session_token/2`
+  is called from an authenticated request about that request's own credential,
+  and `get_person_by_email/2` is called from inside
+  `request_login_instructions/3` with whatever scope came down. The residue is
+  worth stating: for those functions the scope's person is ignored, so the
+  answer is about the credential and not about the caller.
+
+  ## What this is not
+
+  It is not the boundary, and nothing about it should be read as one. This
+  module goes through `Repo`, which holds every privilege on every table, and
+  an employer caller who constructs a `PersonScope` from their own instant
+  reaches everything here. `boundary_test.exs` asserts exactly that, so the
+  claim cannot quietly grow. What closes the person zone is the grant on
+  `EmployerRepo`'s role plus U3's `REVOKE`; what the shape closes is reaching
+  the zone by accident, and it makes the deliberate case a line a reviewer can
+  see.
   """
 
   import Ecto.Query, warn: false
@@ -51,21 +94,26 @@ defmodule HospitalityComs.Accounts do
   @doc """
   Gets a person by email.
 
+  The scope carries no instant this needs — an address either names a live row
+  or it does not, and there is no horizon on it. It is there for the zone: this
+  is the read that turns an address into a person, and an employer session must
+  not be one function call away from it.
+
   An erased person is unreachable by address: erasure nulls the column, so this
   returns nil and a later registration with the same address creates a new,
   unrelated person.
 
   ## Examples
 
-      iex> get_person_by_email("foo@example.com")
+      iex> get_person_by_email(scope, "foo@example.com")
       %Person{}
 
-      iex> get_person_by_email("unknown@example.com")
+      iex> get_person_by_email(scope, "unknown@example.com")
       nil
 
   """
-  @spec get_person_by_email(String.t()) :: Person.t() | nil
-  def get_person_by_email(email) when is_binary(email) do
+  @spec get_person_by_email(PersonScope.t(), String.t()) :: Person.t() | nil
+  def get_person_by_email(%PersonScope{}, email) when is_binary(email) do
     Repo.get_by(Person, email: email)
   end
 
@@ -74,8 +122,8 @@ defmodule HospitalityComs.Accounts do
 
   Raises `Ecto.NoResultsError` if the person does not exist.
   """
-  @spec get_person!(Ecto.UUID.t()) :: Person.t()
-  def get_person!(id), do: Repo.get!(Person, id)
+  @spec get_person!(PersonScope.t(), Ecto.UUID.t()) :: Person.t()
+  def get_person!(%PersonScope{}, id) when is_binary(id), do: Repo.get!(Person, id)
 
   ## Person registration
 
@@ -87,18 +135,21 @@ defmodule HospitalityComs.Accounts do
   lets `request_login_instructions/3` lose the registration race and carry on
   inside the same transaction; outside one it costs nothing.
 
+  The scope is anonymous on the only path that matters: nobody holds a session
+  for a person who does not exist yet.
+
   ## Examples
 
-      iex> register_person(%{email: "foo@example.com"}, now)
+      iex> register_person(scope, %{email: "foo@example.com"})
       {:ok, %Person{}}
 
-      iex> register_person(%{email: "not an address"}, now)
+      iex> register_person(scope, %{email: "not an address"})
       {:error, %Ecto.Changeset{}}
 
   """
-  @spec register_person(map(), DateTime.t()) ::
+  @spec register_person(PersonScope.t(), map()) ::
           {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
-  def register_person(attrs, %DateTime{} = now) do
+  def register_person(%PersonScope{now: now}, attrs) when is_map(attrs) do
     %Person{}
     |> Person.email_changeset(attrs, now)
     |> Repo.insert(mode: :savepoint)
@@ -127,22 +178,25 @@ defmodule HospitalityComs.Accounts do
   rows already written. That is the same thing an abandoned request leaves —
   an unconfirmed person holding a token that expires in fifteen minutes — and
   the person can ask again.
+
+  The scope is the request's own, and it is anonymous whenever this matters:
+  the caller has no session, which is why they are asking for a link.
   """
-  @spec request_login_instructions(String.t(), url_fun(), DateTime.t()) ::
+  @spec request_login_instructions(PersonScope.t(), String.t(), url_fun()) ::
           {:ok, Person.t()}
           | {:error, :delivery_failed | :transaction_aborted | Ecto.Changeset.t(Person.t())}
-  def request_login_instructions(email, magic_link_url_fun, %DateTime{} = now)
+  def request_login_instructions(%PersonScope{} = scope, email, magic_link_url_fun)
       when is_binary(email) and is_function(magic_link_url_fun, 1) do
-    email
-    |> login_request_multi(now)
+    scope
+    |> login_request_multi(email)
     |> Repo.transaction()
     |> deliver_requested_link(magic_link_url_fun)
   end
 
-  @spec login_request_multi(String.t(), DateTime.t()) :: Multi.t()
-  defp login_request_multi(email, now) do
+  @spec login_request_multi(PersonScope.t(), String.t()) :: Multi.t()
+  defp login_request_multi(%PersonScope{now: now} = scope, email) do
     Multi.new()
-    |> Multi.run(:person, fn _repo, _changes -> fetch_or_register_person(email, now) end)
+    |> Multi.run(:person, fn _repo, _changes -> fetch_or_register_person(scope, email) end)
     |> Multi.run(:login_token, fn repo, %{person: person} ->
       insert_login_token(repo, person, now)
     end)
@@ -182,22 +236,22 @@ defmodule HospitalityComs.Accounts do
     with {:ok, _row} <- repo.insert(person_token), do: {:ok, encoded_token}
   end
 
-  @spec fetch_or_register_person(String.t(), DateTime.t()) ::
+  @spec fetch_or_register_person(PersonScope.t(), String.t()) ::
           {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
-  defp fetch_or_register_person(email, now) do
-    email
-    |> get_person_by_email()
-    |> registered_or_register(email, now)
+  defp fetch_or_register_person(scope, email) do
+    scope
+    |> get_person_by_email(email)
+    |> registered_or_register(scope, email)
   end
 
-  @spec registered_or_register(Person.t() | nil, String.t(), DateTime.t()) ::
+  @spec registered_or_register(Person.t() | nil, PersonScope.t(), String.t()) ::
           {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
-  defp registered_or_register(%Person{} = person, _email, _now), do: {:ok, person}
+  defp registered_or_register(%Person{} = person, _scope, _email), do: {:ok, person}
 
-  defp registered_or_register(nil, email, now) do
-    %{email: email}
-    |> register_person(now)
-    |> or_whoever_won_the_race(email)
+  defp registered_or_register(nil, scope, email) do
+    scope
+    |> register_person(%{email: email})
+    |> or_whoever_won_the_race(scope, email)
   end
 
   # Two first-ever log-ins for the same address at the same time both see no
@@ -209,12 +263,13 @@ defmodule HospitalityComs.Accounts do
   # looks again, and the winner's person is the answer to both requests.
   @spec or_whoever_won_the_race(
           {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())},
+          PersonScope.t(),
           String.t()
         ) :: {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
-  defp or_whoever_won_the_race({:ok, %Person{} = person}, _email), do: {:ok, person}
+  defp or_whoever_won_the_race({:ok, %Person{} = person}, _scope, _email), do: {:ok, person}
 
-  defp or_whoever_won_the_race({:error, changeset}, email) do
-    email |> get_person_by_email() |> registered_or_error(changeset)
+  defp or_whoever_won_the_race({:error, changeset}, scope, email) do
+    scope |> get_person_by_email(email) |> registered_or_error(changeset)
   end
 
   # No row means the insert failed on its own merits — a malformed address, an
@@ -233,16 +288,18 @@ defmodule HospitalityComs.Accounts do
   than 20 minutes before the instant. The limit can be given as second argument
   in minutes.
 
-  This is the shape context functions are meant to take: a scope, and a scope
-  of the right kind. The head matches `PersonScope` and nothing else, so an
-  employer caller raises `FunctionClauseError` before the body runs rather than
-  being turned away by a check somebody has to remember to write. An anonymous
-  person scope is a caller, not a mismatch, so it is answered rather than
-  refused.
+  The head matches `PersonScope` and nothing else, so an employer caller raises
+  `FunctionClauseError` before the body runs rather than being turned away by a
+  check somebody has to remember to write. This was the only function in the
+  module shaped that way until #18; the whole context is now, and it reads
+  nothing, so it is the one place the shape is *all* there is.
 
-  It is the only function in this module shaped that way today, and it reads
-  nothing — see the moduledoc. The refusal it demonstrates is available to the
-  rest of the context, not yet in force across it.
+  An anonymous person scope is a caller, not a mismatch, so it is answered
+  `false` by the second clause rather than refused. That is deliberate and it
+  is the reason this function is swept alongside the anonymous half in
+  `person_zone_test.exs` rather than alongside the four that require a person:
+  "was this session recently authenticated" has an answer for a session that
+  never was.
   """
   @spec sudo_mode?(PersonScope.t(), integer()) :: boolean()
   def sudo_mode?(scope, minutes \\ -20)
@@ -265,10 +322,14 @@ defmodule HospitalityComs.Accounts do
 
   Returns the updated person and the tokens that were expired, so a caller can
   disconnect the sockets they belong to.
+
+  The subject is the scope's own person: an address is changed by whoever holds
+  it, and a session for somebody else has no business naming them here.
   """
-  @spec update_person_email(Person.t(), String.t(), DateTime.t()) ::
+  @spec update_person_email(PersonScope.t(), String.t()) ::
           {:ok, {Person.t(), [PersonToken.t()]}} | {:error, :transaction_aborted}
-  def update_person_email(%Person{} = person, token, %DateTime{} = now) when is_binary(token) do
+  def update_person_email(%PersonScope{person: %Person{} = person, now: now}, token)
+      when is_binary(token) do
     context = "change:#{person.email}"
 
     Repo.transact(fn ->
@@ -289,9 +350,15 @@ defmodule HospitalityComs.Accounts do
 
   @doc """
   Generates the token a session runs on and returns it as raw bytes.
+
+  The scope is the session about to exist: whoever it names is who the token
+  authenticates as, and its instant is what the row is stamped from. A caller
+  redeeming a magic link holds an *anonymous* request scope and the person the
+  redemption returned, so it builds one — `PersonScope.for_person(person,
+  scope.now)` — rather than handing the person past the shape.
   """
-  @spec generate_person_session_token(Person.t(), DateTime.t()) :: binary()
-  def generate_person_session_token(%Person{} = person, %DateTime{} = now) do
+  @spec generate_person_session_token(PersonScope.t()) :: binary()
+  def generate_person_session_token(%PersonScope{person: %Person{} = person, now: now}) do
     {token, person_token} = PersonToken.build_session_token(person, now)
     Repo.insert!(person_token)
     token
@@ -309,20 +376,32 @@ defmodule HospitalityComs.Accounts do
   the token is what keeps a working session out of telemetry.
 
   One direction only. Nothing recovers the token from this.
+
+  The one function in this module that takes no scope, and the reason is that
+  it reaches no repo, no row and no clock: it is `:crypto.hash/2` of the bytes
+  handed in. `person_zone_test.exs` names it as the sweep's single exception
+  and asserts that justification rather than accepting it.
   """
   @spec session_token_digest(binary()) :: binary()
   def session_token_digest(token) when is_binary(token), do: PersonToken.hash_token(token)
 
   @doc """
-  Gets the person the given session token belongs to, as of `now`.
+  Gets the person the given session token belongs to, as of the scope's instant.
 
   Returns `{person, token_inserted_at}` when the token is live, and nil when it
   has expired or its row is gone. There is no cache in front of this: deleting
   the row is the revocation.
+
+  **This is the call that produces the person a scope will carry**, so the
+  scope it takes is necessarily anonymous — `HospitalityComsWeb.PersonAuth`
+  builds one from the request's instant, authenticates, and then builds the
+  request's real scope from the answer. Anything else would be circular, and it
+  is why the anonymous form of a person scope is a requirement here rather than
+  a concession.
   """
-  @spec get_person_by_session_token(binary(), DateTime.t()) ::
+  @spec get_person_by_session_token(PersonScope.t(), binary()) ::
           {Person.t(), DateTime.t()} | nil
-  def get_person_by_session_token(token, %DateTime{} = now) when is_binary(token) do
+  def get_person_by_session_token(%PersonScope{now: now}, token) when is_binary(token) do
     {:ok, query} = PersonToken.verify_session_token_query(token, now)
     Repo.one(query)
   end
@@ -340,11 +419,13 @@ defmodule HospitalityComs.Accounts do
   leak of it must not yield a working session.
 
   Same row, same fourteen-day horizon: `PersonToken.verify_session_token_query/2`
-  delegates to the query behind this one rather than repeating it.
+  delegates to the query behind this one rather than repeating it. Same
+  anonymous scope too, and for the same reason — a join derives the session
+  before it has one.
   """
-  @spec get_person_by_session_token_digest(binary(), DateTime.t()) ::
+  @spec get_person_by_session_token_digest(PersonScope.t(), binary()) ::
           {Person.t(), DateTime.t()} | nil
-  def get_person_by_session_token_digest(digest, %DateTime{} = now) when is_binary(digest) do
+  def get_person_by_session_token_digest(%PersonScope{now: now}, digest) when is_binary(digest) do
     {:ok, query} = PersonToken.verify_session_token_digest_query(digest, now)
     Repo.one(query)
   end
@@ -352,8 +433,8 @@ defmodule HospitalityComs.Accounts do
   @doc """
   Gets the person the given magic-link token belongs to, without redeeming it.
   """
-  @spec get_person_by_magic_link_token(String.t(), DateTime.t()) :: Person.t() | nil
-  def get_person_by_magic_link_token(token, %DateTime{} = now) when is_binary(token) do
+  @spec get_person_by_magic_link_token(PersonScope.t(), String.t()) :: Person.t() | nil
+  def get_person_by_magic_link_token(%PersonScope{now: now}, token) when is_binary(token) do
     with {:ok, query} <- PersonToken.verify_magic_link_token_query(token, now),
          {person, _token} <- Repo.one(query) do
       person
@@ -385,11 +466,15 @@ defmodule HospitalityComs.Accounts do
   raised `Ecto.StaleEntryError` on the loser — a 500 where a 401 was promised —
   and the unconfirmed path did not delete by identity at all, so two
   simultaneous redemptions of one link produced two sessions.
+
+  The scope is the redeeming request's, which is anonymous: the link is the
+  credential, and the person it names is this call's answer rather than its
+  argument.
   """
-  @spec login_person_by_magic_link(String.t(), DateTime.t()) ::
+  @spec login_person_by_magic_link(PersonScope.t(), String.t()) ::
           {:ok, {Person.t(), [PersonToken.t()]}}
           | {:error, :not_found | Ecto.Changeset.t(Person.t())}
-  def login_person_by_magic_link(token, %DateTime{} = now) when is_binary(token) do
+  def login_person_by_magic_link(%PersonScope{now: now}, token) when is_binary(token) do
     case PersonToken.verify_magic_link_token_query(token, now) do
       {:ok, query} -> Repo.transact(fn -> query |> Repo.one() |> redeem_magic_link(now) end)
       :error -> {:error, :not_found}
@@ -442,41 +527,54 @@ defmodule HospitalityComs.Accounts do
   mail does not: a token nobody can reach expires on its own, whereas a
   transaction held open across a provider call does not.
 
+  It takes the **new** address and derives the rest from the scope, where it
+  used to take a `Person` struct doctored to carry the new address plus the old
+  address beside it. The freedom that removed was unusable: `update_person_email/2`
+  verifies the token against `"change:\#{person.email}"`, so a caller who passed
+  anything else minted a token nothing could ever redeem, and a caller who
+  passed a person other than their own minted one against somebody else's
+  address.
+
   ## Examples
 
-      iex> deliver_person_update_email_instructions(person, current_email, &"https://example.com/confirm-email/#{&1}", now)
+      iex> deliver_person_update_email_instructions(scope, "new@example.com", &"https://example.com/confirm-email/#{&1}")
       {:ok, %Swoosh.Email{}}
 
   """
-  @spec deliver_person_update_email_instructions(
-          Person.t(),
-          String.t(),
-          url_fun(),
-          DateTime.t()
-        ) :: delivery()
+  @spec deliver_person_update_email_instructions(PersonScope.t(), String.t(), url_fun()) ::
+          delivery()
   def deliver_person_update_email_instructions(
-        %Person{} = person,
-        current_email,
-        update_email_url_fun,
-        %DateTime{} = now
+        %PersonScope{person: %Person{} = person, now: now},
+        new_email,
+        update_email_url_fun
       )
-      when is_function(update_email_url_fun, 1) do
+      when is_binary(new_email) and is_function(update_email_url_fun, 1) do
+    addressee = %{person | email: new_email}
+
     {encoded_token, person_token} =
-      PersonToken.build_email_token(person, "change:#{current_email}", now)
+      PersonToken.build_email_token(addressee, "change:#{person.email}", now)
 
     Repo.insert!(person_token)
-    PersonNotifier.deliver_update_email_instructions(person, update_email_url_fun.(encoded_token))
+
+    PersonNotifier.deliver_update_email_instructions(
+      addressee,
+      update_email_url_fun.(encoded_token)
+    )
   end
 
   @doc """
   Delivers the magic-link log-in instructions to the given person.
 
-  This is the single-person form. `request_login_instructions/3` is the one the
-  log-in endpoint uses, because it also has to register an address nobody
-  holds, and that pair of writes belongs in one transaction.
+  This is the single-person form, and the person is the scope's own.
+  `request_login_instructions/3` is the one the log-in endpoint uses, because
+  it also has to register an address nobody holds — so it takes an address and
+  an anonymous scope where this one takes neither.
   """
-  @spec deliver_login_instructions(Person.t(), url_fun(), DateTime.t()) :: delivery()
-  def deliver_login_instructions(%Person{} = person, magic_link_url_fun, %DateTime{} = now)
+  @spec deliver_login_instructions(PersonScope.t(), url_fun()) :: delivery()
+  def deliver_login_instructions(
+        %PersonScope{person: %Person{} = person, now: now},
+        magic_link_url_fun
+      )
       when is_function(magic_link_url_fun, 1) do
     {:ok, encoded_token} = insert_login_token(Repo, person, now)
     PersonNotifier.deliver_login_instructions(person, magic_link_url_fun.(encoded_token))
@@ -490,9 +588,14 @@ defmodule HospitalityComs.Accounts do
   request arrived with, which is the value a session's PubSub topic is named
   after; handing them back is what keeps the caller from having to hash
   anything itself.
+
+  The subject is the credential, not the scope's person: a session is ended by
+  presenting it. The scope carries no instant this reads — a deletion is not
+  answerable as of a moment — and is here so that the person zone's one
+  deleting function is refused an employer scope like everything beside it.
   """
-  @spec delete_person_session_token(binary()) :: {:ok, [PersonToken.t()]}
-  def delete_person_session_token(token) when is_binary(token) do
+  @spec delete_person_session_token(PersonScope.t(), binary()) :: {:ok, [PersonToken.t()]}
+  def delete_person_session_token(%PersonScope{}, token) when is_binary(token) do
     digest = PersonToken.hash_token(token)
 
     {_count, deleted} =

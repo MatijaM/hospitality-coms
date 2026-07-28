@@ -2485,13 +2485,17 @@ defmodule HospitalityComs.BoundaryTest do
     end
   end
 
-  describe "the scope-first shape, where it is used" do
-    # Scoped down from "a person-zone context function", which is what this
-    # block used to claim. `sudo_mode?/2` is the only function in `Accounts`
-    # that takes a scope; the rest take a bare address, a bare token or a bare
-    # `DateTime`, so an employer caller reaches them with `employer_scope.now`
-    # and no clause refuses. What is asserted here is that the shape works
-    # where it is used — not that the person zone is closed by it.
+  describe "the scope-first shape, and what it is not" do
+    # This block used to be scoped down to "where it is used", because
+    # `sudo_mode?/2` was the only function in `Accounts` that took a scope and
+    # it reads no data — every other entry point took a bare address, a bare
+    # token or a bare `DateTime`, so an employer caller reached them with
+    # `employer_scope.now` and no clause refused. #18 closed that: every
+    # `Accounts` function that reaches a repo now heads on `%PersonScope{}`.
+    #
+    # The sweep that proves it is `person_zone_test.exs`'s, quantified over the
+    # module's export list. What stays here is the pair this file is for — the
+    # mechanism, and the honest statement of what it does not buy.
 
     test "refuses an employer scope by function clause" do
       # Not a runtime check inside the body. The refusal is the absence of a
@@ -2508,15 +2512,22 @@ defmodule HospitalityComs.BoundaryTest do
 
     test "is not what keeps an employer caller out of the person zone" do
       # The honest counterpart, pinned so the claim above cannot quietly grow
-      # back. An employer caller holds an `EmployerScope` and nothing else, and
-      # `get_person_by_email/1` takes no scope at all — so there is no clause
-      # to refuse it, and the address comes back. `Accounts` goes through
-      # `Repo`, which holds every privilege. What closes the zone is the grant
-      # on `EmployerRepo`'s role; the argument shape is legibility.
+      # back. Before #18 this read an address back on `employer_scope.now`,
+      # because `get_person_by_email/1` took no scope and so had no clause to
+      # refuse one. It has one now — so the demonstration moves to the act that
+      # clause actually costs an employer caller, which is *forging* a person
+      # scope out of their own instant. It works, and it is meant to.
+      #
+      # `Accounts` goes through `Repo`, which holds every privilege. What
+      # closes the zone is the grant on `EmployerRepo`'s role plus the
+      # `REVOKE`; the argument shape is legibility, and this is the assertion
+      # that stops that sentence quietly becoming a stronger one.
       employer = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
-      {:ok, person} = Accounts.register_person(%{email: "reachable@example.com"}, employer.now)
+      forged = PersonScope.for_person(nil, employer.now)
 
-      assert %Person{id: id} = Accounts.get_person_by_email(person.email)
+      {:ok, person} = Accounts.register_person(forged, %{email: "reachable@example.com"})
+
+      assert %Person{id: id} = Accounts.get_person_by_email(forged, person.email)
       assert id == person.id
     end
   end

@@ -34,10 +34,10 @@ defmodule HospitalityComsWeb.SessionController do
   """
   @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def create(conn, %{"email" => email}) when is_binary(email) do
-    %PersonScope{now: now} = conn.assigns.current_scope
+    %PersonScope{} = scope = conn.assigns.current_scope
 
     conn
-    |> deliver_or_reject(Accounts.request_login_instructions(email, &magic_link_url/1, now))
+    |> deliver_or_reject(Accounts.request_login_instructions(scope, email, &magic_link_url/1))
   end
 
   def create(conn, _params), do: reject(conn, :bad_request, "email is required")
@@ -47,10 +47,10 @@ defmodule HospitalityComsWeb.SessionController do
   """
   @spec confirm(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def confirm(conn, %{"token" => token}) when is_binary(token) do
-    %PersonScope{now: now} = conn.assigns.current_scope
+    %PersonScope{} = scope = conn.assigns.current_scope
 
     conn
-    |> issue_or_reject(Accounts.login_person_by_magic_link(token, now), now)
+    |> issue_or_reject(Accounts.login_person_by_magic_link(scope, token), scope)
   end
 
   def confirm(conn, _params), do: reject(conn, :bad_request, "token is required")
@@ -69,7 +69,9 @@ defmodule HospitalityComsWeb.SessionController do
   """
   @spec delete(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def delete(conn, _params) do
-    {:ok, ended} = Accounts.delete_person_session_token(conn.assigns.person_token)
+    %PersonScope{} = scope = conn.assigns.current_scope
+
+    {:ok, ended} = Accounts.delete_person_session_token(scope, conn.assigns.person_token)
     :ok = PersonAuth.disconnect_sessions(ended)
 
     send_resp(conn, :no_content, "")
@@ -109,22 +111,26 @@ defmodule HospitalityComsWeb.SessionController do
     )
   end
 
+  # The request's own scope is anonymous — redemption is how somebody stops
+  # being anonymous — so the session about to be issued is named here, at the
+  # request's instant, and that scope is what mints the token. It is the
+  # session, written down, rather than the person handed past the shape.
   @spec issue_or_reject(
           Plug.Conn.t(),
           {:ok, {Person.t(), [PersonToken.t()]}}
           | {:error, :not_found | Ecto.Changeset.t(Person.t())},
-          DateTime.t()
+          PersonScope.t()
         ) :: Plug.Conn.t()
-  defp issue_or_reject(conn, {:ok, {person, tokens_to_disconnect}}, now) do
+  defp issue_or_reject(conn, {:ok, {person, tokens_to_disconnect}}, %PersonScope{now: now}) do
     :ok = PersonAuth.disconnect_sessions(tokens_to_disconnect)
-    token = Accounts.generate_person_session_token(person, now)
+    token = Accounts.generate_person_session_token(PersonScope.for_person(person, now))
 
     conn
     |> put_status(:created)
     |> json(%{token: PersonAuth.encode_token(token), person: render_person(person)})
   end
 
-  defp issue_or_reject(conn, {:error, _reason}, _now) do
+  defp issue_or_reject(conn, {:error, _reason}, %PersonScope{}) do
     reject(conn, :unauthorized, "the link is invalid or it has expired")
   end
 
