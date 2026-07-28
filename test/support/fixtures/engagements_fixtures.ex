@@ -42,6 +42,9 @@ defmodule HospitalityComs.EngagementsFixtures do
   alias HospitalityComs.Engagements
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Engagements.Invitation
+  alias HospitalityComs.Peers.Connection, as: PeerConnection
+  alias HospitalityComs.Peers.ConnectionRequest
+  alias HospitalityComs.Peers.PeerMessage
   alias HospitalityComs.Profiles.AttestedEntry
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms.RoomMessage
@@ -149,6 +152,8 @@ defmodule HospitalityComs.EngagementsFixtures do
 
     Repo.delete_all(from room in ShiftRoom, where: room.venue_id in ^venue_ids)
 
+    purge_peer_graph()
+
     Repo.delete_all(from entry in AttestedEntry, where: entry.venue_id in ^venue_ids)
     Repo.delete_all(from engagement in Engagement, where: engagement.venue_id in ^venue_ids)
     Repo.delete_all(from invitation in Invitation, where: invitation.venue_id in ^venue_ids)
@@ -176,6 +181,38 @@ defmodule HospitalityComs.EngagementsFixtures do
     Repo.delete_all(people)
 
     :purged
+  end
+
+  # U8's three, and they are reached from the *person* rather than from the
+  # venue: a peer connection records no venue and no engagement, which is the
+  # whole of why it is person zone. Every one of them references `people` with
+  # `ON DELETE RESTRICT`, so they come off before the people do — the same
+  # growth U6 forced on U5's purge, one unit further along.
+  #
+  # In foreign-key order among themselves: messages, then connections, then the
+  # requests connections hang off.
+  @spec purge_peer_graph() :: :ok
+  defp purge_peer_graph do
+    people = from person in Person, where: like(person.email, ^"#{@person_prefix}%")
+    person_ids = Repo.all(from person in people, select: person.id)
+
+    Repo.delete_all(from message in PeerMessage, where: message.author_id in ^person_ids)
+
+    Repo.delete_all(
+      from connection in PeerConnection,
+        where:
+          connection.person_a_id in ^person_ids or
+            connection.person_b_id in ^person_ids
+    )
+
+    Repo.delete_all(
+      from request in ConnectionRequest,
+        where:
+          request.requester_id in ^person_ids or
+            request.addressee_id in ^person_ids
+    )
+
+    :ok
   end
 
   ## People
