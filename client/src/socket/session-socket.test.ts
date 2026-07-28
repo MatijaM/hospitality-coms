@@ -1,112 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { fakeSocketFactory } from "../test-support/fake-socket";
 import { createSessionSocket } from "./session-socket";
-import type { ChannelLike, PushLike, SocketLike, SocketOptions } from "./session-socket";
-
-/**
- * A `Push` whose `receive` hooks can be fired by hand, which is what the real
- * one does on every rejoin attempt: `Push.reset()` clears the response but
- * keeps `recHooks`, so a caller's `receive("error")` callback runs again each
- * time the rejoin timer resends the join.
- */
-class FakePush implements PushLike {
-  hooks = new Map<string, ((payload: unknown) => void)[]>();
-
-  receive(status: string, callback: (payload?: unknown) => void): this {
-    const existing = this.hooks.get(status) ?? [];
-    existing.push(callback);
-    this.hooks.set(status, existing);
-
-    return this;
-  }
-
-  trigger(status: string, payload?: unknown): void {
-    for (const callback of this.hooks.get(status) ?? []) callback(payload);
-  }
-}
-
-class FakeChannel implements ChannelLike {
-  topic: string;
-  params: object | undefined;
-  joinPush = new FakePush();
-  leavePush = new FakePush();
-  joins = 0;
-  leaves = 0;
-  handlers = new Map<string, (payload: unknown) => void>();
-  pushed: { event: string; payload: object }[] = [];
-
-  constructor(topic: string, params?: object) {
-    this.topic = topic;
-    this.params = params;
-  }
-
-  join(): PushLike {
-    this.joins += 1;
-
-    return this.joinPush;
-  }
-
-  leave(): PushLike {
-    this.leaves += 1;
-
-    return this.leavePush;
-  }
-
-  on(event: string, callback: (payload: unknown) => void): number {
-    this.handlers.set(event, callback);
-
-    return this.handlers.size;
-  }
-
-  push(event: string, payload: object): PushLike {
-    this.pushed.push({ event, payload });
-
-    return new FakePush();
-  }
-}
-
-class FakeSocket implements SocketLike {
-  endpoint: string;
-  options: SocketOptions;
-  connects = 0;
-  disconnects = 0;
-  channels: FakeChannel[] = [];
-
-  constructor(endpoint: string, options: SocketOptions) {
-    this.endpoint = endpoint;
-    this.options = options;
-  }
-
-  connect(): void {
-    this.connects += 1;
-  }
-
-  disconnect(callback?: () => void): void {
-    this.disconnects += 1;
-    callback?.();
-  }
-
-  channel(topic: string, params?: object): ChannelLike {
-    const channel = new FakeChannel(topic, params);
-    this.channels.push(channel);
-
-    return channel;
-  }
-}
 
 function build(token = "c2Vzc2lvbg") {
-  const socket = new FakeSocket("", { authToken: "" });
+  const { socket, createSocket } = fakeSocketFactory();
 
-  const sessionSocket = createSessionSocket({
-    endpoint: "/socket",
-    token,
-    createSocket: (endpoint, options) => {
-      socket.endpoint = endpoint;
-      socket.options = options;
-
-      return socket;
-    },
-  });
+  const sessionSocket = createSessionSocket({ endpoint: "/socket", token, createSocket });
 
   sessionSocket.connect();
 
@@ -237,6 +137,36 @@ describe("a refused join", () => {
     expect(channel?.leaves).toBe(1);
   });
 
+  it("stops the rejoin timer, measured as a join count rather than as a leave", () => {
+    // The leave assertion above says the call was made. This says what the
+    // call is *for*: `Channel.onClose` resets `rejoinTimer`, so no later tick
+    // resends the join push. Counting joins is the only way to see that.
+    const { sessionSocket, socket } = build();
+    const onRefused = vi.fn();
+
+    sessionSocket.join("some:topic", { onRefused });
+    const channel = socket.channels[0];
+    channel?.joinPush.trigger("error", { reason: "revoked" });
+
+    socket.fireRejoinTimers(5);
+
+    expect(channel?.joins).toBe(1);
+    expect(onRefused).toHaveBeenCalledOnce();
+  });
+
+  it("control: the fake does count rejoins, so a join count of 1 means something", () => {
+    // Without this, the assertion above would pass just as well against a fake
+    // that cannot rejoin at all — a restatement rather than a measurement.
+    const { socket } = build();
+
+    socket.channel("untouched:topic");
+    const channel = socket.channelFor("untouched:topic");
+    channel?.join();
+    socket.fireRejoinTimers(3);
+
+    expect(channel?.joins).toBe(4);
+  });
+
   it("does not treat a join timeout as a refusal, so the rejoin timer is left alone", () => {
     const { sessionSocket, socket } = build();
     const onRefused = vi.fn();
@@ -265,21 +195,54 @@ describe("a subscription", () => {
   it("forwards a push to the channel", () => {
     const { sessionSocket, socket } = build();
 
-    sessionSocket.join("some:topic", {}).push("some_event", { body: "hello" });
+    void sessionSocket.join("some:topic", {}).push("some_event", { body: "hello" });
 
     expect(socket.channels[0]?.pushed).toEqual([
       { event: "some_event", payload: { body: "hello" } },
     ]);
   });
 
-  it("does not push after it has been left", () => {
+  it("does not push after it has been left, and says so rather than hanging", async () => {
+    // A composer awaits this promise. Leaving the push unanswered would leave
+    // the composer disabled with nothing on screen to say why.
     const { sessionSocket, socket } = build();
 
     const subscription = sessionSocket.join("some:topic", {});
     subscription.leave();
-    subscription.push("some_event", { body: "too late" });
+    const outcome = await subscription.push("some_event", { body: "too late" });
 
+    expect(outcome).toEqual({ status: "unsent" });
     expect(socket.channels[0]?.pushed).toEqual([]);
+  });
+
+  it("resolves a push with whatever the server replied", async () => {
+    const { sessionSocket, socket } = build();
+
+    const outcome = sessionSocket.join("some:topic", {}).push("send", { body: "hi" });
+    socket.channels[0]?.replyToLast("ok", { id: "written" });
+
+    expect(await outcome).toEqual({ status: "ok", payload: { id: "written" } });
+  });
+
+  it("resolves a refused push rather than throwing at the caller", async () => {
+    const { sessionSocket, socket } = build();
+
+    const outcome = sessionSocket.join("some:topic", {}).push("send", { body: "hi" });
+    socket.channels[0]?.replyToLast("error", { error: { code: "gone", message: "…" } });
+
+    expect(await outcome).toEqual({
+      status: "error",
+      payload: { error: { code: "gone", message: "…" } },
+    });
+  });
+
+  it("resolves a push that timed out as a timeout, not as a refusal", async () => {
+    const { sessionSocket, socket } = build();
+
+    const outcome = sessionSocket.join("some:topic", {}).push("send", { body: "hi" });
+    socket.channels[0]?.replyToLast("timeout");
+
+    expect(await outcome).toEqual({ status: "timeout" });
   });
 
   it("is left when the socket is disconnected", () => {

@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ApiClient, ApiResult } from "../api/client";
 import type { Session } from "../api/types";
+import { createMemoryRoomStore } from "../features/rooms/room-store";
 import { SessionProvider } from "../session/session-context";
 import type { TokenStore } from "../session/token-store";
 import { createMemoryTokenStore } from "../session/token-store";
@@ -30,17 +31,22 @@ function renderApp(
 ) {
   const api = options.api ?? createFakeApi();
   const tokenStore = options.tokenStore ?? createMemoryTokenStore();
+  // Built once, not inline in the tree: a store rebuilt on every render is a
+  // new store, and `RoomsRoute` reads its initial list in a `useState`
+  // initialiser. Nothing here asserts on it, which is exactly why it would
+  // have sat unnoticed until something did.
+  const roomStore = createMemoryRoomStore();
   const tree = (
     <MemoryRouter initialEntries={[options.path ?? "/"]}>
       <SessionProvider api={api} tokenStore={tokenStore}>
-        <App />
+        <App roomStore={roomStore} />
       </SessionProvider>
     </MemoryRouter>
   );
 
   render(options.strict === true ? <StrictMode>{tree}</StrictMode> : tree);
 
-  return { api, tokenStore };
+  return { api, tokenStore, roomStore };
 }
 
 const signedIn = { currentPerson: () => Promise.resolve(ok(somePerson)) };
@@ -289,6 +295,18 @@ describe("an authenticated session", () => {
 
     expect(await screen.findByRole("heading", { name: /not built yet/i })).toBeVisible();
   });
+
+  it("offers the rooms surface, which is no longer one of the absences", async () => {
+    renderApp({
+      path: "/",
+      api: createFakeApi(signedIn),
+      tokenStore: createMemoryTokenStore("c2Vzc2lvbg"),
+    });
+
+    await userEvent.click(await screen.findByRole("link", { name: /rooms/i }));
+
+    expect(await screen.findByRole("heading", { name: /^rooms$/i })).toBeVisible();
+  });
 });
 
 describe("a session that cannot be checked", () => {
@@ -313,7 +331,8 @@ describe("a session that cannot be checked", () => {
 
 describe("a path that is not a surface", () => {
   it("says so instead of rendering an empty page", async () => {
-    renderApp({ path: "/rooms" });
+    // Was `/rooms`, which is a surface now.
+    renderApp({ path: "/peers" });
 
     expect(await screen.findByRole("heading", { name: /nothing here/i })).toBeVisible();
   });

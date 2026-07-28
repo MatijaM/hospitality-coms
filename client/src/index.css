@@ -1,10 +1,10 @@
 /*
  * Enough style to read the surfaces, and no design system.
  *
- * There is one screen with a form on it and one with a list. A component
- * library, a token scale and a theme would all be built against surfaces that
- * do not exist, and the unit that builds the rooms will want to choose them
- * knowing what it is styling.
+ * Still true with the rooms built: a log-in form, a room list, and a
+ * conversation. A token scale and a theme would be spent on three screens that
+ * do not compete for attention, and the unit that adds a surface with real
+ * visual demands should choose them knowing what it is styling.
  */
 
 :root {
@@ -89,7 +89,8 @@ label {
   color: var(--muted);
 }
 
-input {
+input,
+select {
   font: inherit;
   padding: 0.55rem 0.7rem;
   border: 1px solid var(--line);
@@ -98,7 +99,12 @@ input {
   color: inherit;
 }
 
+input:disabled {
+  opacity: 0.55;
+}
+
 input:focus-visible,
+select:focus-visible,
 button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -141,4 +147,60 @@ li {
 
 a {
   color: var(--accent);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  color: var(--muted);
+}
+
+/* The room list and the conversation. Both are lists and neither reads as one:
+   the first is a row of controls, the second is a transcript. */
+
+[aria-label="Your rooms"],
+[aria-label="Messages"] {
+  list-style: none;
+  padding-left: 0;
+}
+
+[aria-label="Your rooms"] li {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+
+[aria-label="Your rooms"] button {
+  margin-top: 0;
+  font-size: 0.9rem;
+}
+
+/* Forgetting a room is destructive and should not look like opening one. */
+[aria-label="Your rooms"] button + button {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+[aria-current="true"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+[aria-label="Messages"] li {
+  margin-bottom: 0.6rem;
+  color: var(--ink);
+}
+
+[aria-label="Messages"] strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: var(--accent);
+}
+
+[aria-label="Messages"] time {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
 }

@@ -18,11 +18,19 @@ import type { ApiError, ApiFieldError, FieldErrors } from "./errors";
 import { isKnownErrorCode } from "./errors";
 import type { Person, Session } from "./types";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+/**
+ * The two shape guards every decoder in this client starts from.
+ *
+ * Exported because the channel payloads decode the same way — the error
+ * envelope is one contract across both transports — and two copies of
+ * `typeof value === "object" && value !== null` is how they come to disagree
+ * about `null` or about an array.
+ */
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isStringArray(value: unknown): value is string[] {
+export function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
