@@ -426,4 +426,62 @@ Controls, so no assertion can pass for the wrong reason:
 
 Recorded rather than silently applied, because the gate exists to be departed from explicitly.
 
-_(filled in as implementation proceeds)_
+1. **Two guards made each other unreachable, and mutation testing is what found it.**
+   `ExpireEngagement` dispatched the archive write on `:revoked` *and*
+   `retain_own_messages/2` refused an engagement whose term had not closed. Deleting either
+   one killed **no** test, because the other covered it — the sixth "reads as coverage,
+   provides none" this project has produced, and the first found by mutation rather than by
+   review. The dispatch is gone; the function decides, which is also the rule U11's demo
+   control needs when it drives the worker directly. Both directions are now measured
+   (mutations 25 and 26 below).
+
+2. **An erased person has no email, so `EngagementsFixtures.purge/0` could not see them.**
+   Not anticipated, and it would have been invisible: every prefix-based lookup in that file —
+   the people delete, `purge_peer_graph/0`'s id list, `purge_profiles/1`'s — silently skipped
+   the rows a lifecycle test made, and `confirm_purged/0` counts by the same prefix so it would
+   have reported success. `prefixed_people/0` now matches the address **or** `erased_at`, which
+   is the two states U2's check constraints hold in opposition; nothing else in the tree erases
+   anybody, so it is not a widening.
+
+3. **The half-open boundary is asserted a second apart, not a microsecond.** The brief said "one
+   microsecond earlier". `delete_after` is `timestamp(0)` and Ecto truncates a `:utc_datetime`
+   parameter, so a sub-second instant is indistinguishable from the deadline itself before it
+   ever reaches Postgres — the test would have passed for the wrong reason. Rows 33 and 34 are
+   `delete_after` exactly and `delete_after + 1 second`.
+
+4. **`retention_runs` is deleted whole by the purge**, because it carries no venue, no person and
+   no prefix, so there is no column a fixture could scope a delete to. Recorded here rather than
+   left as an accumulation nobody notices: nothing outside the retention tests writes one.
+
+5. **`add_retention_columns` is the outermost layer of `boundary_test.exs`'s rollback nest**, and
+   two independent dependencies force it rather than one. The composite key needs
+   `create_profiles`'s `(id, person_id)` index, and `roster_entries.delete_after` is `NOT NULL` —
+   so rolling U6's tables underneath it would silently drop the column and leave every later
+   assertion in the same body running against a schema `RosterEntry` no longer matches. The
+   existing profile round-trip test had to be wrapped in it and says why.
+
+6. **Two raw `INSERT INTO roster_entries` in the room tests had to learn the new column.**
+   `rooms_test.exs`'s overlap matrix and `rooms_concurrency_test.exs`'s barrier write bypass the
+   changeset on purpose, so a `NOT NULL` column with no default reaches them. Both now stamp what
+   `join_changeset/3` would have.
+
+7. **`Peers.disconnect_all/3` and `announce_disconnection/1` are two exports rather than one.**
+   The brief anticipated the first; the second is what keeps the announcement after the commit
+   without `Lifecycle` reimplementing the payload, and it is the split `Engagements` already has.
+
+8. **The `:request_gone` test defeats a database constraint on purpose, and restores it
+   idempotently.** There is no other way to reach the branch — that is the whole reason it was a
+   `MatchError` waiting to happen — so `peers_test.exs` drops
+   `peer_connections_request_id_fkey` for one call and puts it back through a `DO` block that
+   also clears whatever made it unsatisfiable. The file is not sandboxed, so a restore that only
+   ran on success would follow an aborted run into every other non-sandboxed file.
+
+9. **Rows do not map one-to-one onto test bodies**, as U8 and U9 both recorded. The 56-row matrix
+   produced **28** bodies in `lifecycle_test.exs`, **17** in `retention_sweeper_test.exs`, 6 in
+   `boundary_test.exs`, 2 in `revocation_test.exs` and 1 in `peers_test.exs` — 54 against 56 rows,
+   with rows 50–51 and 53–54 collapsing where the assertions are about one object, and bodies
+   with no row including "is `:not_found` for an id that names nothing" and the archive's
+   still-open control.
+
+10. **Every behavioural claim was checked by breaking the code.** 33 mutations, each restored,
+    reported per test in the final summary. One of them found revision 1.
