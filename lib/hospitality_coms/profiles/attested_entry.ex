@@ -36,12 +36,26 @@ defmodule HospitalityComs.Profiles.AttestedEntry do
 
   ## Who owns this module
 
-  U5 writes the schema because U5 is the unit that has to insert the row inside
-  the claim's transaction. U9 owns the *context* — disclosure, correction
-  requests, and the owner-privileged view the employer reads through (KTD3) —
-  and will extend this schema rather than replace it. `employer_role` therefore
-  holds no privilege on this table at all, today: not a `SELECT`, and the
-  absence is asserted in `HospitalityComs.BoundaryTest`.
+  U5 wrote the schema because U5 is the unit that has to insert the row inside
+  the claim's transaction. U9 owns the *context* — `HospitalityComs.Profiles` —
+  and extended this schema rather than replacing it, which is to say it added
+  nothing: the row was already the right shape, and the unit's work is entirely
+  in the rules about who may read it.
+
+  `employer_role` holds no privilege on this table at all: not a `SELECT`, and
+  the absence is asserted in `HospitalityComs.BoundaryTest`. That is KTD3 and it
+  is why the two views exist. The hidden-entry rule is **per row** and a table
+  grant cannot express a per-row rule, so the employer reads
+  `employer_visible_attested_entries` — owned by the role that owns this table,
+  granted `SELECT` and nothing else, filtering on the employer and the instant
+  that `HospitalityComs.EmployerRepo.scoped_transaction/2` wrote into the
+  transaction.
+
+  Row-level security would not have been an alternative here even at the cost
+  KTD3 names. `HospitalityComs.Repo` connects as a **superuser**, and a
+  superuser bypasses row-level security whether or not a policy is `FORCE`d — so
+  a per-row policy on this table would read as a tier and provide none.
+  `*_create_employer_visible_view.exs` carries the measurement.
 
   Retention never deletes one (KTD16). An attested entry and the engagement
   behind it are the person's record of their own working life, and the only

@@ -107,6 +107,43 @@ defmodule HospitalityComs.PeersTest do
       refute Peers.visible?(person_at(first, DateTime.add(@now, 15, :day)), second.person.id)
     end
 
+    test "is not what `connected?/2` answers, and the difference outlives the tail" do
+      # U9's `HospitalityComs.Profiles.fetch_peer_profile/2` needs "is this a
+      # peer" to mean *visible or connected*, so the second half is a predicate
+      # of its own. It takes no instant, because a connection has no term: it is
+      # live until one of them ends it, which is R13's "permanent" and what makes
+      # the plan's payoff moment reachable.
+      #
+      # Asserted against the same pair at two instants, so the two predicates
+      # are seen to disagree rather than merely to exist.
+      %{first: first, second: second} = co_rostered(@now)
+
+      refute Peers.connected?(first, second.person.id)
+
+      connection = connection_fixture(first, second)
+
+      assert Peers.connected?(first, second.person.id)
+      assert Peers.connected?(second, first.person.id)
+
+      lapsed = person_at(first, DateTime.add(@now, 90, :day))
+      refute Peers.visible?(lapsed, second.person.id)
+      assert Peers.connected?(lapsed, second.person.id)
+
+      {:ok, _closed} = Peers.disconnect(first, connection.id)
+
+      refute Peers.connected?(first, second.person.id)
+      refute Peers.connected?(second, first.person.id)
+    end
+
+    test "and `connected?/2` answers false for an id that names nobody, and for oneself" do
+      # The control the predicate above needs, for the reason `visible?/2` has
+      # one: an answer that discloses nothing about which ids are real.
+      %{first: first} = co_rostered(@now)
+
+      refute Peers.connected?(first, Ecto.UUID.generate())
+      refute Peers.connected?(first, first.person.id)
+    end
+
     test "begins at the later of the two starts and not before" do
       later = DateTime.add(@now, 5, :day)
 
