@@ -12,21 +12,21 @@
  * `peer_channel_test.exs` asserts two of the key sets exactly — which is what
  * makes this file checkable against something rather than against a memory.
  *
- * ## One entity, two key names, and this is where that is absorbed
+ * ## One entity, one decoder — which it was not
  *
- * A message reaches this client down two paths with **different keys for its
- * instant**:
+ * A message reaches this client down two paths, and they used to carry
+ * **different keys for its instant**: the reply to `"send"` and each entry of
+ * `"history"` are `rendered_message/1`, which says `sent_at`, while the
+ * `"peer_message"` push went through `PeerChannel.stamped/1`, which says `at`.
+ * So this file carried two decoders and one type, each refusing the other's key
+ * — deliberately, because a single decoder with a fallback would also accept a
+ * payload carrying neither.
  *
- *   * the reply to `"send"` and each entry in `"history"` are
- *     `rendered_message/1`, which says `sent_at`;
- *   * the `"peer_message"` push is `HospitalityComs.Peers`' announcement,
- *     stamped by `PeerChannel.stamped/1`, which says `at` — as every
- *     announcement on that topic does.
- *
- * Both say `message_id` (U8's review fixed the half that did not). So there are
- * two decoders and one type, and a single decoder with a fallback is
- * deliberately not it: a fallback would also accept a reply carrying neither
- * key, which is the drift this file exists to name.
+ * Issue #31 closed it on the server: the push goes through `PeerChannel.sent/1`
+ * now and says `sent_at`, and the four notices that genuinely are notices still
+ * say `at` because `at` means "when this notice happened". So the two decoders
+ * are one, and `peer_channel_test.exs` pins the push's key set against the
+ * reply's rather than against a memory of it.
  */
 
 import { isRecord } from "../../api/decode";
@@ -204,45 +204,28 @@ export function decodeConversations(payload: unknown): readonly Conversation[] |
 }
 
 /**
- * `%{message_id:, connection_id:, author_id:, body:, sent_at:}` —
- * `rendered_message/1`, which is the reply to `"send"` and every entry of
- * `"history"`.
+ * `%{message_id:, connection_id:, author_id:, body:, sent_at:}` — the reply to
+ * `"send"`, every entry of `"history"`, and the `"peer_message"` push.
+ *
+ * **One decoder for all three, and it took a server change to earn that.** The
+ * push used to say `at`; see this file's header and issue #31. `sent_at` is
+ * still required rather than accepted alongside `at`, because accepting either
+ * is how one entity keeps two key names for ever.
  */
 export function decodePeerMessage(payload: unknown): PeerMessage | null {
-  return decodeMessage(payload, "sent_at");
-}
-
-/**
- * `%{message_id:, connection_id:, author_id:, body:, at:}` — the
- * `"peer_message"` push.
- *
- * The same entity as `decodePeerMessage`'s and one key different. See this
- * file's header: the push is the announcement shape, and every announcement on
- * the peer topic stamps its instant as `at`.
- */
-export function decodePeerMessageNotice(payload: unknown): PeerMessage | null {
-  return decodeMessage(payload, "at");
-}
-
-function decodeMessage(
-  payload: unknown,
-  instantKey: "sent_at" | "at",
-): PeerMessage | null {
   if (!isRecord(payload)) return null;
   if (typeof payload.message_id !== "string") return null;
   if (typeof payload.connection_id !== "string") return null;
   if (typeof payload.author_id !== "string") return null;
   if (typeof payload.body !== "string") return null;
-
-  const sentAt = payload[instantKey];
-  if (typeof sentAt !== "string") return null;
+  if (typeof payload.sent_at !== "string") return null;
 
   return {
     messageId: payload.message_id,
     connectionId: payload.connection_id,
     authorId: payload.author_id,
     body: payload.body,
-    sentAt,
+    sentAt: payload.sent_at,
   };
 }
 

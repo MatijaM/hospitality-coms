@@ -14,7 +14,6 @@ import {
   decodeJoinedPersonId,
   decodePeer,
   decodePeerMessage,
-  decodePeerMessageNotice,
   decodePeerMessages,
   decodePeerRequest,
   decodePeerRequests,
@@ -176,7 +175,7 @@ describe("a conversation", () => {
   });
 });
 
-describe("a message, which reaches this client under two different keys", () => {
+describe("a message, which reaches this client under one key on all three paths", () => {
   const common = {
     message_id: MESSAGE,
     connection_id: CONNECTION,
@@ -184,9 +183,10 @@ describe("a message, which reaches this client under two different keys", () => 
     body: "on my way",
   };
 
-  it("says `sent_at` in a reply and in a history entry", () => {
-    // `rendered_message/1`. `peer_channel_test.exs` pins this key set exactly:
-    // `author_id body connection_id message_id sent_at`.
+  it("says `sent_at` in a reply, in a history entry, and in the push", () => {
+    // `rendered_message/1`. `peer_channel_test.exs` pins this key set exactly
+    // — `author_id body connection_id message_id sent_at` — and now pins the
+    // push's against it, which is what let the second decoder go.
     expect(decodePeerMessage({ ...common, sent_at: "2026-07-28T09:00:00Z" })).toEqual({
       messageId: MESSAGE,
       connectionId: CONNECTION,
@@ -196,23 +196,17 @@ describe("a message, which reaches this client under two different keys", () => 
     });
   });
 
-  it("says `at` in the push, because that is the announcement's shape", () => {
-    // `PeerChannel.stamped/1` rewrites `notice.at`, and every announcement on
-    // the peer topic stamps its instant as `at`. Read out of `handle_info/2`
-    // and `HospitalityComs.Peers.sent/1`, not assumed from the reply.
-    expect(decodePeerMessageNotice({ ...common, at: "2026-07-28T09:00:00Z" })).toEqual(
-      expect.objectContaining({ sentAt: "2026-07-28T09:00:00Z", messageId: MESSAGE }),
-    );
-  });
-
-  it("does not accept one key where the other belongs", () => {
-    // The control for the pair above. A single decoder with a fallback would
-    // pass both of these — and would also pass a payload carrying neither,
-    // which is the drift this decoder exists to name.
+  it("refuses `at`, which is what the push used to say", () => {
+    // The control, and the reason this is one decoder rather than one decoder
+    // with a fallback. `at` is still the key of the four *notices* — a
+    // request, a decline, a connection, a disconnection — and accepting it
+    // here would let a message and a notice decode as the same thing, which is
+    // how one entity keeps two key names for ever.
     expect(decodePeerMessage({ ...common, at: "2026-07-28T09:00:00Z" })).toBeNull();
-    expect(
-      decodePeerMessageNotice({ ...common, sent_at: "2026-07-28T09:00:00Z" }),
-    ).toBeNull();
+
+    // And a payload carrying neither is still nothing, which a fallback would
+    // have had to check for separately.
+    expect(decodePeerMessage(common)).toBeNull();
   });
 
   it("is `message_id` in both, which is the half U8's review fixed", () => {

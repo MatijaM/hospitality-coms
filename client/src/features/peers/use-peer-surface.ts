@@ -76,7 +76,6 @@ import {
   decodeConversations,
   decodeJoinedPersonId,
   decodePeerMessage,
-  decodePeerMessageNotice,
   decodePeerMessages,
   decodePeerRequest,
   decodePeerRequests,
@@ -362,11 +361,12 @@ export function usePeerSurface(personId: string): PeerSurface {
         peer_disconnected: () => {
           if (open !== null) void loadConversations(open);
         },
-        // The one that is the answer. `decodePeerMessageNotice` is not
-        // `decodePeerMessage`: the push stamps its instant `at` and the reply
-        // stamps it `sent_at`.
+        // The one that is the answer, and it decodes with the same function the
+        // reply and the history do. The push used to stamp its instant `at`
+        // while they stamped it `sent_at`; issue #31 made the push say
+        // `sent_at` too, and the two decoders became one.
         peer_message: (payload) => {
-          const message = decodePeerMessageNotice(payload);
+          const message = decodePeerMessage(payload);
           if (message === null) return;
 
           setMessages((current) => appended(current, message));

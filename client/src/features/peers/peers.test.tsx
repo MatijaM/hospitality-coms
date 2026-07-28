@@ -120,16 +120,18 @@ function mineWire(overrides: Record<string, unknown> = {}) {
 }
 
 /**
- * The `peer_message` push, which stamps its instant `at` and not `sent_at`.
+ * The `peer_message` push, which is `rendered_message/1`'s shape exactly.
  *
- * The difference is real and is `PeerChannel.stamped/1`: a push is
- * `HospitalityComs.Peers`' announcement shape, and every announcement on that
- * topic says `at`.
+ * It used to stamp its instant `at` — `PeerChannel.stamped/1` is generic over
+ * five notices — so this helper rewrote the key and `decode.ts` carried a
+ * second decoder. Issue #31 put the push through `PeerChannel.sent/1`, so the
+ * push and the reply are one shape and this is the identity. Kept as a named
+ * function rather than inlined: the two are the same shape as a *fact about the
+ * server*, and a test that stopped distinguishing them would stop being able to
+ * say so.
  */
 function messageNotice(overrides: Record<string, unknown> = {}) {
-  const { sent_at: at, ...rest } = messageWire(overrides);
-
-  return { ...rest, at };
+  return messageWire(overrides);
 }
 
 /** The envelope `ErrorEnvelope.new/2` builds, with a message nobody renders. */

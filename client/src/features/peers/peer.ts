@@ -163,11 +163,11 @@ export type Conversation = {
  * history said `id`, so one entity had two key names on one channel.
  * `peer_channel_test.exs` now pins the key set.
  *
- * The **push and the reply still differ in one key**, and that is not a
- * mistake to work around silently: a reply carries `sent_at` and the push
- * carries `at`, because the push is `HospitalityComs.Peers`' announcement shape
- * and every announcement on that topic stamps its instant as `at`. `decode.ts`
- * has a decoder for each.
+ * The push and the reply **also** differed in the instant's key — `sent_at` in
+ * the reply, `at` in the push, because the push went through the generic
+ * `stamped/1`. `decode.ts` carried a decoder for each, refusing the other's
+ * key. Issue #31 closed it on the server: the push says `sent_at` now, the four
+ * notices that are notices still say `at`, and there is one decoder.
  */
 export type PeerMessage = {
   readonly messageId: string;
