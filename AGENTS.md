@@ -23,12 +23,13 @@ mix compile --warnings-as-errors  # Strict compilation check
 
 ## Architecture
 
-```
-CONCEPTS.md          # Shared domain vocabulary (entities, named processes, status concepts)
-```
+`CLAUDE.md` is this project's concept document — the zones, the single bridge, the clock
+authority, and the per-subsystem decisions, kept current with the tree. Read the section
+covering a subsystem before changing anything in it. There is no `CONCEPTS.md`; a second
+vocabulary document would duplicate `CLAUDE.md` and drift from it.
 
-### Key Contexts
-
+Contexts live in `lib/hospitality_coms/`, the web layer in `lib/hospitality_coms_web/`, and
+the modules that must be structurally absent from a production build in `dev_support/`.
 
 ## Type Specifications
 
@@ -93,13 +94,59 @@ Plugin enforces the loop: write the failing test first, watch it fail, make it p
 
 ### Pre-Implementation Test Design Gate
 
-For non-trivial feature, bug-fix, refactor, or ticket work, run the local `/ce-test-design` command or use the `.claude/skills/test-design/SKILL.md` skill before editing production code. This gate must:
+For non-trivial feature, bug-fix, refactor, or ticket work, run the `test-design` skill
+(`.claude/skills/test-design/SKILL.md`) before editing production code — and **commit what it
+produces**. The artifact is a Test Design Brief at
+`docs/test-designs/<YYYY-MM-DD>-<unit-or-issue>-<slug>.md`.
 
-- produce a Test Design Brief with acceptance criteria, edge cases, regression risks, a test matrix, implementation constraints, and quality scores;
-- create or update tests only;
-- run the narrowest relevant test command;
-- confirm at least one new or changed test fails for the expected reason;
-- stop for human approval before implementation starts.
+**The commit ordering is the evidence, so the ordering is the rule.** The brief is committed
+by itself, as the first commit on the branch, ahead of every line of production code. A
+reviewer reading `git log` can then tell a unit that ran the gate from one that skipped it —
+and nothing else in the tree can tell them. `docs/test-designs/` holds seven briefs written
+this way, U5 through U11; read the nearest one before writing your first.
+
+A brief carries:
+
+- **What is being built** — a paragraph in the unit's own terms, plus a headed section for any
+  decision the unit turns on. Write those before the matrix, not after; several units found
+  their hardest problem while writing this part.
+- **Acceptance criteria** — numbered, each one assertable.
+- **Edge cases**, and **regression risks** that name the *existing* test files at risk by path.
+- **A test matrix with a `Fails without` column**: for each scenario, the mechanism whose
+  removal makes that test fail. This is the gate's expected-failure prediction, and unlike a
+  one-off red run it stays checkable for the life of the test — delete or invert the named
+  mechanism and the named test must fail. A row whose claim cannot be demonstrated that way is
+  a row that certifies nothing.
+- **Controls, listed explicitly** — for every assertion that could pass vacuously, the
+  assertion beside it that fails when it does. This is not ceremony: the project has found
+  eleven tests that read as coverage and provided none, most of them controls that could not
+  control. See `docs/solutions/test-failures/tests-that-certify-nothing.md` for the shapes and
+  the detection method.
+- **Implementation constraints** — the standards this unit is most likely to break.
+- **Quality scores**, self-assessed.
+
+While the gate is open, create or update tests only, run the narrowest relevant test command,
+and confirm at least one new or changed test fails for the expected reason.
+
+**Departures are recorded, never applied silently.** Implementation will contradict the brief.
+When it does, append to a `## Revisions made during implementation` section in the same file,
+in a later commit, saying what the brief claimed and why it was wrong; add
+`## Revisions made after review` for what review found. Do **not** edit the original sections
+so they agree with what shipped — the gap between the brief and the tree is the only record
+that the gate found anything.
+
+**On approval, plainly.** This gate was designed around stopping for a human. In an autonomous
+run there is nobody to stop for, and a rule nobody can follow is worse than a weaker rule
+everybody can. So the pause is not the requirement. These are:
+
+- the brief's header names its approver, and says so in that file when the orchestrator
+  approved in the human's place rather than a person having read it;
+- the PR body repeats that substitution, so a reviewer meets it before the diff;
+- the brief is committed first either way, because the artifact and its position in the log
+  are what make the gate auditable — the pause never was, which is why four units ran it and
+  left no trace (issue #21).
+
+Where a human is present, stop and ask. The artifact and its ordering are unchanged either way.
 
 For bug fixes, use `/compound-engineering:ce-debug` to understand and reproduce the issue, then use the test design gate to harden the regression coverage before applying the fix. Skip the gate only for documentation-only work, routine logging instrumentation covered by the logging exception below, or a purely mechanical test-only change where no production implementation will follow.
 
@@ -110,7 +157,7 @@ When fixing a bug, write a test that reproduces the bug first (fails), then fix 
 ### Test Patterns
 
 - Use `ExUnit.Case, async: true` for isolated tests
-- Use factories from `test/support/factory.ex` for test data
+- Use the fixture modules in `test/support/fixtures/` for test data (`AccountsFixtures`, `VenuesFixtures`, `EngagementsFixtures`, `RoomsFixtures`, `PeersFixtures`); there is no `factory.ex`. Extend the fixture that owns the schema rather than building rows at a call site
 - Mock only external API calls (email)
 - Use real Ecto repos for database tests — never mock the database
 - Structure tests as: **Arrange** (set up data) → **Act** (call function) → **Assert** (verify result + side effects)
@@ -286,6 +333,15 @@ Spend the first pass of any feature searching, not writing:
 - **Backend**: check the owning context module for a function that already does (or almost does) the job; grep for similar verbs (`list_`, `get_`, `create_` + noun); check `docs/solutions/` for a documented pattern.
 - **Front-end**: TBD.
 
+`docs/solutions/` is this project's learning store: one file per lesson that would change how
+somebody writes code, organised into category directories (`test-failures/`,
+`database-issues/`, `conventions/`, …) with YAML frontmatter — `title`, `module`, `date`,
+`problem_type`, `component`, `severity`, `tags`, and a one-line `summary`. Grep the frontmatter
+before starting work in an area, especially before writing a test, a migration, a concurrency
+race, or anything that reads the clock. Add to it with `/compound-engineering:ce-compound` when
+a unit teaches something a different project would also want to know; keep this project's own
+trivia in `CLAUDE.md` instead.
+
 
 ### Front-end component inventory
 
@@ -335,7 +391,10 @@ When the user asks to add a feature flag, gate a feature, toggle a feature for s
 
 ## Design to Code
 
-When the user asks to report, track, implement, or review Figma/design-driven UI changes, or safely change UI without regressions — use the `/design-to-code` skill (`.claude/skills/design-to-code/SKILL.md`). It defines the screenshot/Figma intake, Linear ticket, branch, implementation, verification, PR, and reviewer workflow.
+There is no `design-to-code` skill in this repo and no Figma intake — the only skill under
+`.claude/skills/` is `test-design`. For UI work on the React client, use
+`/compound-engineering:ce-frontend-design`. Tickets are GitHub issues (`project_tracker: github`
+above), not Linear.
 
 
 ## Git Workflow
