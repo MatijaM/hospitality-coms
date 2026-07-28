@@ -19,6 +19,13 @@ defmodule HospitalityComs.Peers.Visibility do
   ## What "co-rostered" means here, and why
 
   Two people are co-rostered at a venue when their engagements there overlap.
+  **Any strictly positive overlap will do, and there is no minimum**: two people
+  whose terms share one second are visible to each other for the whole thirty
+  days after the earlier one ends, and can form a connection that outlives both.
+  That is the rule as specified rather than an oversight — the origin asks for
+  concurrent engagement at one venue and names no duration floor — and it is
+  written down because "worked together" reads as more than it enforces. A floor
+  would be a product decision and would need a number nothing supplies.
   Not when they shared a shift — the plan fixes this in two places and both
   point the same way: the interval is "per pair per **venue**", and its tail
   starts at "the first of the two **engagements** to end". A shift-level reading
@@ -45,22 +52,37 @@ defmodule HospitalityComs.Peers.Visibility do
   staff for as long as any one of them stayed.
 
   A pair can hold several of these at one venue — two separate stints are two
-  intervals — and one at each of several venues. They are not merged, because
-  the union of two intervals is not an interval and pretending otherwise would
-  make a gap disappear.
+  intervals — and one at each of several venues. **The predicate keeps them
+  separate**, because the union of two arbitrary intervals is not an interval
+  and pretending otherwise would make a gap disappear.
+
+  `merge_stints/1` folds them for one narrow case where that objection does not
+  apply, and `HospitalityComs.Peers.list_visible_peers/1` is its only caller;
+  see its docstring.
 
   ## Two spellings, and the test that keeps them together
 
-  `HospitalityComs.Peers.Records.visible_between/2` asks this question in SQL and
-  `covers?/2` asks it in Elixir, because the first has to run inside a query and
-  the second has to produce something a client can render. Two spellings of one
-  rule is one more than ideal, so `HospitalityComs.PeersTest` asserts they agree
-  over a matrix of term pairs and instants — the same manoeuvre
+  `HospitalityComs.Peers.Records.visible_between/3` asks this question in SQL and
+  `visible_at?/2` asks it in Elixir, because the first has to run inside a query
+  and the second has to produce something a client can render. Two spellings of
+  one rule is one more than ideal, so `HospitalityComs.PeersTest` asserts they
+  agree over a matrix of term pairs and instants — the same manoeuvre
   `HospitalityComs.RoomsTest` makes against the generated `open_period` column.
 
-  What they *share* is `cutoff/1`, so the thirty days exist in one place. The
-  SQL predicate compares each `ends_at` against it rather than adding an
-  interval inside the query, which keeps the predicate in plain Ecto with no
+  **`visible_at?/2` is the whole predicate and `covers?/2` is half of it.** That
+  distinction is load-bearing and was got wrong once: the SQL has six clauses in
+  two groups — do the terms overlap at all, and does the interval they produce
+  contain the instant — and `covers?/2` answers only the second. A test that
+  compared SQL against `covers?/2` alone and restated the first group in the
+  test file would be comparing SQL against itself as re-spelled by its own test,
+  and it would report a gap **shorter than the thirty-day tail** as visible: two
+  terms that miss each other by a day still produce endpoints whose derived
+  interval contains today. `concurrent?/1` is that first group, exported so
+  there is one spelling of it and the matrix can call it.
+
+  What every spelling *shares* is `cutoff/1`, so the thirty days exist in one
+  place. The SQL predicate compares each `ends_at` against it rather than adding
+  an interval inside the query, which keeps the predicate in plain Ecto with no
   fragment and keeps the arithmetic on the Elixir side where the tail's length
   is defined.
   """
@@ -156,15 +178,90 @@ defmodule HospitalityComs.Peers.Visibility do
   @doc """
   Whether this interval contains `instant`.
 
-  `visible_from <= instant < visible_until`, half-open. The Elixir spelling of
-  `HospitalityComs.Peers.Records.visible_between/2`; `HospitalityComs.PeersTest`
-  asserts the two agree rather than taking this sentence's word for it.
+  `visible_from <= instant < visible_until`, half-open. **Half of the rule, not
+  all of it** — the endpoints it compares are `new/1`'s, and `new/1` is total on
+  its inputs, so a pair of terms that never overlapped at all still produces an
+  interval and this still answers about it. `visible_at?/2` is the whole
+  predicate; use that unless you already know the terms are concurrent.
   """
   @spec covers?(t(), DateTime.t()) :: boolean()
   def covers?(%__MODULE__{} = visibility, %DateTime{} = instant) do
     DateTime.compare(visibility.visible_from, instant) != :gt and
       DateTime.compare(visibility.visible_until, instant) == :gt
   end
+
+  @doc """
+  Whether two engagement terms are concurrent at all.
+
+  The four comparisons `HospitalityComs.Peers.Records.co_engagements/1` writes
+  as its first two groups, in Elixir:
+
+    * neither term is empty — `HospitalityComs.Engagements.end_engagement/2` can
+      produce `ends_at == starts_at`, the empty range, which is active at no
+      instant and overlaps nothing; and
+    * each starts before the other ends.
+
+  Exported so that the SQL predicate has exactly one Elixir counterpart and the
+  matrix test in `HospitalityComs.PeersTest` can call it instead of restating
+  it. A test that restates a rule cannot catch that rule drifting.
+  """
+  @spec concurrent?(endpoints()) :: boolean()
+  def concurrent?(%{} = endpoints) do
+    before?(endpoints.own_starts_at, endpoints.own_ends_at) and
+      before?(endpoints.peer_starts_at, endpoints.peer_ends_at) and
+      before?(endpoints.own_starts_at, endpoints.peer_ends_at) and
+      before?(endpoints.peer_starts_at, endpoints.own_ends_at)
+  end
+
+  @doc """
+  Whether two engagement terms make their people visible to each other at
+  `instant`.
+
+  `concurrent?/1` and then `covers?/2`, which together are every clause
+  `HospitalityComs.Peers.Records.co_engagements/1` writes. The one function to
+  compare the SQL against, because it is the only one that spells the same rule.
+  """
+  @spec visible_at?(endpoints(), DateTime.t()) :: boolean()
+  def visible_at?(%{} = endpoints, %DateTime{} = instant) do
+    concurrent?(endpoints) and endpoints |> new() |> covers?(instant)
+  end
+
+  @doc """
+  Several intervals for one counterpart at one venue, folded into the one they
+  cover between them.
+
+  Every interval handed here contains the instant that produced the list, so
+  their union is `[min(visible_from), max(visible_until))` with no gap in it —
+  which is why this fold is available at all and why the module's warning about
+  unions does not reach it. `HospitalityComs.Peers.list_visible_peers/1` is the
+  caller and its docstring carries the argument.
+
+  The surviving entry's `role_label` is the one on the interval that runs
+  longest, which is the counterpart's most recent engagement at that venue and
+  therefore the label a viewer would expect to see.
+
+  Ordered by venue name and then by the counterpart, which is what
+  `HospitalityComs.Peers.Records.visible_peers/2` already ordered by and what a
+  client renders.
+  """
+  @spec merge_stints([t()]) :: [t()]
+  def merge_stints(visibilities) when is_list(visibilities) do
+    visibilities
+    |> Enum.group_by(&{&1.venue_id, &1.person_id})
+    |> Enum.map(fn {_venue_and_person, stints} -> merged(stints) end)
+    |> Enum.sort_by(&{&1.venue_name, &1.person_id})
+  end
+
+  @spec merged([t(), ...]) :: t()
+  defp merged(stints) do
+    longest = Enum.max_by(stints, & &1.visible_until, DateTime)
+    opened_at = stints |> Enum.min_by(& &1.visible_from, DateTime) |> Map.fetch!(:visible_from)
+
+    %{longest | visible_from: opened_at}
+  end
+
+  @spec before?(DateTime.t(), DateTime.t()) :: boolean()
+  defp before?(left, right), do: DateTime.compare(left, right) == :lt
 
   @spec later(DateTime.t(), DateTime.t()) :: DateTime.t()
   defp later(left, right), do: pick(DateTime.compare(left, right), :gt, left, right)

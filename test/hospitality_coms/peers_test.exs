@@ -51,6 +51,23 @@ defmodule HospitalityComs.PeersTest do
 
   @tail_days 30
 
+  # The builders that begin or shape a *read*. `Ecto.Query.Builder.Filter`,
+  # `.Select` and `.Update` are deliberately absent: they are the `where`,
+  # `RETURNING` and `SET` of a write statement, and banning them would make the
+  # rule something to work around.
+  @read_builders [
+    Ecto.Query.Builder,
+    Ecto.Query.Builder.From,
+    Ecto.Query.Builder.Join,
+    Ecto.Query.Builder.Lock,
+    Ecto.Query.Builder.OrderBy,
+    Ecto.Query.Builder.Distinct,
+    Ecto.Query.Builder.GroupBy,
+    Ecto.Query.Builder.Preload
+  ]
+
+  @peers_namespace "Elixir.HospitalityComs.Peers."
+
   setup do
     real_connections()
   end
@@ -172,6 +189,15 @@ defmodule HospitalityComs.PeersTest do
 
       refute Peers.visible?(person_at(first, opens_at), second.person.id)
       refute Peers.visible?(person_at(first, DateTime.add(opens_at, 1, :day)), second.person.id)
+
+      # And from the emptied engagement's own side, which is a different clause
+      # of the predicate rather than the same one restated. `co_engagements/1`
+      # tests each term for emptiness separately, and `own` is always the
+      # asking person's — so asking only from `first` binds the empty term to
+      # `peer` every time and leaves `own.starts_at < own.ends_at` unexercised.
+      # Dropping just that clause passes every assertion above.
+      refute Peers.visible?(person_at(second, opens_at), first.person.id)
+      refute Peers.visible?(person_at(second, DateTime.add(opens_at, 1, :day)), first.person.id)
     end
 
     test "comes from each stint separately, so a stale one grants nothing" do
@@ -245,12 +271,70 @@ defmodule HospitalityComs.PeersTest do
       assert MapSet.new([one.venue_id, two.venue_id]) |> MapSet.size() == 2
     end
 
+    test "gives one entry per venue when the same pair worked two stints at one" do
+      # The list is one entry per counterpart per venue, and two stints at one
+      # venue are one entry rather than two. Before this it returned one row per
+      # overlapping *pair of engagements*, so a client keying on `person_id`
+      # got the same person twice with two `visible_until` values and possibly
+      # two role labels.
+      #
+      # Merging is safe here and only here: every interval in the list contains
+      # the asking instant, so their union is an interval and no gap is lost.
+      # The predicate `visible?/2` rests on is untouched and still ranges over
+      # every pair.
+      old_ends = DateTime.add(@now, 10, :day)
+      new_starts = DateTime.add(@now, 20, :day)
+      new_ends = DateTime.add(@now, 50, :day)
+
+      %{employer: employer, first: first, second: second} =
+        co_rostered(@now, %{
+          first: %{starts_at: @now, ends_at: old_ends},
+          second: %{starts_at: @now, ends_at: old_ends}
+        })
+
+      engage(employer, first, %{starts_at: new_starts, ends_at: new_ends}, @now)
+
+      engage(
+        employer,
+        second,
+        %{starts_at: new_starts, ends_at: new_ends, role_label: "Head Chef"},
+        @now
+      )
+
+      # Inside the older stint's tail and inside the newer stint, so both
+      # intervals are live and the query returns two rows to fold.
+      asked_at = DateTime.add(@now, 25, :day)
+
+      assert [%Visibility{} = peer] = Peers.list_visible_peers(person_at(first, asked_at))
+      assert peer.person_id == second.person.id
+
+      # The union: it opened when the first stint made them concurrent and runs
+      # to thirty days past the end of the second.
+      assert peer.visible_from == DateTime.truncate(@now, :second)
+
+      assert peer.visible_until ==
+               new_ends |> DateTime.truncate(:second) |> DateTime.add(@tail_days, :day)
+
+      # And the label is the one on the stint that runs longest, which is the
+      # counterpart's current role rather than whichever row sorted first.
+      assert peer.role_label == "Head Chef"
+    end
+
     test "agrees with the rendered interval over a matrix of term pairs and instants" do
       # The control for every assertion above, and the one thing that would
       # catch the SQL predicate and the struct drifting apart. It is the same
       # manoeuvre `HospitalityComs.RoomsTest` makes against the generated
       # `open_period` column: two spellings of one rule, compared rather than
       # described.
+      #
+      # It compares against `Visibility.visible_at?/2` — the *shipped* Elixir
+      # spelling of the whole predicate — and not against a rule restated here.
+      # It used to call `covers?/2` and restate the overlap half in this file,
+      # which made half the matrix a comparison of the SQL against its own
+      # test's idea of it. The "gapped" shape below is the case that exposed it:
+      # two terms separated by less than the thirty-day tail produce endpoints
+      # whose derived interval contains the instant, so `covers?/2` alone says
+      # visible and the SQL says nothing of the kind.
       own = {@now, DateTime.add(@now, 10, :day)}
 
       shapes = [
@@ -258,7 +342,9 @@ defmodule HospitalityComs.PeersTest do
         {"partial", {DateTime.add(@now, 5, :day), DateTime.add(@now, 20, :day)}},
         {"abutting after", {DateTime.add(@now, 10, :day), DateTime.add(@now, 20, :day)}},
         {"abutting before", {DateTime.add(@now, -20, :day), @now}},
-        {"contained", {DateTime.add(@now, 2, :day), DateTime.add(@now, 4, :day)}}
+        {"contained", {DateTime.add(@now, 2, :day), DateTime.add(@now, 4, :day)}},
+        {"gapped after", {DateTime.add(@now, 12, :day), DateTime.add(@now, 20, :day)}},
+        {"gapped before", {DateTime.add(@now, -20, :day), DateTime.add(@now, -2, :day)}}
       ]
 
       instants =
@@ -363,6 +449,32 @@ defmodule HospitalityComs.PeersTest do
       assert Repo.get!(ConnectionRequest, declined.id).superseded_at != nil
       assert Repo.get!(ConnectionRequest, fresh.id).superseded_at == nil
       assert current_requests(first.person.id, second.person.id) == 1
+    end
+
+    test "reads the same state through fetch_request/2 as through the lists" do
+      # Four places derive a request's state and they have to agree, because
+      # "the pair's state is one row" is only true if every reader picks the
+      # same row. They agreed about `:lapsed` and disagreed about *superseded*:
+      # `fetch_request/2` did not filter `superseded_at IS NULL`, so a row that
+      # `accept_request/2` and `decline_request/2` both answer `:not_found` for
+      # came back reporting a state anyway.
+      %{first: first, second: second} = co_rostered(@now)
+      declined = request_fixture(first, second)
+      {:ok, _declined} = Peers.decline_request(second, declined.id)
+      {:ok, fresh} = Peers.request_connection(second, first.person.id)
+
+      assert {:ok, %ConnectionRequest{state: :pending, id: fetched}} =
+               Peers.fetch_request(first, fresh.id)
+
+      assert [%ConnectionRequest{state: :pending, id: listed}] =
+               Peers.list_outgoing_requests(second)
+
+      assert fetched == listed
+
+      # The superseded row is in neither, and the writes agree.
+      assert {:error, :not_found} = Peers.fetch_request(first, declined.id)
+      assert Peers.list_outgoing_requests(first) == []
+      assert {:error, :not_found} = Peers.decline_request(second, declined.id)
     end
   end
 
@@ -511,6 +623,42 @@ defmodule HospitalityComs.PeersTest do
 
       assert {:ok, %ConnectionRequest{}} =
                Peers.request_connection(later_second, first.person.id)
+    end
+
+    test "is refused by Postgres when the block is left unwritten" do
+      # `connection_requests_decline_blocks_requester` is what makes KTD19's
+      # decline half a property of the schema rather than of one function, and
+      # it did not. A CHECK is satisfied by NULL and `NULL = requester_id` is
+      # NULL, so `declined_at IS NULL OR blocked_initiator_id = requester_id`
+      # *passed* for a declined row with no block on it — which is the one row
+      # the constraint exists to refuse. The invariant rested entirely on
+      # `decline_request/2` writing both columns in one statement.
+      #
+      # Written through `Repo` rather than the context on purpose: the context
+      # is the tier this is meant to be independent of.
+      %{first: first, second: second} = co_rostered(@now)
+      request = request_fixture(first, second)
+
+      assert_raise Postgrex.Error,
+                   ~r/connection_requests_decline_blocks_requester/,
+                   fn ->
+                     request.id
+                     |> Records.request_by_id()
+                     |> Repo.update_all(set: [declined_at: DateTime.truncate(@now, :second)])
+                   end
+
+      # The control: the same write with the block on it is accepted, so the
+      # refusal above is about the NULL and not about the column being
+      # unwritable.
+      assert {1, _rows} =
+               request.id
+               |> Records.request_by_id()
+               |> Repo.update_all(
+                 set: [
+                   declined_at: DateTime.truncate(@now, :second),
+                   blocked_initiator_id: first.person.id
+                 ]
+               )
     end
 
     test "refuses a request addressed to somebody else, one already answered, and nothing" do
@@ -916,7 +1064,94 @@ defmodule HospitalityComs.PeersTest do
     end
   end
 
+  describe "the rule that Records owns every query" do
+    # Structural, from the compiled `imports` chunk, the way
+    # `HospitalityComs.Accounts.PersonZoneTest` reads a module's repo calls out
+    # of the BEAM rather than out of a grep. It exists because the rule was
+    # already broken and nothing noticed: `disconnect/2` built
+    # `from(request in ConnectionRequest, where: …)` inline, which is a query
+    # over a schema at a call site — the exact thing `AGENTS.md` says belongs in
+    # the owning module.
+    #
+    # A whole-namespace sweep, so a new `HospitalityComs.Peers.*` module is
+    # covered on the day it is written rather than on the day somebody adds it
+    # to a list.
+
+    test "is a fact about the compiled modules, not a convention" do
+      # The builders that *begin* or *shape* a read. `Ecto.Query.Builder.From`
+      # is the one that matters most — it is what `from(x in Schema)` compiles
+      # to, and it cannot appear outside `Records` without a query having been
+      # built somewhere else.
+      offenders =
+        Enum.filter(peer_modules(), fn module ->
+          module != Records and
+            module |> query_builders() |> Enum.any?(&(&1 in @read_builders))
+        end)
+
+      assert offenders == []
+    end
+
+    test "leaves the context the three builders a write statement needs" do
+      # Not a loophole and worth naming, because a check that banned every
+      # `Ecto.Query` call from the context would have to be worked around
+      # rather than obeyed. `HospitalityComs.Peers` composes `where` onto a
+      # conditional `update_all`, `select` for its `RETURNING`, and `update` for
+      # its `SET` — three parts of a *write*, each applied to a query `Records`
+      # handed it. None of them can name a schema.
+      builders = query_builders(Peers)
+
+      assert Enum.sort(builders) ==
+               Enum.sort([
+                 Ecto.Query.Builder.Filter,
+                 Ecto.Query.Builder.Select,
+                 Ecto.Query.Builder.Update
+               ])
+    end
+
+    test "reads a chunk that actually says something, which is the control" do
+      # Without this the assertions above pass against a namespace sweep that
+      # returned nothing, or against an `imports` chunk that stopped being
+      # readable. `Records` is the module that must contain `from`.
+      modules = peer_modules()
+
+      assert Peers in modules
+      assert Records in modules
+      assert Visibility in modules
+      refute HospitalityComs.PeersFixtures in modules
+
+      assert Ecto.Query.Builder in query_builders(Records)
+      assert Ecto.Query.Builder.From in query_builders(Records)
+    end
+
+    test "leaves the channel building no query at all" do
+      # The other half of "the channel calls the context; the context calls
+      # Records". A transport that composed a query would be authorising in the
+      # web layer.
+      assert query_builders(HospitalityComsWeb.PeerChannel) == []
+    end
+  end
+
   ## Helpers
+
+  defp peer_modules do
+    {:ok, modules} = :application.get_key(:hospitality_coms, :modules)
+
+    Enum.filter(modules, fn module ->
+      name = Atom.to_string(module)
+
+      name == "Elixir.HospitalityComs.Peers" or String.starts_with?(name, @peers_namespace)
+    end)
+  end
+
+  defp query_builders(module) do
+    {:ok, {^module, [imports: imports]}} =
+      module |> :code.which() |> :beam_lib.chunks([:imports])
+
+    imports
+    |> Enum.map(fn {called, _function, _arity} -> called end)
+    |> Enum.uniq()
+    |> Enum.filter(&String.starts_with?(Atom.to_string(&1), "Elixir.Ecto.Query.Builder"))
+  end
 
   defp peer_tables, do: ~w(connection_requests peer_connections peer_messages)
 
@@ -925,30 +1160,23 @@ defmodule HospitalityComs.PeersTest do
   defp dynamic(scope), do: Map.fetch!(%{scope: scope}, :scope)
 
   # The Elixir spelling of the interval, used only to say what the SQL predicate
-  # should have answered. Deliberately built from `HospitalityComs.Peers
-  # .Visibility` rather than restated, so the matrix compares the *shipped*
-  # struct against the *shipped* query.
+  # should have answered. Every clause of it comes from `HospitalityComs.Peers
+  # .Visibility`, so the matrix compares the *shipped* Elixir rule against the
+  # *shipped* query and not against a third spelling that lives in this file.
   defp expected_visibility({own_from, own_to}, {peer_from, peer_to}, instant) do
-    overlapping =
-      DateTime.compare(own_from, own_to) == :lt and
-        DateTime.compare(peer_from, peer_to) == :lt and
-        DateTime.compare(own_from, peer_to) == :lt and
-        DateTime.compare(peer_from, own_to) == :lt
-
-    overlapping and
-      Visibility.covers?(
-        Visibility.new(%{
-          person_id: Ecto.UUID.generate(),
-          venue_id: Ecto.UUID.generate(),
-          venue_name: "irrelevant",
-          role_label: "irrelevant",
-          own_starts_at: own_from,
-          own_ends_at: own_to,
-          peer_starts_at: peer_from,
-          peer_ends_at: peer_to
-        }),
-        instant
-      )
+    Visibility.visible_at?(
+      %{
+        person_id: Ecto.UUID.generate(),
+        venue_id: Ecto.UUID.generate(),
+        venue_name: "irrelevant",
+        role_label: "irrelevant",
+        own_starts_at: own_from,
+        own_ends_at: own_to,
+        peer_starts_at: peer_from,
+        peer_ends_at: peer_to
+      },
+      instant
+    )
   end
 
   defp current_requests(person_id, other_person_id) do
