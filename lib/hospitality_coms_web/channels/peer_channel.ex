@@ -235,8 +235,17 @@ defmodule HospitalityComsWeb.PeerChannel do
     end)
   end
 
+  # `send` is the one event taking two arguments, so it gets its own refusal:
+  # falling through to the id-only message tells a client that supplied a
+  # perfectly good `connection_id` and no `body` that the id is the problem.
+  def handle_in("send", _payload, socket) do
+    {:reply,
+     {:error, ErrorEnvelope.new(:bad_request, "that event needs a connection_id and a body")},
+     socket}
+  end
+
   def handle_in(event, _payload, socket) when event in ~w(request accept decline history
-                                                          send disconnect) do
+                                                          disconnect) do
     {:reply, {:error, ErrorEnvelope.new(:bad_request, "that event needs an id")}, socket}
   end
 
