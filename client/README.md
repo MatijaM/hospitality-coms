@@ -234,7 +234,7 @@ src/socket/           the connection, the channel error envelope, the topic-id r
 src/features/rooms/   venue and shift rooms: the list, a room, the composer
 src/features/peers/   the directory, requests, conversations, the disconnect
 src/features/profile/ the record, the disclosure ledger, corrections, a peer's record
-src/app/              routes and the surfaces they render
+src/app/              routes, and the landing page that tabs three of them
 src/test-support/     fakes shared by the tests above the client and the socket
 ```
 
@@ -369,6 +369,43 @@ should not log a worker out — but it means a token that is somehow unusable
 without ever producing a 401 leaves the retry button as the only control on
 screen. Clearing site data is the workaround. A "sign out anyway" action is the
 fix and is not built, because nothing yet distinguishes the two cases.
+
+## The landing page
+
+`/` renders the three surfaces in tabs — Rooms, Peers, Profile — with the
+identity block above them. It was a page of links, which meant the first thing
+a worker saw after signing in was a table of contents rather than the product.
+
+**`/rooms`, `/peers` and `/profile` are unchanged, and the tabs are a second
+door.** That is what keeps every test above those three surfaces — all of which
+enter through their own path — untouched by the landing page, and it is why
+this was a cheap change. `app.test.tsx` asserts the three paths still serve
+their surface with no tab strip on screen, so the second door cannot quietly
+become the only one.
+
+**Only the open tab is mounted, and it is a constraint rather than a saving.**
+`usePeerSurface` is one hook because there is one topic (KTD10 puts the
+conversation in every payload and never in the topic), so a second instance
+joins `peer:<person_id>` a second time and every announcement arrives twice.
+Panels kept in the tree and hidden with CSS would put that second instance
+there the moment somebody looked at Rooms. Measured: rendering all three behind
+`hidden` passes the aria wiring tests and fails three others.
+
+The consequence is stated rather than hidden — **switching tabs unmounts the
+panel that was showing**, so an open room leaves its channel and typing in
+progress goes. That is exactly what navigating from `/rooms` to `/peers`
+already did, so nothing regressed; but a tab strip reads like Slack's, where
+the conversation is still there when you come back, and this one is not.
+
+The open tab is deliberately **not** in the URL. Each surface already has one,
+and `?tab=peers` disagreeing with `/peers` about which is canonical is a bug
+nobody would find quickly.
+
+**The Profile tab is shown even though nothing answers it**, with the reason on
+the page rather than in this file: the record, its attested entries and the
+disclosure ledger are all built server-side and no channel carries them, so
+that tab renders against `features/profile/contract.ts` and waits. Hiding it
+would make the product look smaller than it is.
 
 ## The rooms
 

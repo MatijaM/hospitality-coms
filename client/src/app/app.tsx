@@ -2,7 +2,9 @@
  * The routing shell.
  *
  * Seven routes. `/rooms` is U7's, `/peers` is U8's and `/profile` is U9's, and
- * they are the three surfaces here that need a socket. What is left of the plan
+ * they are the three surfaces here that need a socket. `/` renders all three
+ * in tabs and keeps its own; the three paths are what every test above those
+ * surfaces enters through, so they stay whatever the landing page does. What is left of the plan
  * — archived engagements, erasure, the demo controls — still needs an endpoint
  * or a channel that does not exist, and a placeholder route for one would be a
  * guess at a URL somebody else is about to choose.
@@ -22,7 +24,9 @@
  * The room store is a prop rather than something this file reaches for, for
  * the reason `main.tsx` gives about the API client and the token store: it is
  * built once at module scope in production and handed in by the tests, so no
- * surface here touches a browser global.
+ * surface here touches a browser global. **`/` takes it too**, because the
+ * landing page renders the rooms surface in a tab; it is the same store the
+ * `/rooms` route gets, so a room added through one door is listed at the other.
  *
  * `/log-in/:linkToken` matches the shape of a real magic link:
  * `MAGIC_LINK_BASE_URL` defaults to `http://localhost:4000/log-in/` and the
@@ -49,7 +53,7 @@ export function App({ roomStore }: { readonly roomStore: RoomStore }) {
           path="/"
           element={
             <RequireSession>
-              <HomeRoute />
+              <HomeRoute roomStore={roomStore} />
             </RequireSession>
           }
         />
