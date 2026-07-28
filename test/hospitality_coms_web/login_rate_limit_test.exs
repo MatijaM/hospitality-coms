@@ -43,6 +43,7 @@ defmodule HospitalityComsWeb.LoginRateLimitTest do
 
   import HospitalityComs.AccountsFixtures
 
+  alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Clock
   alias HospitalityComsWeb.LoginRateLimit
 
@@ -120,6 +121,22 @@ defmodule HospitalityComsWeb.LoginRateLimitTest do
       end
 
       assert conn |> post(~p"/api/log-in", %{"email" => unique_person_email()}) |> response(429)
+    end
+
+    test "spends its budget over the lifetime of the link it hands out" do
+      # Every other test in this file derives its loop from `limit/0` and its
+      # advance from `window_seconds/0`, which is what stops the two drifting —
+      # and leaves both *unpinned*: a limit of a million passes all of them
+      # while limiting nothing.
+      #
+      # So the pair is asserted directly, in the form the moduledoc claims it
+      # in. The window is the magic link's own validity, so "one caller can
+      # cause at most `limit` outbound emails inside the lifetime of any single
+      # link they caused" is a sentence about these two numbers together.
+      assert LoginRateLimit.window_seconds() ==
+               PersonToken.magic_link_validity_in_minutes() * 60
+
+      assert LoginRateLimit.limit() in 1..100
     end
   end
 

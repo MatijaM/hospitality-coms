@@ -244,6 +244,20 @@ defmodule HospitalityComs.LifecycleReapTest do
 
       assert Enum.all?(olds, &is_nil(Repo.get(Person, &1.id)))
     end
+
+    test "bounds the token statement the same way, and clears it over two runs" do
+      # Measured: without this the token reap's `limit` could be removed and no
+      # test noticed — the bound above exercised the people statement alone,
+      # and two statements in one function are two bounds.
+      person = person_fixture(%{}, @now)
+      for _ <- 1..2, do: login_token(person, minutes_before(20))
+
+      assert {:ok, %{expired_tokens: 1}} = with_limits([batch_size: 1], &reap_now/0)
+      assert Repo.aggregate(PersonToken, :count) == 1
+
+      assert {:ok, %{expired_tokens: 1}} = with_limits([batch_size: 1], &reap_now/0)
+      assert Repo.aggregate(PersonToken, :count) == 0
+    end
   end
 
   describe "the worker" do
