@@ -7,7 +7,8 @@
  * Three things independently mean "not now", and each is rendered as the
  * sentence it actually is:
  *
- *   * the channel is not joined — joining, refused, timed out, or over;
+ *   * the channel is not joined — joining, refused, timed out, **lost** (a send
+ *     the server answered `unauthorized`), or over;
  *   * the room is barred — closed to new messages, or this session is off the
  *     roster (`room.ts` traces both to their refusals);
  *   * a send is in flight, so a second click would be a second message.
@@ -15,7 +16,8 @@
  * A disabled input with nothing next to it is the failure the "explicit
  * message" scenario is about, one step earlier: the worker types, nothing
  * happens, and there is no sentence anywhere saying why. So every disabled
- * state here carries its reason.
+ * state here carries its reason, and every one of them carries a way forward:
+ * "Check again" for a bar, and re-opening the room for a lost one.
  */
 
 import { useState } from "react";
@@ -23,6 +25,7 @@ import { useState } from "react";
 import type { ChannelFieldError } from "../../socket/channel-failure";
 import type { RoomClosure, RoomEntry, RoomMessage, SendBar } from "./room";
 import { roomKindLabel } from "./room";
+import type { RoomErrorCode } from "./refusal-message";
 import { barFromRefusal, barMessage, refusalMessage } from "./refusal-message";
 import type { Room, RoomConnection, SendState } from "./use-room";
 import { useRoom } from "./use-room";
@@ -46,6 +49,14 @@ export function RoomView({ entry, onEnded, onBarred, onClearBar }: RoomViewProps
     },
   });
 
+  // Clearing the bar re-enables the composer. Leaving the sentence that closed
+  // it sitting above the now-usable input says the room is still refusing,
+  // which is the opposite of what the button just did.
+  function checkAgain(): void {
+    room.clearSend();
+    onClearBar(entry);
+  }
+
   return (
     <section aria-label={`${roomKindLabel(entry.ref.kind)} ${entry.ref.id}`}>
       <h2>{roomKindLabel(entry.ref.kind)}</h2>
@@ -57,12 +68,7 @@ export function RoomView({ entry, onEnded, onBarred, onClearBar }: RoomViewProps
       {entry.barred !== null && (
         <div>
           <p role="status">{barMessage(entry.barred)}</p>
-          <button
-            type="button"
-            onClick={() => {
-              onClearBar(entry);
-            }}
-          >
+          <button type="button" onClick={checkAgain}>
             Check again
           </button>
         </div>
@@ -91,17 +97,27 @@ function ConnectionState({ connection }: { readonly connection: RoomConnection }
       );
     case "refused":
       return <p role="alert">{refusalMessage(connection.failure)}</p>;
-    case "ended":
-      // Reached only for the moment between the notice arriving and the list
-      // dropping the room, and for a suspension, which keeps the room listed
-      // because the person can undo it.
+    case "lost":
       return (
         <p role="alert">
-          {connection.closure.reason === "revoked"
-            ? "Your access to this room has ended. It has been removed from your rooms."
-            : "You have suspended this room. It stays hidden until you resume it."}
+          This room is no longer open to you. Open it again to see whether that is still
+          true.
         </p>
       );
+    case "ended":
+      // Only a suspension is ever seen here. A revocation sets this state and
+      // drops the room from the list in the same batch, so React re-renders
+      // `RoomsRoute` without this component and never commits the branch — the
+      // revoked copy that used to live here was unreachable in any build of
+      // this code, which is worse than absent because it reads as live.
+      //
+      // Kept as a `null` rather than deleted outright: if a later unit decides
+      // a revoked room should linger, this is the line it has to notice.
+      return connection.closure.reason === "suspended" ? (
+        <p role="alert">
+          You have suspended this room. It stays hidden until you resume it.
+        </p>
+      ) : null;
   }
 }
 
@@ -157,14 +173,22 @@ function Composer({ entry, room }: { readonly entry: RoomEntry; readonly room: R
     entry.barred !== null ||
     room.send.status === "sending";
 
+  // Cleared on success, never on submit. Clearing on submit meant every
+  // refusal ate what the worker wrote: they read a sentence explaining the
+  // failure with nothing left to correct and resend.
+  async function submit(): Promise<void> {
+    const outcome = await room.sendMessage(body);
+
+    if (outcome.status === "sent") setBody("");
+  }
+
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
         if (disabled || body.trim() === "") return;
 
-        room.sendMessage(body);
-        setBody("");
+        void submit();
       }}
     >
       <label htmlFor="message-body">Message</label>
@@ -217,7 +241,11 @@ function SendOutcome({ send }: { readonly send: SendState }) {
  * `failure-message.ts` gives: these come from Ecto's changeset traversal and
  * name `body`, which is the thing the worker typed.
  */
-function FieldMessages({ failure }: { readonly failure: ChannelFieldError }) {
+function FieldMessages({
+  failure,
+}: {
+  readonly failure: ChannelFieldError<RoomErrorCode>;
+}) {
   const messages = Object.values(failure.fields).flat();
 
   return (

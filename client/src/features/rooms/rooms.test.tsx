@@ -52,6 +52,9 @@ function renderRooms(
       held.write(next);
       onWrite?.(next);
     },
+    clear: () => {
+      held.clear();
+    },
   };
   const api = createFakeApi({ currentPerson: () => Promise.resolve(ok(somePerson)) });
 
@@ -207,6 +210,29 @@ describe("a closed room", () => {
     expect(composer()).toBeEnabled();
     expect(store.read()).toEqual([entry(shiftRoom, null)]);
   });
+
+  it("takes the stale refusal off the screen when the bar is cleared", async () => {
+    // "Check again" re-enables the composer. Leaving the sentence that closed
+    // it sitting above the now-usable input says the room is still refusing,
+    // which is the opposite of what the button just did.
+    const { socket } = renderRooms([entry(shiftRoom)]);
+    const channel = await open(socket, shiftRoom, {
+      shift_room_id: SHIFT_ROOM_ID,
+      engagement_id: OWN_ENGAGEMENT_ID,
+    });
+
+    await userEvent.type(composer(), "still here?");
+    await userEvent.click(sendButton());
+    act(() => {
+      channel.replyToLast("error", refusal("gone"));
+    });
+    await screen.findByRole("status");
+
+    await userEvent.click(screen.getByRole("button", { name: /check again/i }));
+
+    expect(composer()).toBeEnabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
 });
 
 describe("a rejected send", () => {
@@ -307,6 +333,80 @@ describe("a rejected send", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/did not answer in time/i);
     expect(composer()).toBeEnabled();
+  });
+
+  it("keeps what was typed, so a refusal does not eat the message", async () => {
+    // The composer cleared on submit rather than on success, so every refusal
+    // above silently threw away what the worker wrote. They then read a
+    // sentence explaining why it failed, with nothing left to try again.
+    const { socket } = renderRooms([entry(venueRoom)]);
+    const channel = await open(socket, venueRoom);
+
+    await userEvent.type(composer(), "kitchen is short tonight");
+    await userEvent.click(sendButton());
+    act(() => {
+      channel.replyToLast("error", refusal("bad_request"));
+    });
+    await screen.findByRole("alert");
+
+    expect(composer()).toHaveValue("kitchen is short tonight");
+  });
+
+  it("clears what was typed once the server has taken it", async () => {
+    const { socket } = renderRooms([entry(venueRoom)]);
+    const channel = await open(socket, venueRoom);
+
+    await userEvent.type(composer(), "on my way");
+    await userEvent.click(sendButton());
+    act(() => {
+      channel.replyToLast("ok", {
+        id: "aaaaaaaa-0000-4000-8000-00000000000a",
+        body: "on my way",
+        sent_at: "2026-07-28T09:00:00Z",
+        author_engagement_id: OWN_ENGAGEMENT_ID,
+      });
+    });
+
+    await waitFor(() => {
+      expect(composer()).toHaveValue("");
+    });
+  });
+
+  it("takes one message per click while a send is in flight", async () => {
+    // `Composer`'s disabled condition has three clauses and this is the one
+    // nothing asserted: every other send test replies immediately, so the
+    // window between the click and the reply was never looked at.
+    const { socket } = renderRooms([entry(venueRoom)]);
+    const channel = await open(socket, venueRoom);
+
+    await userEvent.type(composer(), "on my way");
+    await userEvent.click(sendButton());
+
+    expect(composer()).toBeDisabled();
+    expect(sendButton()).toBeDisabled();
+
+    await userEvent.click(sendButton());
+
+    expect(channel.pushed).toHaveLength(1);
+  });
+
+  it("closes the composer when the server says this session is not in the room", async () => {
+    // `unauthorized` on a send is not a property of the room, so it sets no
+    // bar — and the composer stayed live, so somebody removed from a room
+    // could keep typing into it and keep being refused.
+    const { socket } = renderRooms([entry(venueRoom)]);
+    const channel = await open(socket, venueRoom);
+
+    await userEvent.type(composer(), "anyone about?");
+    await userEvent.click(sendButton());
+    act(() => {
+      channel.replyToLast("error", refusal("unauthorized"));
+    });
+
+    await screen.findByText(/no longer open to you/i);
+
+    expect(composer()).toBeDisabled();
+    expect(sendButton()).toBeDisabled();
   });
 
   it("sends the body under the event name the channel handles", async () => {
@@ -485,6 +585,57 @@ describe("a refused join", () => {
   });
 });
 
+describe("re-opening a room", () => {
+  it("joins again, rather than doing nothing because the key did not change", async () => {
+    // The one legitimate retry in this surface is the worker asking. It was a
+    // no-op: `RoomsRoute` keyed `RoomView` on the room alone, so re-opening
+    // the room already open set the same state and React kept the mount. That
+    // made every "open it again to check" correction a dead end.
+    const { socket } = renderRooms([entry(venueRoom)]);
+    const topic = roomTopic(venueRoom);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /open .*venue room/i }),
+    );
+    const first = await waitFor(() => {
+      const opened = socket.channelFor(topic);
+      if (opened === undefined) throw new Error("nothing joined");
+
+      return opened;
+    });
+
+    act(() => {
+      first.joinPush.trigger("error", refusal("unauthorized"));
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent(/not in this room/i);
+
+    await userEvent.click(screen.getByRole("button", { name: /open .*venue room/i }));
+
+    await waitFor(() => {
+      expect(socket.channelsFor(topic)).toHaveLength(2);
+    });
+    // The first channel was left when it was refused, and re-opening did not
+    // resurrect it: the second join is a new channel, asked once.
+    expect(first.joins).toBe(1);
+    expect(socket.channelsFor(topic)[1]?.joins).toBe(1);
+  });
+
+  it("does not clear what it learned, so a closed room stays closed", async () => {
+    // Re-opening asks the server again about *access*. It is not a way to
+    // un-learn that the room is closed to new messages — that is what "Check
+    // again" is for, and conflating them would defeat the closed-room render.
+    const { socket, store } = renderRooms([entry(shiftRoom, "room_closed")]);
+
+    await open(socket, shiftRoom, {
+      shift_room_id: SHIFT_ROOM_ID,
+      engagement_id: OWN_ENGAGEMENT_ID,
+    });
+    await userEvent.click(screen.getByRole("button", { name: /open .*shift room/i }));
+
+    expect(store.read()).toEqual([entry(shiftRoom, "room_closed")]);
+  });
+});
+
 describe("messages", () => {
   it("renders what arrives on the broadcast, marking this session's own", async () => {
     const { socket } = renderRooms([entry(venueRoom)]);
@@ -569,6 +720,26 @@ describe("the list itself", () => {
       expect(socket.channelFor(roomTopic(venueRoom))).toBeDefined();
     });
     expect(store.read()).toEqual([entry(venueRoom, null)]);
+  });
+
+  it("lowercases an id, because the topic string is what PubSub broadcasts on", async () => {
+    // Postgres casts both cases to the same uuid, so two sessions naming one
+    // room in different cases read and write the same rows — but
+    // `Phoenix.PubSub` broadcasts on the **literal topic string**, so they
+    // would sit in one database room and see none of each other's messages.
+    //
+    // The id has to carry hex *letters* for this to test anything; the other
+    // ids in this file are all digits, where `toUpperCase()` is a no-op.
+    const lower = "a1a1a1a1-b2b2-4c3c-8d4d-e5e5e5e5e5e5";
+    const { socket, store } = renderRooms([]);
+
+    await userEvent.type(await screen.findByLabelText(/^id$/i), lower.toUpperCase());
+    await userEvent.click(screen.getByRole("button", { name: /add this room/i }));
+
+    await waitFor(() => {
+      expect(socket.channelFor(`venue_room:${lower}`)).toBeDefined();
+    });
+    expect(store.read()).toEqual([entry({ kind: "venue", id: lower }, null)]);
   });
 
   it("refuses an id that is not one, rather than putting it on a socket", async () => {

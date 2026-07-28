@@ -31,7 +31,7 @@
 import { useCallback, useState } from "react";
 
 import type { RoomClosure, RoomEntry, RoomKind, RoomRef, SendBar } from "./room";
-import { isRoomId, roomKey, roomKindLabel } from "./room";
+import { normaliseRoomId, roomKey, roomKindLabel } from "./room";
 import type { RoomStore } from "./room-store";
 import { addRoom, findRoom, removeRoom, setRoomBar } from "./room-store";
 import { RoomView } from "./room-view";
@@ -43,6 +43,19 @@ export type RoomsRouteProps = {
 export function RoomsRoute({ store }: RoomsRouteProps) {
   const [entries, setEntries] = useState<readonly RoomEntry[]>(() => store.read());
   const [openKey, setOpenKey] = useState<string | null>(null);
+
+  // Counts opens rather than naming a room, and it is part of `RoomView`'s
+  // `key`. Without it, opening the room already open set `openKey` to the value
+  // it already had, React kept the mount, and nothing re-joined — so every
+  // "open it again to check" correction this surface offers was a dead end,
+  // including the one after a refused join and the one after a send refused
+  // `unauthorized`.
+  const [openAttempt, setOpenAttempt] = useState(0);
+
+  const openRoom = useCallback((key: string) => {
+    setOpenKey(key);
+    setOpenAttempt((previous) => previous + 1);
+  }, []);
 
   // Every mutation goes through one function, in the functional form, because
   // several of them are called from channel callbacks that fire long after the
@@ -94,14 +107,14 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
       <AddRoomForm
         onAdd={(ref) => {
           update((current) => addRoom(current, ref));
-          setOpenKey(roomKey(ref));
+          openRoom(roomKey(ref));
         }}
       />
 
       <RoomList
         entries={entries}
         openKey={openKey}
-        onOpen={setOpenKey}
+        onOpen={openRoom}
         onForget={(entry) => {
           update((current) => removeRoom(current, entry.ref));
           closeIfOpen(entry.ref);
@@ -110,7 +123,7 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
 
       {open !== null && (
         <RoomView
-          key={roomKey(open.ref)}
+          key={`${roomKey(open.ref)}#${openAttempt.toString()}`}
           entry={open}
           onEnded={onEnded}
           onBarred={(entry, bar: SendBar) => {
@@ -176,12 +189,15 @@ function AddRoomForm({ onAdd }: { readonly onAdd: (ref: RoomRef) => void }) {
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        const trimmed = id.trim();
 
         // Checked here for the worker's benefit, not the server's: the server
         // answers a malformed suffix with exactly what it answers an unknown
         // room (AE1), so it can say nothing usable about somebody's own typo.
-        if (!isRoomId(trimmed)) {
+        // `normaliseRoomId` is also what the stored list goes through, so the
+        // two paths cannot drift about what an id is or what case it is in.
+        const roomId = normaliseRoomId(id);
+
+        if (roomId === null) {
           setProblem("That is not an id. It should look like a uuid.");
 
           return;
@@ -189,7 +205,7 @@ function AddRoomForm({ onAdd }: { readonly onAdd: (ref: RoomRef) => void }) {
 
         setProblem(null);
         setId("");
-        onAdd({ kind, id: trimmed });
+        onAdd({ kind, id: roomId });
       }}
     >
       <label htmlFor="room-kind">Kind</label>

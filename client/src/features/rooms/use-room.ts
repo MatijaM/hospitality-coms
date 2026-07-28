@@ -56,15 +56,37 @@
  * **No retry.** A refused join is a decision (`session-socket.ts`), and this
  * hook offers nothing that would ask again on its own. Re-opening the room is
  * the worker asking, once.
+ *
+ * **No transport status.** `connection` tracks the session's socket, not the
+ * link: `socket === null` means nobody is signed in, and a websocket that drops
+ * under a live session leaves `connection` on `joined` with the composer
+ * enabled. That is a deliberate decision rather than an oversight, and it is
+ * not free.
+ *
+ * What happens on a drop is that `phoenix` reconnects on its own backoff and
+ * rejoins the channel, and a send issued meanwhile is buffered by `Channel`
+ * rather than lost. So the usual outcome of typing into a room whose link is
+ * down is that the message goes when the link returns. If it does not return,
+ * the push times out after `phoenix`'s ten seconds and the composer says "The
+ * server did not answer in time" — a true sentence, ten seconds late.
+ *
+ * Surfacing it properly means `SocketLike` growing `onOpen`/`onClose`/`onError`,
+ * which `session-socket.ts` deliberately does not expose — it is a wrapper over
+ * joining and leaving, not a connection monitor — and a fourth reason for the
+ * composer to be disabled. That is a surface of its own and it is not one of
+ * the three this unit exists to get right. The cost is ten seconds of a
+ * composer that looks live; the alternative was building it on a guess about
+ * how a reconnect should read.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { ChannelFailure } from "../../socket/channel-failure";
 import { decodeChannelRefusal } from "../../socket/channel-failure";
 import type { TopicSubscription } from "../../socket/session-socket";
 import { useSessionSocket } from "../../socket/socket-context";
 import { decodeJoinedEngagementId, decodeRoomClosure, decodeRoomMessage } from "./decode";
+import type { RoomFailure } from "./refusal-message";
+import { ROOM_ERROR_CODES, endsAccess } from "./refusal-message";
 import type { RoomClosure, RoomMessage, RoomRef } from "./room";
 import { roomTopic } from "./room";
 
@@ -79,15 +101,31 @@ export type RoomConnection =
    * join the server granted.
    */
   | { readonly status: "joined"; readonly engagementId: string | null }
-  | { readonly status: "refused"; readonly failure: ChannelFailure }
+  | { readonly status: "refused"; readonly failure: RoomFailure }
   | { readonly status: "timed_out" }
+  /**
+   * A **send** was refused `unauthorized`, so the server has just said this
+   * session is not in this room.
+   *
+   * Its own state rather than a `refused`, because nothing refused a join —
+   * and rather than a `SendBar`, because it is about access, which `join/3`
+   * re-derives, not about the room, which it does not. The composer closes
+   * because it requires `joined`; re-opening the room asks the server again
+   * and settles it for free.
+   *
+   * The topic is **not** left. The server did not stop the channel, and
+   * reading is not this client's to revoke — a venue room carries full history
+   * and the person may still be entitled to it a moment from now. What stops
+   * is writing.
+   */
+  | { readonly status: "lost"; readonly failure: RoomFailure }
   | { readonly status: "ended"; readonly closure: RoomClosure };
 
 export type SendState =
   | { readonly status: "idle" }
   | { readonly status: "sending" }
   | { readonly status: "sent" }
-  | { readonly status: "refused"; readonly failure: ChannelFailure }
+  | { readonly status: "refused"; readonly failure: RoomFailure }
   /** The room was left before the push went out. Nothing reached the server. */
   | { readonly status: "unsent" };
 
@@ -95,13 +133,24 @@ export type Room = {
   readonly connection: RoomConnection;
   readonly messages: readonly RoomMessage[];
   readonly send: SendState;
-  readonly sendMessage: (body: string) => void;
+  /**
+   * Sends, and resolves with how it went.
+   *
+   * The outcome is returned rather than only stored so the composer can clear
+   * what was typed **on success and only on success**. It used to clear on
+   * submit, which meant every refusal above silently ate the message: the
+   * worker read a sentence explaining why it failed, with nothing left to
+   * correct and resend.
+   */
+  readonly sendMessage: (body: string) => Promise<SendState>;
+  /** Forgets the last send's outcome, so a stale refusal leaves the screen. */
+  readonly clearSend: () => void;
 };
 
 export type UseRoomOptions = {
   /** The access ended. The topic has already been left when this is called. */
   readonly onEnded?: (closure: RoomClosure) => void;
-  readonly onSendRefused?: (failure: ChannelFailure) => void;
+  readonly onSendRefused?: (failure: RoomFailure) => void;
 };
 
 const NO_SOCKET: RoomConnection = { status: "no_socket" };
@@ -206,7 +255,10 @@ export function useRoom(ref: RoomRef, options: UseRoomOptions = {}): Room {
       onRefused: (payload) => {
         // Already left by `createSessionSocket`, which treats a refusal as a
         // decision. There is nothing to retry and nothing offering to.
-        setJoinState({ status: "refused", failure: decodeChannelRefusal(payload) });
+        setJoinState({
+          status: "refused",
+          failure: decodeChannelRefusal(payload, ROOM_ERROR_CODES),
+        });
       },
       onTimeout: () => {
         // Not a refusal: nobody decided anything, and `phoenix`'s own retry is
@@ -224,45 +276,50 @@ export function useRoom(ref: RoomRef, options: UseRoomOptions = {}): Room {
     };
   }, [socket, topic]);
 
-  const sendMessage = useCallback((body: string) => {
+  const sendMessage = useCallback(async (body: string): Promise<SendState> => {
     const open = subscription.current;
 
-    if (open === null) {
-      setSend({ status: "unsent" });
-
-      return;
-    }
+    if (open === null) return settle({ status: "unsent" });
 
     setSend({ status: "sending" });
 
-    void open.push("send", { body }).then((outcome) => {
-      switch (outcome.status) {
-        case "ok":
-          // The message itself arrives on the `"message"` broadcast, which the
-          // sender receives too. Rendering the reply as well would put it on
-          // screen twice; `appended` would collapse them, and not depending on
-          // that is one fewer thing to be right about.
-          setSend({ status: "sent" });
+    const outcome = await open.push("send", { body });
 
-          return;
-        case "error": {
-          const failure = decodeChannelRefusal(outcome.payload);
-          setSend({ status: "refused", failure });
-          callbacks.current.onSendRefused?.(failure);
+    switch (outcome.status) {
+      case "ok":
+        // The message itself arrives on the `"message"` broadcast, which the
+        // sender receives too. Rendering the reply as well would put it on
+        // screen twice; `appended` would collapse them, and not depending on
+        // that is one fewer thing to be right about.
+        return settle({ status: "sent" });
+      case "error": {
+        const failure = decodeChannelRefusal(outcome.payload, ROOM_ERROR_CODES);
 
-          return;
-        }
-        case "timeout":
-          setSend({ status: "refused", failure: { kind: "channel_timeout" } });
+        // The server has just said this session is not in this room. That is
+        // not a property of the room, so it is not a bar; it is the access,
+        // and it closes the composer through the connection.
+        if (endsAccess(failure)) setJoinState({ status: "lost", failure });
 
-          return;
-        case "unsent":
-          setSend({ status: "unsent" });
+        callbacks.current.onSendRefused?.(failure);
 
-          return;
+        return settle({ status: "refused", failure });
       }
-    });
+      case "timeout":
+        return settle({ status: "refused", failure: { kind: "channel_timeout" } });
+      case "unsent":
+        return settle({ status: "unsent" });
+    }
+
+    function settle(state: SendState): SendState {
+      setSend(state);
+
+      return state;
+    }
   }, []);
 
-  return { connection, messages, send, sendMessage };
+  const clearSend = useCallback(() => {
+    setSend({ status: "idle" });
+  }, []);
+
+  return { connection, messages, send, sendMessage, clearSend };
 }
