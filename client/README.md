@@ -2,10 +2,12 @@
 
 The React client for hospitality-coms. U12 is being built in slices — the plan's
 own note says it "is the coarsest unit in the plan and will likely split during
-execution once the surface count is real" — and two have landed: the
-**foundation** (toolchain, typed API client, log-in) and the **room surfaces**
-(U7's venue and shift rooms, the composer, the revocation). U8–U11's surfaces
-are still absent, and the table at the bottom says what each is waiting on.
+execution once the surface count is real" — and three have landed: the
+**foundation** (toolchain, typed API client, log-in), the **room surfaces**
+(U7's venue and shift rooms, the composer, the revocation) and the **peer
+surfaces** (U8's directory, the request state machine, 1:1 conversations,
+disconnect). U9–U11's surfaces are still absent, and the table at the bottom
+says what each is waiting on.
 
 ## Why a separate directory and not the asset pipeline
 
@@ -40,17 +42,25 @@ are actually enforced. Revisit when typescript-eslint ships a 7-compatible major
 so the test seam is a parameter rather than an interceptor. Nothing needs MSW,
 nock, or a service worker.
 
-**No schema-validation library.** There are three HTTP response shapes and three
-channel payloads. Hand-written decoders in `src/api/decode.ts` and
-`src/features/rooms/decode.ts` are still shorter than the dependency and produce
-better failures. When U8–U11 land their surfaces this is the decision to
-revisit, not the files to extend indefinitely.
+**No schema-validation library, and this is where that was re-decided.** The
+peer surface added eight more shapes — four rendered entities, three list
+replies and a push whose instant is keyed differently from the reply's — which
+is roughly triple what the rooms needed. It was still hand-written, and the
+reason is the last of those: `decode.ts` has **two** message decoders, one for
+`sent_at` and one for `at`, and a schema library would have made the natural
+move a single schema with an optional pair of keys, which also accepts a payload
+carrying neither. The decoders are where a contract this client does not own is
+written down; the point is not brevity. U9 is the next place to ask, and the
+number to watch is how many shapes share a decoder rather than how many exist.
 
 **No state manager and no component library.** The room list, the open room and
 the composer are three `useState`s and a store behind an interface; a store
-library would be more code than the thing it manages. The rooms did not need a
-design system either, and the next unit to add a surface with real visual
-demands is the one that should choose one.
+library would be more code than the thing it manages. The peer surface is one
+hook holding six pieces of state, all of them the server's answers rather than
+anything derived, which is the shape a store library would have added ceremony
+to and not simplified. The rooms did not need a design system either, and the
+next unit to add a surface with real visual demands is the one that should
+choose one.
 
 ## Running it against Phoenix
 
@@ -146,6 +156,15 @@ afterwards**. The full recipe, including how to mint a session token without
 `/dev/mailbox` (there is no dev mailbox outside dev), is in the file's own
 header.
 
+`npm run test:peers` is the third, and it is the one that **has never been run**.
+It does the same job for `PeerChannel` — the topic, a topic naming somebody
+else, and the three list shapes against real JSON rather than object literals —
+and it was written and left opt-in because the throwaway database above breaks
+the Elixir suite for as long as it exists, and the peer surfaces were built
+while another unit was running that suite. Run it in a quiet window, and drop
+the database and check `pg_shdepend` afterwards. Treat its assertions as
+unverified until somebody has.
+
 ## How the code is arranged
 
 ```
@@ -153,6 +172,7 @@ src/api/            the four endpoints, their types, and every way they can fail
 src/session/        who is logged in, where the token lives, magic-link parsing
 src/socket/         the connection, the channel error envelope, the provider
 src/features/rooms/ venue and shift rooms: the list, a room, the composer
+src/features/peers/ the directory, requests, conversations, the disconnect
 src/app/            routes and the surfaces they render
 src/test-support/   fakes shared by the tests above the client and the socket
 ```
@@ -388,29 +408,143 @@ one in four.
 `channel-failure.ts` owns the envelope and **names no codes**. Copy is an
 exhaustive `switch`, so one shared list would make every surface's switch break
 when any surface gained a code — and U8 puts nine events on one multiplexed
-`"peer"` channel. `decodeChannelRefusal` takes the caller's vocabulary as an
-argument; `features/rooms/refusal-message.ts` owns `ROOM_ERROR_CODES` and traces
-each one to the clause that emits it. A code outside the caller's set is
+`peer:<person_id>` channel. `decodeChannelRefusal` takes the caller's vocabulary
+as an argument; `features/rooms/refusal-message.ts` owns `ROOM_ERROR_CODES` and
+`features/peers/refusal-message.ts` owns `PEER_ERROR_CODES`, each tracing every
+code to the clause that emits it. A code outside the caller's set is
 `unrecognised` with the wire value kept, which is the right answer for a peer
 code reaching a room. `src/api/errors.ts` keeps one shared list because exactly
 one switch consumes it.
+
+**It paid off immediately.** The two sets overlap in four codes and differ in
+three, and none of the three would have made sense in the other file:
+`conflict` is peer-only and covers four distinct refusals, `gone` means "the
+shift room closed" to a room and "that request expired" to a peer, and
+`forbidden` means "you are off the roster" to one and "the block is against
+you" to the other. A shared list would have forced a case for each into a
+switch that could say nothing true about it.
+
+## The peers
+
+`src/features/peers/` is U8's whole surface on one channel: who this person can
+see, the request state machine as a user meets it, 1:1 conversations with
+history, and the disconnect. Four behaviours are the point of it, and each has
+an assertion that fails when it regresses.
+
+### One topic, and the case of the id is load-bearing
+
+The topic is **`peer:<person_id>`** and the suffix is the session's own person —
+`admitted/3` matches it against the joining scope with a repeated variable. It
+was the bare string `"peer"` before U8's review, which put every person's peer
+channel in the cluster into one Phoenix group; anything written against that
+shape is wrong.
+
+Every event names its conversation **in the payload and never in the topic**
+(KTD10), so one channel carries every conversation, conversations are not part
+of `max_channels_per_transport`, and opening a second conversation opens no
+second topic. `peers.test.tsx` asserts `socket.channels` stays at one across
+two open conversations.
+
+The id is lowercased before it becomes a topic, and the consequence of not doing
+it is worse here than for a room. `Ecto.UUID.cast/1` downcases, so an uppercase
+suffix still matches the session's own person and the join **succeeds** — but
+`Phoenix.Channel.Server` subscribes the channel to the literal string, and
+`Peers.topic/1` publishes to the lowercase one. The channel would answer every
+push and receive no announcement at all, for the whole session, with nothing
+refused and nothing logged. A room in the wrong case loses one room's fan-out;
+this loses the surface's.
+
+### Nothing about who you know is written to this browser
+
+There is no store, no `localStorage` key, and nothing added to
+`SessionProvider`'s `onSessionEnded`. The rooms keep a bookmark file because no
+endpoint or event enumerates rooms; `PeerChannel` has `list_peers`,
+`list_requests` and `list_conversations`, so there is nothing this surface would
+have to write down in order to render itself.
+
+That is the answer to the question the room review raised — "if you persist
+anything about peers, it clears on session end too" — arrived at from the other
+end: peer data is a graph of who a worker knows, which is more sensitive than
+which venue they worked at, and the reason none of it survives a log-out on a
+shared terminal is that none of it was ever stored.
+
+### An announcement is a nudge; the list is the answer
+
+Four of the five pushes are **not** applied to local state. `peer_request`,
+`peer_request_declined`, `peer_connected` and `peer_disconnected` cause the
+affected list to be asked for again.
+
+That is the only correct reading rather than a shortcut. A notice carries ids
+and an instant; a request's `state` is derived **per read** from whether the
+pair can see each other at that instant — `lapsed` is R14's "expired" and
+nothing stores it — so this client cannot work out what a notice means for a
+request's state without asking. Re-asking is also what makes the surface correct
+after a reconnect, where notices were missed entirely.
+
+`peer_message` is the exception and is applied directly, because the notice
+carries the whole message. It is also the one shape where **the push and the
+reply disagree about a key**: `rendered_message/1` says `sent_at` and the push
+says `at`, because a push is `Peers`' announcement shape and every announcement
+on that topic stamps its instant as `at`. There are two decoders and one type,
+and `decode.ts` refuses each key where the other belongs — a single decoder with
+a fallback would also accept a payload carrying neither.
+
+Every action refreshes as well as listening, because `announce/2` is best effort
+and logged rather than propagated. Both paths are idempotent reads, which is
+what makes running both harmless rather than something to be careful about.
+
+### A closed conversation is asked about, not remembered
+
+This is the one real difference from the rooms. A room has to **remember**
+`room_closed`, because nothing on the wire carries a shift room's `closes_at`
+and the only way to learn it is to lose a message — hence `RoomStore` persisting
+the bar and the "Check again" that unlearns a guess which can go stale in both
+directions.
+
+Here `list_conversations` carries `open` for every conversation. So a send
+refused `conflict` re-asks and renders what comes back: nothing is inferred,
+nothing is stored, and there is nothing to un-learn. A disconnect does **not**
+leave the topic either — the topic is the person, not the conversation, and
+leaving would take every other conversation down with it. `peers.test.tsx`
+asserts `channel.leaves === 0` after a disconnect and then sends into a second
+conversation on the same channel.
+
+### What the peer surface deliberately does not decide
+
+- **Who may ask whom.** That is `Peers.permitted/3`, read off the pair's one
+  current request row, which this client does not hold and cannot reconstruct: a
+  block is a column on that row, it survives new co-rostering, and it is cleared
+  by an exchange this surface may never have seen. The ask is offered unless the
+  client is already holding a pending approach or an open conversation, and
+  `forbidden` is rendered as the sentence it is.
+- **Whether a request has expired.** `lapsed` is derived server-side and can go
+  back to `pending`. A lapsed incoming request keeps both buttons: accepting is
+  refused `gone` with a sentence saying it can come back, and declining is
+  accepted at any time, because an addressee may always say no.
+- **No withdraw.** `Peers` has no `withdraw_request/2` and says why — declining
+  blocks the requester by design, so a non-blocking withdrawal is a rate-limiting
+  decision (issue #15). There is no event, so there is no button.
+- **No profile, disclosure, or attested entries.** U9 owns those and was being
+  written at the same time as this; guessing at its shapes would be a
+  placeholder for a surface nobody has chosen.
 
 ## Deliberately absent, and why
 
 Nothing below is stubbed. A placeholder for a shape nobody has chosen costs the
 next unit more to find and undo than it costs to write from nothing.
 
-| Surface                                        | Waiting on | What is missing                                      |
-| ---------------------------------------------- | ---------- | ---------------------------------------------------- |
-| Peer directory, requests, peer conversations   | U8         | Endpoints and the multiplexed person channel (KTD10) |
-| Profile, attested entries, disclosure controls | U9         | Endpoints, and the per-employer view                 |
-| Archived engagements, erasure                  | U10        | Endpoints                                            |
-| Demo controls                                  | U11        | The control surface, which is not employer-scoped    |
+| Surface                                        | Waiting on | What is missing                                   |
+| ---------------------------------------------- | ---------- | ------------------------------------------------- |
+| Profile, attested entries, disclosure controls | U9         | Endpoints, and the per-employer view              |
+| Archived engagements, erasure                  | U10        | Endpoints                                         |
+| Demo controls                                  | U11        | The control surface, which is not employer-scoped |
 
 `lib/hospitality_coms_web/router.ex` still declares four API routes plus the dev
 mailbox preview, and those four are exactly what `src/api/` covers. U5 and U6
 built contexts, not endpoints: there is no HTTP surface for engagements, rooms,
-messages or rosters, which is why the room list is local.
+messages or rosters, which is why the room list is local. U8 built no endpoint
+either — the peer surface is entirely `PeerChannel`, which is why it needs no
+list held in this browser.
 
 ### Things that were tempting to guess, and were not
 
