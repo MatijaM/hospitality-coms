@@ -171,10 +171,12 @@
           # a unit of work and may therefore capture the instant; everything
           # else takes it from the scope. `PersonAuth` is the HTTP boundary: it
           # reads the clock once per request in `fetch_person_scope/2` and puts
-          # the result on the scope. The three workers are the job boundary —
+          # the result on the scope. The four workers are the job boundary —
           # one attempt is one unit of work (KTD5), and a retry is a new one
           # that correctly reads the clock again, which for `RetentionSweeper`
-          # is what makes a deadline that passed in the meantime get swept.
+          # is what makes a deadline that passed in the meantime get swept and
+          # for `AccountReaper` is what makes a token whose fifteen minutes
+          # elapsed while the attempt was failing get reaped by the retry.
           # `ChannelAuth` is U7's: a channel's
           # unit of work is one inbound event, not the connection and not the
           # join, so it reads the clock on every `join/3` and every
@@ -195,12 +197,19 @@
           # `HospitalityComsWeb.DemoController` deliberately reads no clock, so
           # that an HTTP request and the control it invokes cannot disagree
           # about when they are.
+          #
+          # `HospitalityComsWeb.LoginRateLimit` is deliberately **not** on the
+          # list either, and for the same reason: it is a plug behind
+          # `fetch_person_scope`, so it derives its window from the instant
+          # already on the scope. A limiter that read its own clock could refuse
+          # a request for a window the request itself is not in.
           {HospitalityComs.Credo.Check.ClockAuthority,
            files: %{included: ["lib/", "dev_support/"]},
            boundary_modules: [
              HospitalityComsWeb.PersonAuth,
              HospitalityComsWeb.ChannelAuth,
              HospitalityComs.Demo,
+             HospitalityComs.Workers.AccountReaper,
              HospitalityComs.Workers.EngagementSweeper,
              HospitalityComs.Workers.ExpireEngagement,
              HospitalityComs.Workers.RetentionSweeper

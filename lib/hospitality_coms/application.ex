@@ -18,6 +18,10 @@ defmodule HospitalityComs.Application do
       # existed would have a channel calling `track/3` against a missing
       # process. The name it is registered under is the module's own.
       HospitalityComsWeb.Presence,
+      # Before the endpoint, because it owns the ETS table the log-in limiter
+      # writes to and a request that arrived first would find no table. It
+      # depends on neither repo — the counter is in memory and node-local.
+      HospitalityComsWeb.LoginRateLimit,
       # After both repos, because Oban connects on start, and before the
       # endpoint, because a request that enqueues a job needs somewhere to
       # enqueue it. In `:test` the configuration is `testing: :manual`, so this
