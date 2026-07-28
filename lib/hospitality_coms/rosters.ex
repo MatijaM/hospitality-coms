@@ -58,39 +58,61 @@ defmodule HospitalityComs.Rosters do
   ## Only this venue's engagements
 
   The engagement a roster entry names is resolved against the database inside
-  the transaction, at the scope's instant and at the scope's venue, so an
-  engagement belonging to another venue or one whose term has closed is
-  `{:error, :not_found}` — the same answer an id that names nothing gets, so the
-  refusal enumerates nothing. The composite foreign key refuses the same thing
-  underneath, whatever this module believes.
+  the transaction, at the scope's venue, so an engagement belonging to another
+  venue is `{:error, :not_found}`. The composite foreign key refuses the same
+  thing underneath, whatever this module believes.
 
-  ## Known limitation: a hire who has not started yet cannot be rostered
+  ## Next week's hire goes on next week's rota
 
-  `add_to_roster/3` requires the engagement to be active at the *scope's
-  instant*, and "active" is half-open containment of that instant. A person who
-  claimed an invitation whose term opens next Monday therefore cannot be put on
-  next Tuesday's shift today, even though the roster entry created would be
-  `[today, ∞)` and would overlap Tuesday's room perfectly well.
+  `add_to_roster/3` takes an engagement whose **term has not closed** at the
+  scope's instant — active *or not yet started* — which is
+  `HospitalityComs.Engagements.Records.not_ended_by/2` and is exactly the target
+  set `HospitalityComs.Engagements.end_engagement/2` uses, for the reason U5
+  widened that one: an engagement that has not opened is a different state from
+  one that has closed, and a predicate written for the second excluded the first
+  as a side effect.
 
-  Two things about it are worth writing down rather than leaving to be
-  rediscovered:
+  It used to require the engagement to be *active*, so a person who claimed an
+  invitation whose term opens next Monday could not be put on next Tuesday's
+  shift today — even though the entry created would be `[today, ∞)` and would
+  overlap Tuesday's room perfectly well. The operator had to wait for the
+  engagement to open before building the rota that engagement exists for.
 
-    * the reasoning the paragraph above gives — "somebody who no longer works
-      there does not work the shift" — is about the *closed* case. It says
-      nothing about the not-yet-open case, which is a different state that the
-      same predicate happens to exclude;
-    * the refusal is `{:error, :not_found}`, indistinguishable from a bad id, so
-      an operator building next week's rota cannot learn why a name they can see
-      elsewhere will not go on it.
+  **Nothing depended on the write-time check, and that is measured rather than
+  assumed.** Membership and readability both intersect the roster with an
+  engagement active *at the instant asked about* —
+  `HospitalityComs.Rooms.Records.shift_room_members/2`, `shift_room_readers/2`
+  and `readable_shift_rooms/2` all compose
+  `HospitalityComs.Engagements.Records.active_at/2` — so an entry belonging to a
+  term that has not opened confers no membership, no readability and no room in
+  the person's own list until it does. `HospitalityComs.RostersTest` asserts
+  that against a real rostering rather than leaving it to this paragraph.
 
-  Nothing here depends on the restriction. Membership and readability both
-  intersect the roster with an engagement active *at the instant asked about*
-  (`HospitalityComs.Rooms.Records.shift_room_members/2` and
-  `shift_room_readers/2`), so an entry belonging to an engagement that has not
-  started confers nothing until it does — which is the property the check at
-  write time was presumably meant to deliver, delivered by the read instead.
-  Left as it is deliberately, and filed rather than fixed: widening it is a
-  product decision about when a rota may be built, not a bug fix.
+  **One residue, and it is the price of one spelling.** "The term has not
+  closed" is `ends_at > instant`, so it also admits an engagement that was
+  *ended before it opened* — `end_engagement/2` produces `ends_at == starts_at`,
+  and where that instant is in the future the empty term is still ahead of now.
+  Such an entry confers nothing at any instant, because the empty range is
+  active at none, and `remove_from_roster/3` closes it like any other. Excluding
+  it would take a non-emptiness clause this predicate does not otherwise need
+  and would make the set `add_to_roster/3` accepts differ from the set
+  `end_engagement/2` targets, which is how one concept comes to have two
+  spellings.
+
+  ## The refusal stays `:not_found`, and that is a decision
+
+  An engagement at another venue, a term that has closed, and an id that names
+  nothing all get `{:error, :not_found}` — identically, so the refusal
+  enumerates nothing (AE1). That is deliberate and is not the leftover of the
+  bug above: a caller who could tell "no such engagement" from "that engagement
+  cannot be rostered" could walk a venue's engagement ids one refusal at a time,
+  and the shift room id in the same call is the other half of the same
+  disclosure.
+
+  Whether an operator acting *inside their own venue* deserves a distinguishable
+  reason is a real question and a **product** one, not an implementation one:
+  the answer changes what a manager may learn by asking, and issue #24 raises it
+  without deciding it. Left as `:not_found` here.
   """
 
   import Ecto.Query
@@ -122,7 +144,13 @@ defmodule HospitalityComs.Rosters do
 
   `joined_at` is the instant of *this call*, not the shift's start. That is what
   makes a rostering undone before the shift begins a period that never overlaps
-  the room — see `remove_from_roster/3`.
+  the room — see `remove_from_roster/3`. It is also why a hire whose term opens
+  next Monday can be rostered today: the entry opens now, the engagement opens
+  Monday, and membership is the intersection.
+
+  The engagement's term must not have **closed** at the scope's instant; it need
+  not have opened. See the moduledoc for what that widening rests on and for the
+  one state it admits as a consequence.
 
   Refuses a scope with no grant by function clause.
   """
@@ -321,15 +349,19 @@ defmodule HospitalityComs.Rosters do
     |> found_room()
   end
 
-  # At the scope's instant and at the scope's venue. An engagement whose term
-  # has closed cannot be rostered onto a shift: the roster is a statement about
-  # who works, and somebody who no longer works there does not.
+  # At the scope's venue, and on a term that has not closed by the scope's
+  # instant. An engagement whose term has closed cannot be rostered onto a
+  # shift: the roster is a statement about who works, and somebody who no longer
+  # works there does not. One that has not opened *yet* is a different state —
+  # it is the rota being built in advance, which is what a rota is for — and
+  # `not_ended_by/2` is the same predicate `end_engagement/2` targets rather
+  # than a second spelling of "not closed".
   @spec fetch_engagement(EmployerScope.t(), Ecto.UUID.t()) ::
           {:ok, Engagement.t()} | {:error, :not_found}
   defp fetch_engagement(scope, engagement_id) do
     Engagement
     |> EngagementRecords.of_venue(scope.venue_id)
-    |> EngagementRecords.active_at(scope.now)
+    |> EngagementRecords.not_ended_by(scope.now)
     |> where([engagement], engagement.id == ^engagement_id)
     |> EmployerRepo.one()
     |> found_engagement()

@@ -88,9 +88,14 @@ defmodule HospitalityComs.Engagements.Records do
 
   The exact complement of `ended_by/2`, and wider than `active_at/2` by one
   state: an engagement that has been claimed and has not started yet is in this
-  set and not in that one. `HospitalityComs.Engagements.end_engagement/2` is
-  the only caller that wants the wider set, because a term it can still move is
-  a term it can still close.
+  set and not in that one.
+
+  Two callers want the wider set, and it is the same extra state both times.
+  `HospitalityComs.Engagements.end_engagement/2`, because a term it can still
+  move is a term it can still close. `HospitalityComs.Rosters.add_to_roster/3`,
+  because a hire whose term opens next Monday is exactly who next Tuesday's rota
+  is being built for — and a roster entry confers nothing until the engagement
+  it names is active anyway, since every read intersects `active_at/2`.
   """
   @spec not_ended_by(Ecto.Queryable.t(), DateTime.t()) :: Ecto.Query.t()
   def not_ended_by(queryable, %DateTime{} = instant) do
