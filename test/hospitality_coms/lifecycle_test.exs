@@ -231,14 +231,15 @@ defmodule HospitalityComs.LifecycleTest do
 
     test "deletes every token, so the session no longer authenticates" do
       %{person: person} = engaged()
-      token = Accounts.generate_person_session_token(person.person, @now)
+      token = Accounts.generate_person_session_token(PersonScope.for_person(person.person, @now))
 
-      assert {%Person{}, _at} = Accounts.get_person_by_session_token(token, @now)
+      assert {%Person{}, _at} =
+               Accounts.get_person_by_session_token(PersonScope.for_person(nil, @now), token)
 
       assert {:ok, %{tokens: tokens}} = Lifecycle.erase_person(person_at(person, @now))
       assert length(tokens) == 1
 
-      assert Accounts.get_person_by_session_token(token, @now) == nil
+      assert Accounts.get_person_by_session_token(PersonScope.for_person(nil, @now), token) == nil
       assert Repo.all(from(t in PersonToken, where: t.person_id == ^person.person.id)) == []
     end
 
@@ -873,12 +874,14 @@ defmodule HospitalityComs.LifecycleTest do
       # no failures. So the fixture populates every table first and the emptiness
       # check below is what stops it going vacuous again.
       %{person: person} = populated()
-      token = Accounts.generate_person_session_token(person.person, @now)
+      token = Accounts.generate_person_session_token(PersonScope.for_person(person.person, @now))
 
       before = table_counts()
       assert unpopulated(before) == @unpopulatable
 
-      assert {:ok, [_deleted]} = Accounts.delete_person_session_token(token)
+      assert {:ok, [_deleted]} =
+               Accounts.delete_person_session_token(PersonScope.for_person(nil, @now), token)
+
       after_log_out = table_counts()
 
       changed =

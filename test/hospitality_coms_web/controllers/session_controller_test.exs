@@ -92,7 +92,7 @@ defmodule HospitalityComsWeb.SessionControllerTest do
       conn = post(conn, ~p"/api/log-in", %{"email" => email})
 
       assert json_response(conn, 202) == %{"status" => "sent"}
-      assert %Person{} = person = Accounts.get_person_by_email(email)
+      assert %Person{} = person = Accounts.get_person_by_email(anonymous_scope(@now), email)
       assert is_nil(person.confirmed_at)
       assert [%PersonToken{context: "login"}] = Repo.all_by(PersonToken, person_id: person.id)
     end
@@ -164,7 +164,8 @@ defmodule HospitalityComsWeb.SessionControllerTest do
 
       post(build_conn(), ~p"/api/log-in/token", %{"token" => token})
 
-      assert %Person{confirmed_at: %DateTime{}} = Accounts.get_person_by_email(email)
+      assert %Person{confirmed_at: %DateTime{}} =
+               Accounts.get_person_by_email(anonymous_scope(@now), email)
     end
 
     test "refuses a second redemption of the same link", %{conn: conn} do

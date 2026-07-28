@@ -49,6 +49,7 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
   alias Ecto.Adapters.SQL.Sandbox
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.Person
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Repo
 
@@ -69,7 +70,13 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
       {encoded_token, token_id} = login_token(person)
 
       results =
-        race(2, fn -> Accounts.login_person_by_magic_link(encoded_token, @now) end, token_id)
+        race(
+          2,
+          fn ->
+            Accounts.login_person_by_magic_link(PersonScope.for_person(nil, @now), encoded_token)
+          end,
+          token_id
+        )
 
       assert_one_winner(results)
     end
@@ -79,7 +86,13 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
       {encoded_token, token_id} = login_token(person)
 
       results =
-        race(2, fn -> Accounts.login_person_by_magic_link(encoded_token, @now) end, token_id)
+        race(
+          2,
+          fn ->
+            Accounts.login_person_by_magic_link(PersonScope.for_person(nil, @now), encoded_token)
+          end,
+          token_id
+        )
 
       assert_one_winner(results)
       assert %Person{confirmed_at: %DateTime{}} = Repo.get!(Person, person.id)
@@ -89,9 +102,18 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
       person = confirmed_person()
       {encoded_token, token_id} = login_token(person)
 
-      race(2, fn -> Accounts.login_person_by_magic_link(encoded_token, @now) end, token_id)
+      race(
+        2,
+        fn ->
+          Accounts.login_person_by_magic_link(PersonScope.for_person(nil, @now), encoded_token)
+        end,
+        token_id
+      )
 
-      refute Accounts.get_person_by_magic_link_token(encoded_token, @now)
+      refute Accounts.get_person_by_magic_link_token(
+               PersonScope.for_person(nil, @now),
+               encoded_token
+             )
     end
   end
 
@@ -100,7 +122,14 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
       email = unique_email()
       winner = start_uncommitted_registration(email)
 
-      task = detached(fn -> Accounts.request_login_instructions(email, url_builder(), @now) end)
+      task =
+        detached(fn ->
+          Accounts.request_login_instructions(
+            PersonScope.for_person(nil, @now),
+            email,
+            url_builder()
+          )
+        end)
 
       try do
         await_blocked(backend_pids(1))
@@ -117,14 +146,22 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
 
     test "still refuses an address that is not an address" do
       assert {:error, %Ecto.Changeset{}} =
-               Accounts.request_login_instructions("not an address", url_builder(), @now)
+               Accounts.request_login_instructions(
+                 PersonScope.for_person(nil, @now),
+                 "not an address",
+                 url_builder()
+               )
     end
 
     test "still refuses an address nobody could hold" do
       too_long = String.duplicate("a", 160) <> "@" <> @domain
 
       assert {:error, changeset} =
-               Accounts.request_login_instructions(too_long, url_builder(), @now)
+               Accounts.request_login_instructions(
+                 PersonScope.for_person(nil, @now),
+                 too_long,
+                 url_builder()
+               )
 
       assert [_message | _rest] = Keyword.get_values(changeset.errors, :email)
       assert Repo.aggregate(from(p in Person, where: p.email == ^too_long), :count) == 0

@@ -52,6 +52,7 @@ defmodule HospitalityComsWeb.ChannelCase do
   alias Ecto.Adapters.SQL.Sandbox
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.Person
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Clock
   alias HospitalityComs.EmployerRepo
   alias HospitalityComs.EngagementsFixtures
@@ -101,7 +102,8 @@ defmodule HospitalityComsWeb.ChannelCase do
   @spec session_token(Person.t(), DateTime.t()) :: String.t()
   def session_token(%Person{} = person, %DateTime{} = now) do
     person
-    |> Accounts.generate_person_session_token(now)
+    |> PersonScope.for_person(now)
+    |> Accounts.generate_person_session_token()
     |> PersonAuth.encode_token()
   end
 

@@ -12,16 +12,23 @@ defmodule HospitalityComs.Accounts.PersonScope do
   where forgetting it is silent and where every new function has to remember it
   again.
 
-  What the split delivers today is that refusal being *available*, not it being
-  in force. `HospitalityComs.Accounts.sudo_mode?/2` is the only function that
-  takes a scope; every other one in that context still takes a bare address, a
-  bare token, or a bare `DateTime`, so an employer caller reaches them by
-  passing `employer_scope.now` and no clause turns it away. Converting them is
-  a change to the whole of the person zone's public API and is not this unit's;
-  until it happens, the sentence to keep in mind is that `Accounts` reads and
-  writes through `HospitalityComs.Repo`, which holds every privilege, and the
-  thing standing between an employer session and person data is the grant on
-  `HospitalityComs.EmployerRepo`'s role rather than the shape of an argument.
+  That refusal is in force across the person zone as of #18: every
+  `HospitalityComs.Accounts` function that reaches a repo heads on this struct,
+  as `Peers`, `Profiles`, `Rooms`, `Engagements` and `Lifecycle` already did.
+  For most of U3's life it was *available* rather than in force —
+  `Accounts.sudo_mode?/2` was the only function taking a scope and it reads no
+  data, so an employer caller reached the whole context by passing
+  `employer_scope.now`.
+
+  It is still not the boundary, and the sentence to keep in mind has not
+  changed: `Accounts` reads and writes through `HospitalityComs.Repo`, which
+  holds every privilege, so an employer caller who *constructs* one of these
+  from their own instant reaches everything behind it. What stands between an
+  employer session and person data is the grant on
+  `HospitalityComs.EmployerRepo`'s role. What the struct buys is that reaching
+  the person zone from an employer session is now a deliberate line somebody
+  wrote rather than an argument that happened to typecheck —
+  `boundary_test.exs` asserts both halves.
 
   It carries the instant for the reason `Clock` exists (KTD5): the instant is
   captured once at a unit-of-work boundary — an HTTP request, one inbound
@@ -36,6 +43,21 @@ defmodule HospitalityComs.Accounts.PersonScope do
   person yet. `person` is nil in that case, and
   `HospitalityComsWeb.PersonAuth.require_authenticated_person/2` is what turns
   that into a refusal.
+
+  ## The anonymous form is a requirement, not a concession
+
+  It is what made #18 possible at all. A scope answers three questions — which
+  zone, when, and sometimes who — and the refusal by function clause is about
+  the first, which is answerable before the third is. So the person zone's
+  anonymous half takes one of these too: registration, magic-link redemption
+  and every credential lookup head on `%PersonScope{}` with the person
+  unconstrained, and their subject arrives as an argument.
+
+  `HospitalityComs.Accounts.get_person_by_session_token/2` is the sharp case —
+  it is the call that *produces* the person a scope will carry, so an
+  authenticated scope would be circular. `HospitalityComsWeb.PersonAuth`
+  therefore builds an anonymous scope from the request's instant, authenticates
+  with it, and builds the request's real scope from the answer.
   """
 
   alias HospitalityComs.Accounts.Person

@@ -28,52 +28,58 @@ defmodule HospitalityComs.AccountsTest do
 
   describe "get_person_by_email/1" do
     test "does not return the person if the email does not exist" do
-      refute Accounts.get_person_by_email("unknown@example.com")
+      refute Accounts.get_person_by_email(anonymous_scope(@now), "unknown@example.com")
     end
 
     test "returns the person if the email exists" do
       %Person{id: id} = person = person_fixture()
 
-      assert %Person{id: ^id} = Accounts.get_person_by_email(person.email)
+      assert %Person{id: ^id} = Accounts.get_person_by_email(anonymous_scope(@now), person.email)
     end
 
     test "matches an address case-insensitively" do
       person = person_fixture(%{email: "Casing#{System.unique_integer([:positive])}@Example.com"})
 
-      assert %Person{id: id} = Accounts.get_person_by_email(String.downcase(person.email))
+      assert %Person{id: id} =
+               Accounts.get_person_by_email(anonymous_scope(@now), String.downcase(person.email))
+
       assert id == person.id
     end
   end
 
   describe "register_person/1" do
     test "requires an email" do
-      {:error, changeset} = Accounts.register_person(%{}, @now)
+      {:error, changeset} = Accounts.register_person(anonymous_scope(@now), %{})
 
       assert %{email: ["can't be blank"]} = errors_on(changeset)
     end
 
     test "validates the email's shape and length" do
-      {:error, changeset} = Accounts.register_person(%{email: "not valid"}, @now)
+      {:error, changeset} = Accounts.register_person(anonymous_scope(@now), %{email: "not valid"})
       assert %{email: ["must have the @ sign and no spaces"]} = errors_on(changeset)
 
       too_long = String.duplicate("a", 160) <> "@example.com"
-      {:error, changeset} = Accounts.register_person(%{email: too_long}, @now)
+      {:error, changeset} = Accounts.register_person(anonymous_scope(@now), %{email: too_long})
       assert "should be at most 160 character(s)" in errors_on(changeset).email
     end
 
     test "refuses an address a live person already holds" do
       %{email: email} = person_fixture()
 
-      {:error, changeset} = Accounts.register_person(%{email: email}, @now)
+      {:error, changeset} = Accounts.register_person(anonymous_scope(@now), %{email: email})
       assert "has already been taken" in errors_on(changeset).email
 
-      {:error, changeset} = Accounts.register_person(%{email: String.upcase(email)}, @now)
+      {:error, changeset} =
+        Accounts.register_person(anonymous_scope(@now), %{email: String.upcase(email)})
+
       assert "has already been taken" in errors_on(changeset).email
     end
 
     test "registers people without a password and unconfirmed" do
       email = unique_person_email()
-      {:ok, person} = Accounts.register_person(valid_person_attributes(%{email: email}), @now)
+
+      {:ok, person} =
+        Accounts.register_person(anonymous_scope(@now), valid_person_attributes(%{email: email}))
 
       assert person.email == email
       assert is_nil(person.confirmed_at)
@@ -82,7 +88,7 @@ defmodule HospitalityComs.AccountsTest do
     end
 
     test "stamps the row from the unit of work's instant, not from the wall" do
-      {:ok, person} = Accounts.register_person(valid_person_attributes(), @now)
+      {:ok, person} = Accounts.register_person(anonymous_scope(@now), valid_person_attributes())
       stamped_at = DateTime.truncate(@now, :second)
 
       # Ecto's own `timestamps()` autogenerate calls `DateTime.utc_now/0`
@@ -99,10 +105,10 @@ defmodule HospitalityComs.AccountsTest do
   describe "request_login_instructions/3" do
     test "creates a person and a login token for an address nobody holds" do
       email = unique_person_email()
-      refute Accounts.get_person_by_email(email)
+      refute Accounts.get_person_by_email(anonymous_scope(@now), email)
 
       assert {:ok, %Person{} = person} =
-               Accounts.request_login_instructions(email, url_builder(), @now)
+               Accounts.request_login_instructions(anonymous_scope(@now), email, url_builder())
 
       assert person.email == email
       assert is_nil(person.confirmed_at)
@@ -117,7 +123,8 @@ defmodule HospitalityComs.AccountsTest do
     test "delivers a confirmation email carrying the link" do
       email = unique_person_email()
 
-      {:ok, _person} = Accounts.request_login_instructions(email, url_builder(), @now)
+      {:ok, _person} =
+        Accounts.request_login_instructions(anonymous_scope(@now), email, url_builder())
 
       assert_received {:email, %Swoosh.Email{subject: "Confirmation instructions"} = delivered}
       assert delivered.text_body =~ "http://localhost/log-in/"
@@ -126,7 +133,8 @@ defmodule HospitalityComs.AccountsTest do
     test "delivers log-in instructions, not a confirmation, to a confirmed person" do
       person = person_fixture()
 
-      {:ok, _person} = Accounts.request_login_instructions(person.email, url_builder(), @now)
+      {:ok, _person} =
+        Accounts.request_login_instructions(anonymous_scope(@now), person.email, url_builder())
 
       # The everyday repeat log-in. Only the first-time branch was asserted, so
       # the notifier could have sent "Confirmation instructions" to somebody
@@ -140,7 +148,11 @@ defmodule HospitalityComs.AccountsTest do
       person = person_fixture()
 
       assert {:ok, returned} =
-               Accounts.request_login_instructions(person.email, url_builder(), @now)
+               Accounts.request_login_instructions(
+                 anonymous_scope(@now),
+                 person.email,
+                 url_builder()
+               )
 
       assert returned.id == person.id
       assert Repo.aggregate(from(p in Person, where: p.email == ^person.email), :count) == 1
@@ -149,7 +161,11 @@ defmodule HospitalityComs.AccountsTest do
 
     test "does not create a person for an address that is not an address" do
       assert {:error, changeset} =
-               Accounts.request_login_instructions("not an address", url_builder(), @now)
+               Accounts.request_login_instructions(
+                 anonymous_scope(@now),
+                 "not an address",
+                 url_builder()
+               )
 
       assert %{email: ["must have the @ sign and no spaces"]} = errors_on(changeset)
       assert Repo.aggregate(PersonToken, :count) == 0
@@ -165,26 +181,32 @@ defmodule HospitalityComs.AccountsTest do
     end
 
     test "returns the person for a live token", %{person: person, token: token} do
-      assert found = Accounts.get_person_by_magic_link_token(token, @now)
+      assert found = Accounts.get_person_by_magic_link_token(anonymous_scope(@now), token)
       assert found.id == person.id
     end
 
     test "does not return the person for a token that is not a token" do
-      refute Accounts.get_person_by_magic_link_token("oops", @now)
+      refute Accounts.get_person_by_magic_link_token(anonymous_scope(@now), "oops")
     end
 
     test "does not return the person once the row is gone", %{token: token} do
-      assert Accounts.get_person_by_magic_link_token(token, @now)
+      assert Accounts.get_person_by_magic_link_token(anonymous_scope(@now), token)
       assert {1, _returned} = Repo.delete_all(PersonToken)
-      refute Accounts.get_person_by_magic_link_token(token, @now)
+      refute Accounts.get_person_by_magic_link_token(anonymous_scope(@now), token)
     end
 
     test "is still live one second short of fifteen minutes", %{token: token} do
-      assert Accounts.get_person_by_magic_link_token(token, DateTime.add(@now, 899, :second))
+      assert Accounts.get_person_by_magic_link_token(
+               anonymous_scope(DateTime.add(@now, 899, :second)),
+               token
+             )
     end
 
     test "is expired at fifteen minutes", %{token: token} do
-      refute Accounts.get_person_by_magic_link_token(token, DateTime.add(@now, 15, :minute))
+      refute Accounts.get_person_by_magic_link_token(
+               anonymous_scope(DateTime.add(@now, 15, :minute)),
+               token
+             )
     end
 
     test "stops verifying once the person's address changes", %{person: person, token: token} do
@@ -196,7 +218,7 @@ defmodule HospitalityComs.AccountsTest do
       |> Ecto.Changeset.change(email: unique_person_email())
       |> Repo.update!()
 
-      refute Accounts.get_person_by_magic_link_token(token, @now)
+      refute Accounts.get_person_by_magic_link_token(anonymous_scope(@now), token)
     end
   end
 
@@ -206,7 +228,7 @@ defmodule HospitalityComs.AccountsTest do
       {encoded_token, _hashed_token} = generate_person_magic_link_token(person, @now)
 
       assert {:ok, {confirmed, [_expired]}} =
-               Accounts.login_person_by_magic_link(encoded_token, @now)
+               Accounts.login_person_by_magic_link(anonymous_scope(@now), encoded_token)
 
       assert confirmed.confirmed_at == DateTime.truncate(@now, :second)
       assert Repo.aggregate(PersonToken, :count) == 0
@@ -214,21 +236,26 @@ defmodule HospitalityComs.AccountsTest do
 
     test "logs a confirmed person in and consumes only the link" do
       person = person_fixture()
-      session_token = Accounts.generate_person_session_token(person, @now)
+      session_token = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
       {encoded_token, _hashed_token} = generate_person_magic_link_token(person, @now)
 
-      assert {:ok, {returned, []}} = Accounts.login_person_by_magic_link(encoded_token, @now)
+      assert {:ok, {returned, []}} =
+               Accounts.login_person_by_magic_link(anonymous_scope(@now), encoded_token)
+
       assert returned.id == person.id
       assert login_tokens(person) == []
-      assert Accounts.get_person_by_session_token(session_token, @now)
+      assert Accounts.get_person_by_session_token(anonymous_scope(@now), session_token)
     end
 
     test "cannot redeem the same link twice" do
       person = person_fixture()
       {encoded_token, _hashed_token} = generate_person_magic_link_token(person, @now)
 
-      assert {:ok, {_person, _expired}} = Accounts.login_person_by_magic_link(encoded_token, @now)
-      assert {:error, :not_found} = Accounts.login_person_by_magic_link(encoded_token, @now)
+      assert {:ok, {_person, _expired}} =
+               Accounts.login_person_by_magic_link(anonymous_scope(@now), encoded_token)
+
+      assert {:error, :not_found} =
+               Accounts.login_person_by_magic_link(anonymous_scope(@now), encoded_token)
     end
 
     test "cannot redeem an expired link" do
@@ -236,13 +263,17 @@ defmodule HospitalityComs.AccountsTest do
       {encoded_token, _hashed_token} = generate_person_magic_link_token(person, @now)
 
       assert {:error, :not_found} =
-               Accounts.login_person_by_magic_link(encoded_token, DateTime.add(@now, 15, :minute))
+               Accounts.login_person_by_magic_link(
+                 anonymous_scope(DateTime.add(@now, 15, :minute)),
+                 encoded_token
+               )
 
       assert length(login_tokens(person)) == 1
     end
 
     test "cannot redeem a token that is not base64url" do
-      assert {:error, :not_found} = Accounts.login_person_by_magic_link("not a token", @now)
+      assert {:error, :not_found} =
+               Accounts.login_person_by_magic_link(anonymous_scope(@now), "not a token")
     end
   end
 
@@ -252,7 +283,7 @@ defmodule HospitalityComs.AccountsTest do
     end
 
     test "stores the token stamped with the unit of work's instant", %{person: person} do
-      token = Accounts.generate_person_session_token(person, @now)
+      token = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
 
       assert %PersonToken{context: "session", inserted_at: inserted_at, person_id: person_id} =
                Repo.get_by(PersonToken, token: PersonToken.hash_token(token))
@@ -262,7 +293,7 @@ defmodule HospitalityComs.AccountsTest do
     end
 
     test "stores the digest and never the credential itself", %{person: person} do
-      token = Accounts.generate_person_session_token(person, @now)
+      token = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
 
       assert %PersonToken{token: stored} =
                Repo.one(from(t in PersonToken, where: t.context == "session"))
@@ -274,8 +305,8 @@ defmodule HospitalityComs.AccountsTest do
     end
 
     test "issues a distinct token every time", %{person: person} do
-      first = Accounts.generate_person_session_token(person, @now)
-      second = Accounts.generate_person_session_token(person, @now)
+      first = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
+      second = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
 
       refute first == second
     end
@@ -284,46 +315,57 @@ defmodule HospitalityComs.AccountsTest do
   describe "get_person_by_session_token/2" do
     setup do
       person = person_fixture()
-      %{person: person, token: Accounts.generate_person_session_token(person, @now)}
+
+      %{
+        person: person,
+        token: Accounts.generate_person_session_token(person_scope_fixture(person, @now))
+      }
     end
 
     test "returns the person for a live token", %{person: person, token: token} do
-      assert {found, inserted_at} = Accounts.get_person_by_session_token(token, @now)
+      assert {found, inserted_at} =
+               Accounts.get_person_by_session_token(anonymous_scope(@now), token)
+
       assert found.id == person.id
       assert inserted_at == DateTime.truncate(@now, :second)
     end
 
     test "does not return a person for a token nobody issued" do
-      refute Accounts.get_person_by_session_token("nonsense", @now)
+      refute Accounts.get_person_by_session_token(anonymous_scope(@now), "nonsense")
     end
 
     test "is still live one second short of fourteen days", %{token: token} do
       # The boundary the `ago/2` rewrite could have moved by a second without
       # anything noticing. A day either side of it proves nothing.
       assert Accounts.get_person_by_session_token(
-               token,
-               DateTime.add(@now, 14 * 86_400 - 1, :second)
+               anonymous_scope(DateTime.add(@now, 14 * 86_400 - 1, :second)),
+               token
              )
     end
 
     test "is expired at fourteen days", %{token: token} do
-      refute Accounts.get_person_by_session_token(token, DateTime.add(@now, 14, :day))
+      refute Accounts.get_person_by_session_token(
+               anonymous_scope(DateTime.add(@now, 14, :day)),
+               token
+             )
     end
 
     test "stops verifying the moment its row is deleted", %{token: token} do
-      assert Accounts.get_person_by_session_token(token, @now)
+      assert Accounts.get_person_by_session_token(anonymous_scope(@now), token)
 
       assert {:ok, [%PersonToken{context: "session", token: stored}]} =
-               Accounts.delete_person_session_token(token)
+               Accounts.delete_person_session_token(anonymous_scope(@now), token)
 
       # The row handed back is the stored one, which is what names the PubSub
       # topic the session's sockets are torn down on.
       assert stored == PersonToken.hash_token(token)
-      refute Accounts.get_person_by_session_token(token, @now)
+      refute Accounts.get_person_by_session_token(anonymous_scope(@now), token)
     end
 
     test "deletes nothing when the credential matches no row", %{person: person} do
-      assert {:ok, []} = Accounts.delete_person_session_token("nobody issued this")
+      assert {:ok, []} =
+               Accounts.delete_person_session_token(anonymous_scope(@now), "nobody issued this")
+
       assert Repo.aggregate(from(t in PersonToken, where: t.person_id == ^person.id), :count) == 1
     end
   end
@@ -336,10 +378,9 @@ defmodule HospitalityComs.AccountsTest do
       change_token =
         extract_person_token(fn url ->
           Accounts.deliver_person_update_email_instructions(
-            %{person | email: new_email},
-            person.email,
-            url,
-            @now
+            person_scope_fixture(person, @now),
+            new_email,
+            url
           )
         end)
 
@@ -349,10 +390,11 @@ defmodule HospitalityComs.AccountsTest do
     test "changes the address", context do
       %{person: person, new_email: new_email, change_token: change_token} = context
 
-      assert {:ok, {updated, _expired}} = Accounts.update_person_email(person, change_token, @now)
+      assert {:ok, {updated, _expired}} =
+               Accounts.update_person_email(person_scope_fixture(person, @now), change_token)
 
       assert updated.email == new_email
-      refute Accounts.get_person_by_email(person.email)
+      refute Accounts.get_person_by_email(anonymous_scope(@now), person.email)
     end
 
     test "stamps the change from the unit of work's instant", context do
@@ -360,7 +402,7 @@ defmodule HospitalityComs.AccountsTest do
       later = DateTime.add(@now, 3, :day)
 
       assert {:ok, {updated, _expired}} =
-               Accounts.update_person_email(person, change_token, later)
+               Accounts.update_person_email(person_scope_fixture(person, later), change_token)
 
       assert updated.updated_at == DateTime.truncate(later, :second)
       assert updated.inserted_at == person.inserted_at
@@ -368,13 +410,14 @@ defmodule HospitalityComs.AccountsTest do
 
     test "invalidates every API token the person held", context do
       %{person: person, change_token: change_token} = context
-      session_token = Accounts.generate_person_session_token(person, @now)
-      assert Accounts.get_person_by_session_token(session_token, @now)
+      session_token = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
+      assert Accounts.get_person_by_session_token(anonymous_scope(@now), session_token)
 
-      assert {:ok, {_updated, expired}} = Accounts.update_person_email(person, change_token, @now)
+      assert {:ok, {_updated, expired}} =
+               Accounts.update_person_email(person_scope_fixture(person, @now), change_token)
 
       assert Enum.any?(expired, &(&1.context == "session"))
-      refute Accounts.get_person_by_session_token(session_token, @now)
+      refute Accounts.get_person_by_session_token(anonymous_scope(@now), session_token)
     end
 
     test "refuses a token that is not the person's", %{person: person} do
@@ -383,22 +426,24 @@ defmodule HospitalityComs.AccountsTest do
       other_token =
         extract_person_token(fn url ->
           Accounts.deliver_person_update_email_instructions(
-            %{other | email: unique_person_email()},
-            other.email,
-            url,
-            @now
+            person_scope_fixture(other, @now),
+            unique_person_email(),
+            url
           )
         end)
 
       assert {:error, :transaction_aborted} =
-               Accounts.update_person_email(person, other_token, @now)
+               Accounts.update_person_email(person_scope_fixture(person, @now), other_token)
     end
 
     test "refuses a token older than seven days", context do
       %{person: person, change_token: change_token} = context
 
       assert {:error, :transaction_aborted} =
-               Accounts.update_person_email(person, change_token, DateTime.add(@now, 7, :day))
+               Accounts.update_person_email(
+                 person_scope_fixture(person, DateTime.add(@now, 7, :day)),
+                 change_token
+               )
     end
   end
 

@@ -38,7 +38,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
     end
 
     test "assigns the person for a live bearer token", %{conn: conn, person: person} do
-      token = Accounts.generate_person_session_token(person, @now)
+      token = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
 
       conn =
         conn
@@ -59,7 +59,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
     end
 
     test "carries one instant, not one per read", %{conn: conn, person: person} do
-      token = Accounts.generate_person_session_token(person, @now)
+      token = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
 
       first =
         conn
@@ -110,7 +110,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
     end
 
     test "is anonymous the moment the token row is deleted", %{conn: conn, person: person} do
-      token = Accounts.generate_person_session_token(person, @now)
+      token = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
       encoded = PersonAuth.encode_token(token)
 
       assert %PersonScope{person: %Person{}} =
@@ -120,7 +120,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
                |> Map.fetch!(:assigns)
                |> Map.fetch!(:current_scope)
 
-      {:ok, [_deleted]} = Accounts.delete_person_session_token(token)
+      {:ok, [_deleted]} = Accounts.delete_person_session_token(anonymous_scope(@now), token)
 
       assert %PersonScope{person: nil} =
                conn
@@ -131,7 +131,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
     end
 
     test "is anonymous once the token is fourteen days old", %{conn: conn, person: person} do
-      token = Accounts.generate_person_session_token(person, @now)
+      token = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
       Clock.Offset.advance(day: 14)
 
       conn =
@@ -145,7 +145,7 @@ defmodule HospitalityComsWeb.PersonAuthTest do
 
   describe "require_authenticated_person/2" do
     test "lets an authenticated request through", %{conn: conn, person: person} do
-      token = Accounts.generate_person_session_token(person, @now)
+      token = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
 
       conn =
         conn

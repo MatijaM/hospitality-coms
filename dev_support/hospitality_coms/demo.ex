@@ -651,8 +651,10 @@ defmodule HospitalityComs.Demo do
   defp register_people(instant) do
     {:ok, people} =
       Repo.transaction(fn ->
+        anonymous = PersonScope.for_person(nil, instant)
+
         Map.new(@person_names, fn {label, _name} ->
-          {:ok, person} = Accounts.register_person(%{email: person_email(label)}, instant)
+          {:ok, person} = Accounts.register_person(anonymous, %{email: person_email(label)})
           {label, person}
         end)
       end)

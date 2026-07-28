@@ -29,6 +29,7 @@ defmodule HospitalityComsWeb.SocketsTest do
   use HospitalityComsWeb.ChannelCase
 
   alias HospitalityComs.Accounts
+  alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Peers
   alias HospitalityComs.Venues
@@ -56,7 +57,7 @@ defmodule HospitalityComsWeb.SocketsTest do
       # a PubSub topic, and a topic crosses distributed Erlang on every
       # broadcast and shows up in telemetry.
       person = person_fixture(@now)
-      raw = Accounts.generate_person_session_token(person, @now)
+      raw = Accounts.generate_person_session_token(PersonScope.for_person(person, @now))
 
       assert {:ok, socket} = connect(PersonSocket, %{}, auth(PersonAuth.encode_token(raw)))
 
@@ -82,7 +83,7 @@ defmodule HospitalityComsWeb.SocketsTest do
       # Two spellings that drifted would leave `disconnect_sessions/1`
       # broadcasting into the void and an ended session holding a live socket.
       person = person_fixture(@now)
-      raw = Accounts.generate_person_session_token(person, @now)
+      raw = Accounts.generate_person_session_token(PersonScope.for_person(person, @now))
 
       assert {:ok, socket} = connect(PersonSocket, %{}, auth(PersonAuth.encode_token(raw)))
       assert socket.id == PersonAuth.session_topic(PersonToken.hash_token(raw))
@@ -111,11 +112,14 @@ defmodule HospitalityComsWeb.SocketsTest do
     test "refuses a token whose row has been deleted" do
       # The revocation U2 built and U7 inherits: the row is the session.
       person = person_fixture(@now)
-      raw = Accounts.generate_person_session_token(person, @now)
+      raw = Accounts.generate_person_session_token(PersonScope.for_person(person, @now))
       encoded = PersonAuth.encode_token(raw)
 
       assert {:ok, _socket} = connect(PersonSocket, %{}, auth(encoded))
-      assert {:ok, _ended} = Accounts.delete_person_session_token(raw)
+
+      assert {:ok, _ended} =
+               Accounts.delete_person_session_token(PersonScope.for_person(nil, @now), raw)
+
       assert :error = connect(PersonSocket, %{}, auth(encoded))
     end
   end
@@ -170,7 +174,8 @@ defmodule HospitalityComsWeb.SocketsTest do
 
       assert {:ok, _reply, _channel} = subscribe_and_join(socket, venue_topic(venue), %{})
 
-      assert {:ok, _deleted} = Accounts.delete_person_session_token(raw)
+      assert {:ok, _deleted} =
+               Accounts.delete_person_session_token(PersonScope.for_person(nil, @now), raw)
 
       assert {:error, refusal} = join(socket, venue_topic(venue), %{})
       assert refusal.error == @refused_room
@@ -203,7 +208,8 @@ defmodule HospitalityComsWeb.SocketsTest do
       assert {:ok, _peer, _c} = subscribe_and_join(socket, peer_topic(socket), %{})
       assert {:ok, _emp, _d} = subscribe_and_join(employer, employer_topic(venue), %{})
 
-      assert {:ok, _deleted} = Accounts.delete_person_session_token(raw)
+      assert {:ok, _deleted} =
+               Accounts.delete_person_session_token(PersonScope.for_person(nil, @now), raw)
 
       assert {:error, _venue_refusal} = join(socket, venue_topic(venue), %{})
       assert {:error, _shift_refusal} = join(socket, shift_topic(room), %{})
@@ -229,7 +235,7 @@ defmodule HospitalityComsWeb.SocketsTest do
       # email included, and items 4, 5 and 6 of U7's review were three reachable
       # ways to get one printed.
       person = person_fixture(@now)
-      raw = Accounts.generate_person_session_token(person, @now)
+      raw = Accounts.generate_person_session_token(PersonScope.for_person(person, @now))
 
       assert {:ok, socket} = connect(PersonSocket, %{}, auth(PersonAuth.encode_token(raw)))
 
@@ -252,7 +258,7 @@ defmodule HospitalityComsWeb.SocketsTest do
       # digests. Putting the raw token on the socket to re-derive with would
       # have handed it back.
       person = person_fixture(@now)
-      raw = Accounts.generate_person_session_token(person, @now)
+      raw = Accounts.generate_person_session_token(PersonScope.for_person(person, @now))
 
       assert {:ok, socket} = connect(PersonSocket, %{}, auth(PersonAuth.encode_token(raw)))
 
@@ -387,7 +393,7 @@ defmodule HospitalityComsWeb.SocketsTest do
     engagement =
       engagement_fixture(employer, person, %{starts_at: @now, ends_at: @term_ends})
 
-    raw = Accounts.generate_person_session_token(person.person, @now)
+    raw = Accounts.generate_person_session_token(PersonScope.for_person(person.person, @now))
     {:ok, socket} = connect(PersonSocket, %{}, auth(PersonAuth.encode_token(raw)))
 
     %{
@@ -420,7 +426,7 @@ defmodule HospitalityComsWeb.SocketsTest do
     room = shift_room_fixture(employer, shift_type, @opens, @closes)
     roster_entry_fixture(employer, room, engagement.id)
 
-    raw = Accounts.generate_person_session_token(person.person, @now)
+    raw = Accounts.generate_person_session_token(PersonScope.for_person(person.person, @now))
     {:ok, socket} = connect(PersonSocket, %{}, auth(PersonAuth.encode_token(raw)))
     {:ok, employer_socket} = connect(EmployerSocket, %{}, auth(PersonAuth.encode_token(raw)))
 

@@ -196,7 +196,7 @@ defmodule HospitalityComs.Accounts.PersonZoneTest do
                "#{name}/#{arity} refused inside #{inspect(error.module)}"
 
         assert error.function == name
-        assert error.arity == arity
+        assert error.arity == refusing_arity(name)
       end
     end
 
@@ -219,8 +219,11 @@ defmodule HospitalityComs.Accounts.PersonZoneTest do
         error =
           assert_raise FunctionClauseError, fn -> apply(Accounts, name, [impostor | args]) end
 
+        assert error.module == Accounts,
+               "#{name}/#{arity} refused inside #{inspect(error.module)}"
+
         assert error.function == name
-        assert error.arity == arity
+        assert error.arity == refusing_arity(name)
       end
     end
 
@@ -235,7 +238,7 @@ defmodule HospitalityComs.Accounts.PersonZoneTest do
                MapSet.new([{:session_token_digest, 1}])
     end
 
-    test "and that one is a pure hash of its argument", %{token: token} do
+    test "and that one is a pure hash of its argument", %{session_token: token} do
       # The exception's justification, made assertable. It reaches no repo, no
       # row and no clock, so a scope would say nothing about it — and an
       # exception nobody can check is a hole in the sweep above.
@@ -265,8 +268,11 @@ defmodule HospitalityComs.Accounts.PersonZoneTest do
         error =
           assert_raise FunctionClauseError, fn -> apply(Accounts, name, [anonymous | args]) end
 
+        assert error.module == Accounts,
+               "#{name}/#{arity} refused inside #{inspect(error.module)}"
+
         assert error.function == name
-        assert error.arity == arity
+        assert error.arity == refusing_arity(name)
       end
     end
 
@@ -309,6 +315,19 @@ defmodule HospitalityComs.Accounts.PersonZoneTest do
       {{:deliver_login_instructions, 2}, [url], :named},
       {{:deliver_person_update_email_instructions, 3}, [unique_person_email(), url], :named}
     ]
+  end
+
+  # The arity of the clause that does the refusing, which is not always the
+  # arity the call was made at: a default argument (`sudo_mode?/2`'s `minutes`)
+  # exports a lower arity that delegates to the full one, so a `sudo_mode?/1`
+  # call is refused by `sudo_mode?/2`'s head. Derived rather than tabulated,
+  # because "the definition's own head" is the claim and the maximum exported
+  # arity for a name is where a definition's head is.
+  defp refusing_arity(name) do
+    Accounts.__info__(:functions)
+    |> Enum.filter(fn {exported, _arity} -> exported == name end)
+    |> Enum.map(fn {_name, arity} -> arity end)
+    |> Enum.max()
   end
 
   defp a_person_and_their_credentials(_context) do

@@ -779,10 +779,12 @@ defmodule HospitalityComs.DemoTest do
   ## Scopes
 
   defp person_scope(manifest, label) do
+    now = Clock.now()
+
     manifest.people
     |> Map.fetch!(label)
-    |> Accounts.get_person!()
-    |> PersonScope.for_person(Clock.now())
+    |> then(&Accounts.get_person!(PersonScope.for_person(nil, now), &1))
+    |> PersonScope.for_person(now)
   end
 
   # An employer scope built the way `HospitalityComsWeb.ChannelAuth` builds one:

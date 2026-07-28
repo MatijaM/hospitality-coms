@@ -7,6 +7,11 @@ defmodule HospitalityComs.AccountsFixtures do
   does: a test that wants to assert on an expiry boundary has to be able to
   place the token on one side of it, and a test that does not care should not
   have to move global state to say so.
+
+  Since #18 the instant reaches `HospitalityComs.Accounts` on a scope rather
+  than as an argument, so these build one. Registration and redemption build an
+  **anonymous** scope — `anonymous_scope/1` — because there is no session
+  behind either, which is exactly the shape a log-in request carries.
   """
 
   import Ecto.Query
@@ -32,12 +37,22 @@ defmodule HospitalityComs.AccountsFixtures do
     Enum.into(attrs, %{email: unique_person_email()})
   end
 
+  @doc """
+  The scope an unauthenticated caller carries: an instant and no person.
+
+  What `HospitalityComsWeb.PersonAuth.fetch_person_scope/2` assigns to every
+  request that arrives with no live token, and what registration, magic-link
+  redemption and every credential lookup take.
+  """
+  @spec anonymous_scope(DateTime.t()) :: PersonScope.t()
+  def anonymous_scope(now \\ fixed_instant()), do: PersonScope.for_person(nil, now)
+
   @spec unconfirmed_person_fixture(map(), DateTime.t()) :: Person.t()
   def unconfirmed_person_fixture(attrs \\ %{}, now \\ fixed_instant()) do
     {:ok, person} =
-      attrs
-      |> valid_person_attributes()
-      |> Accounts.register_person(now)
+      now
+      |> anonymous_scope()
+      |> Accounts.register_person(valid_person_attributes(attrs))
 
     person
   end
@@ -48,10 +63,11 @@ defmodule HospitalityComs.AccountsFixtures do
 
     token =
       extract_person_token(fn url ->
-        Accounts.deliver_login_instructions(person, url, now)
+        Accounts.deliver_login_instructions(person_scope_fixture(person, now), url)
       end)
 
-    {:ok, {person, _expired_tokens}} = Accounts.login_person_by_magic_link(token, now)
+    {:ok, {person, _expired_tokens}} =
+      Accounts.login_person_by_magic_link(anonymous_scope(now), token)
 
     person
   end

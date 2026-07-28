@@ -120,10 +120,10 @@ defmodule HospitalityComs.LifecycleReapTest do
       {live_change, dead_change} = change_tokens(person)
 
       # What the authenticator says, before anything is deleted.
-      assert Accounts.get_person_by_magic_link_token(live_link, @now)
-      refute Accounts.get_person_by_magic_link_token(dead_link, @now)
-      assert Accounts.get_person_by_session_token(live_session, @now)
-      refute Accounts.get_person_by_session_token(dead_session, @now)
+      assert Accounts.get_person_by_magic_link_token(anonymous_scope(@now), live_link)
+      refute Accounts.get_person_by_magic_link_token(anonymous_scope(@now), dead_link)
+      assert Accounts.get_person_by_session_token(anonymous_scope(@now), live_session)
+      refute Accounts.get_person_by_session_token(anonymous_scope(@now), dead_session)
       assert change_email_row(live_change, person, @now)
       refute change_email_row(dead_change, person, @now)
 
@@ -142,10 +142,10 @@ defmodule HospitalityComs.LifecycleReapTest do
       # The control for the whole sweep: a `delete_all` with no predicate
       # satisfies every assertion above.
       person = person_fixture(%{}, @now)
-      token = Accounts.generate_person_session_token(person, @now)
+      token = Accounts.generate_person_session_token(person_scope_fixture(person, @now))
 
       assert {:ok, %{expired_tokens: 0, unconfirmed_people: 0}} = Lifecycle.reap(@now)
-      assert Accounts.get_person_by_session_token(token, @now)
+      assert Accounts.get_person_by_session_token(anonymous_scope(@now), token)
     end
   end
 
@@ -198,7 +198,9 @@ defmodule HospitalityComs.LifecycleReapTest do
 
       assert {:ok, %{unconfirmed_people: 1}} = Lifecycle.reap(@now)
 
-      assert {:ok, %Person{id: second_id}} = Accounts.register_person(%{email: email}, @now)
+      assert {:ok, %Person{id: second_id}} =
+               Accounts.register_person(anonymous_scope(@now), %{email: email})
+
       assert second_id != first.id
     end
 
@@ -227,7 +229,7 @@ defmodule HospitalityComs.LifecycleReapTest do
   describe "the bounds" do
     test "answers zeroes and deletes nothing when there is nothing due" do
       person = person_fixture(%{}, @now)
-      Accounts.generate_person_session_token(person, @now)
+      Accounts.generate_person_session_token(person_scope_fixture(person, @now))
 
       assert {:ok, %{expired_tokens: 0, unconfirmed_people: 0}} = Lifecycle.reap(@now)
       assert Repo.aggregate(Person, :count) == 1
@@ -308,8 +310,8 @@ defmodule HospitalityComs.LifecycleReapTest do
   end
 
   defp session_tokens(person) do
-    live = Accounts.generate_person_session_token(person, days_before(13))
-    dead = Accounts.generate_person_session_token(person, days_before(14))
+    live = Accounts.generate_person_session_token(person_scope_fixture(person, days_before(13)))
+    dead = Accounts.generate_person_session_token(person_scope_fixture(person, days_before(14)))
     {live, dead}
   end
 
