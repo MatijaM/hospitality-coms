@@ -22,10 +22,22 @@
  *
  * The rest are this client's own conventions: the shared-terminal clear, the
  * in-flight guards, and which reads an action is allowed to issue.
+ *
+ * ## One block drives the hook rather than the components
+ *
+ * The last one, and only that one. What a write **comes back with** is part of
+ * `ProfileSurface`'s type and is deliberately rendered nowhere — appending a
+ * declared entry the server has just confirmed would put it at the end of a
+ * list ordered by term — so there is no DOM through which it can be observed.
+ * It is asserted anyway, because it is the half of `contract.ts` this client
+ * can check: no channel answers these events, so the first thing a real
+ * transport will do wrong is answer one in a shape this feature did not
+ * describe.
  */
 
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it } from "vitest";
 
@@ -39,6 +51,7 @@ import { fakeSocketFactory } from "../../test-support/fake-socket";
 import { createMemoryRoomStore } from "../rooms/room-store";
 import { PROFILE_EVENTS } from "./contract";
 import { normalisePersonId, profileTopic } from "./profile";
+import { useProfileSurface } from "./use-profile-surface";
 
 const PERSON_ID = "a1a1a1a1-b2b2-4c3c-8d4d-e5e5e5e5e5e5";
 const PEER_ID = "c3c3c3c3-d4d4-4e5e-8f6f-a7a7a7a7a7a7";
@@ -808,6 +821,50 @@ describe("the worker's own word", () => {
     expect(await screen.findByText("Chef")).toBeInTheDocument();
   });
 
+  it("gives two entries that read the same their own fields", async () => {
+    // A worker can hold the same role at the same place twice, which is two
+    // entries with one heading — and the heading was where the form's field ids
+    // came from, so both forms rendered `id="Change Chef at …-role"`. A
+    // `<label for>` resolves through `getElementById`, which answers the first,
+    // so the second form's four fields had no label at all: clicking its "What
+    // you did" put the cursor in the *first* form's input and a screen reader
+    // announced the first form's names for the second form's fields.
+    //
+    // The assertion is that property rather than the ids: each form's label
+    // resolves to that form's own input, which is what `for` is for and what
+    // the duplicate took away. The two terms differ so that "its own" is
+    // checkable — with one id shared, both labels resolve to the first form's
+    // field and the second row's term is nowhere on screen.
+    const secondStint = declaredWire({
+      declared_entry_id: "44444444-5555-4444-8444-444444444444",
+      starts_at: "2022-01-01T00:00:00Z",
+      ends_at: "2023-01-01T00:00:00Z",
+    });
+
+    await openProfile({ declared: [declaredWire(), secondStint] });
+
+    const list = await screen.findByRole("list", {
+      name: /jobs you have written down yourself/i,
+    });
+    const rows = rowsOf(list).map((row) => row as HTMLElement);
+    expect(rows).toHaveLength(2);
+
+    for (const row of rows) {
+      await userEvent.click(
+        within(row).getByRole("button", { name: /^change chef at/i }),
+      );
+    }
+
+    const fields = rows.map((row) => within(row).getByLabelText("From"));
+
+    expect(fields.map((field) => (field as HTMLInputElement).value)).toEqual([
+      declaredWire().starts_at,
+      secondStint.starts_at,
+    ]);
+    // And the mechanism, named: two forms, two sets of ids.
+    expect(new Set(fields.map((field) => field.id)).size).toBe(2);
+  });
+
   it("shows the server's per-field messages for a refused write", async () => {
     const { channel } = await openProfile();
 
@@ -882,5 +939,140 @@ describe("the worker's own word", () => {
     expect(
       screen.getByText(/that is an acknowledgement and not an edit/i),
     ).toBeInTheDocument();
+  });
+});
+
+describe("what a write comes back with", () => {
+  const DRAFT = {
+    roleLabel: "Chef",
+    organisationName: "A kitchen with no account here",
+    startsAt: "2024-01-01T00:00:00Z",
+    endsAt: "2025-01-01T00:00:00Z",
+  };
+
+  /** The hook on its own, joined, with the channel to answer it on. */
+  async function openSurface() {
+    const { socket, createSocket } = fakeSocketFactory();
+    const api = createFakeApi({
+      currentPerson: () =>
+        Promise.resolve(ok({ id: PERSON_ID, email: "worker@example.com" })),
+    });
+
+    const { result } = renderHook(() => useProfileSurface(PERSON_ID), {
+      wrapper: ({ children }: { readonly children: ReactNode }) => (
+        <SessionProvider api={api} tokenStore={createMemoryTokenStore("c2Vzc2lvbg")}>
+          <SocketProvider createSocket={createSocket}>{children}</SocketProvider>
+        </SessionProvider>
+      ),
+    });
+
+    const topic = profileTopic(PERSON_ID);
+    const channel = await waitFor(() => {
+      const opened = socket.channelFor(topic);
+      if (opened === undefined) throw new Error(`nothing joined ${topic}`);
+
+      return opened;
+    });
+
+    act(() => {
+      channel.joinPush.trigger("ok", {
+        person_id: PERSON_ID,
+        incompleteness_notice: NOTICE,
+      });
+    });
+
+    return { channel, surface: result };
+  }
+
+  /** Starts an action inside `act`, and hands back the promise to await. */
+  function start<Value>(work: () => Promise<Value>): Promise<Value> {
+    let started: Promise<Value> | undefined;
+
+    act(() => {
+      started = work();
+    });
+
+    if (started === undefined) throw new Error("nothing was started");
+
+    return started;
+  }
+
+  it("hands back the entity, decoded, for each of the three writes", async () => {
+    // All three passed `() => null` as their decoder while being typed
+    // `ProfileOutcome<Profile>` — a shape none of the three replies has, over a
+    // value that was always absent, under a comment saying the reply was
+    // decoded. `contract.ts` names exactly what each one answers, and this is
+    // the only place on this side that can tell whether a transport met it.
+    const { channel, surface } = await openSurface();
+
+    const declared = start(() => surface.current.declareEntry(DRAFT));
+    answer(channel, PROFILE_EVENTS.declareEntry, "ok", declaredWire());
+
+    const entry = {
+      declaredEntryId: declaredWire().declared_entry_id,
+      roleLabel: "Chef",
+      organisationName: "A kitchen with no account here",
+      startsAt: "2024-01-01T00:00:00Z",
+      endsAt: "2025-01-01T00:00:00Z",
+      declaredAt: "2026-07-01T00:00:00Z",
+    };
+
+    await expect(declared).resolves.toEqual({ status: "ok", value: entry });
+
+    const amended = start(() =>
+      surface.current.amendDeclaredEntry(declaredWire().declared_entry_id, DRAFT),
+    );
+    answer(channel, PROFILE_EVENTS.amendDeclaredEntry, "ok", declaredWire());
+
+    await expect(amended).resolves.toEqual({ status: "ok", value: entry });
+
+    // `VisibleCorrection`, decoded by the decoder the four *reads* use — which
+    // is `contract.ts`'s ask here, so that the write path and the reads are one
+    // shape rather than five minus one.
+    const contested = start(() =>
+      surface.current.requestCorrection(ENGAGEMENT_ID, correctionWire().body),
+    );
+    answer(channel, PROFILE_EVENTS.requestCorrection, "ok", correctionWire());
+
+    await expect(contested).resolves.toEqual({
+      status: "ok",
+      value: {
+        correctionRequestId: correctionWire().correction_request_id,
+        entryEngagementId: ENGAGEMENT_ID,
+        venueId: correctionWire().venue_id,
+        body: correctionWire().body,
+        requestedAt: "2026-07-02T00:00:00Z",
+        resolvedAt: null,
+        resolution: null,
+      },
+    });
+  });
+
+  it("hands back a named absence when the reply names the entry `id`", async () => {
+    // The control for the test above, and the drift `contract.ts` argues
+    // against by name: `DeclaredEntry` is an Ecto schema with no render struct,
+    // so a channel putting it on the wire wholesale sends `id` beside the
+    // `attested_entry_id` and `correction_request_id` the other shapes use.
+    // `decodeDeclaredEntry` refuses that spelling rather than accepting either.
+    //
+    // The write is still reported as accepted, which is `ProfileOutcome`'s rule
+    // rather than an oversight: the server took it, and a reply this client
+    // cannot read does not un-accept it. What the worker sees is the re-read,
+    // which decodes the same field through the same decoder and does raise a
+    // notice when it cannot.
+    const { channel, surface } = await openSurface();
+
+    const declared = start(() => surface.current.declareEntry(DRAFT));
+
+    answer(channel, PROFILE_EVENTS.declareEntry, "ok", {
+      id: declaredWire().declared_entry_id,
+      role_label: "Chef",
+      organisation_name: "A kitchen with no account here",
+      starts_at: "2024-01-01T00:00:00Z",
+      ends_at: "2025-01-01T00:00:00Z",
+      declared_at: "2026-07-01T00:00:00Z",
+    });
+
+    await expect(declared).resolves.toEqual({ status: "ok", value: null });
   });
 });

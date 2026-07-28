@@ -56,12 +56,20 @@ import type { PushOutcome, TopicSubscription } from "../../socket/session-socket
 import { useSessionSocket } from "../../socket/socket-context";
 import { PROFILE_EVENTS } from "./contract";
 import {
+  decodeCorrectionRequest,
+  decodeDeclaredEntry,
   decodeDisclosure,
   decodeDisclosures,
   decodeJoinedProfile,
   decodeProfile,
 } from "./decode";
-import type { AudienceKind, Disclosure, Profile } from "./profile";
+import type {
+  AudienceKind,
+  CorrectionRequest,
+  DeclaredEntry,
+  Disclosure,
+  Profile,
+} from "./profile";
 import { EMPTY_PROFILE, normalisePersonId, profileTopic } from "./profile";
 import type { ProfileAction, ProfileFailure, ProfileNotice } from "./refusal-message";
 import { PROFILE_ERROR_CODES, endsSession } from "./refusal-message";
@@ -133,15 +141,26 @@ export type ProfileSurface = {
     audienceId: string,
     disclosed: boolean,
   ) => Promise<ProfileOutcome<Disclosure>>;
-  readonly declareEntry: (draft: DeclaredEntryDraft) => Promise<ProfileOutcome<Profile>>;
+  /**
+   * The three writes carry back **what the server says it wrote**, one entity
+   * each, which is `contract.ts`'s reply for each of them.
+   *
+   * They were typed `ProfileOutcome<Profile>` against a decoder of `() => null`
+   * — a type naming a shape none of the three replies has, over a value that
+   * was always absent. Neither half was true, and the pair is this project's
+   * standing defect: a declaration disagreeing with the code beneath it.
+   */
+  readonly declareEntry: (
+    draft: DeclaredEntryDraft,
+  ) => Promise<ProfileOutcome<DeclaredEntry>>;
   readonly amendDeclaredEntry: (
     declaredEntryId: string,
     draft: DeclaredEntryDraft,
-  ) => Promise<ProfileOutcome<Profile>>;
+  ) => Promise<ProfileOutcome<DeclaredEntry>>;
   readonly requestCorrection: (
     engagementId: string,
     body: string,
-  ) => Promise<ProfileOutcome<Profile>>;
+  ) => Promise<ProfileOutcome<CorrectionRequest>>;
   readonly loadPeerProfile: (personId: string) => Promise<ProfileOutcome<Profile>>;
 };
 
@@ -387,16 +406,31 @@ export function useProfileSurface(personId: string): ProfileSurface {
    * `setDisclosure` there is nothing useful to apply directly: appending the
    * reply would put it at the end while `list_declared_entries/1` orders by
    * term, so the row would move on the next read for no reason anybody could
-   * see. It is decoded anyway, so that a reply in the wrong shape is reported
-   * rather than assumed.
+   * see.
+   *
+   * **It is decoded anyway, and that is the ask in `contract.ts` being checked
+   * from this side rather than only written down.** No channel answers this
+   * event, so the first thing a real transport will do wrong is answer it in a
+   * shape this file did not describe — and the specific one `contract.ts`
+   * argues at length against is a reply naming the entry `id`, which is what
+   * the Ecto schema calls it and what a channel putting the schema on the wire
+   * would send. `decodeDeclaredEntry` refuses that spelling, so it arrives as
+   * `value: null` — a named absence — instead of as an entry.
+   *
+   * **Nothing is *reported* from here**, and that is `run`'s rule rather than
+   * an omission: the server accepted the write and a reply this client cannot
+   * read does not un-accept it. What makes the drift visible to the worker is
+   * the re-read on the next line — `loadOwn` decodes every declared entry
+   * through the same decoder and *does* raise a notice when it cannot. See
+   * `ProfileOutcome` and `malformedReplyMessage`.
    */
   const declareEntry = useCallback(
-    async (draft: DeclaredEntryDraft): Promise<ProfileOutcome<Profile>> => {
+    async (draft: DeclaredEntryDraft): Promise<ProfileOutcome<DeclaredEntry>> => {
       const outcome = await run(
         "declare",
         PROFILE_EVENTS.declareEntry,
         draftPayload(draft),
-        () => null,
+        decodeDeclaredEntry,
       );
 
       if (outcome.status === "ok") refresh({ own: true });
@@ -406,16 +440,17 @@ export function useProfileSurface(personId: string): ProfileSurface {
     [run, refresh],
   );
 
+  /** Changes one, and comes back with it. `declareEntry`'s reply, unchanged. */
   const amendDeclaredEntry = useCallback(
     async (
       declaredEntryId: string,
       draft: DeclaredEntryDraft,
-    ): Promise<ProfileOutcome<Profile>> => {
+    ): Promise<ProfileOutcome<DeclaredEntry>> => {
       const outcome = await run(
         "amend",
         PROFILE_EVENTS.amendDeclaredEntry,
         { declared_entry_id: declaredEntryId, ...draftPayload(draft) },
-        () => null,
+        decodeDeclaredEntry,
       );
 
       if (outcome.status === "ok") refresh({ own: true });
@@ -425,13 +460,27 @@ export function useProfileSurface(personId: string): ProfileSurface {
     [run, refresh],
   );
 
+  /**
+   * Contests an attested entry, and comes back with the request.
+   *
+   * `decodeCorrectionRequest` is `VisibleCorrection`'s decoder and not a
+   * second one, which is the point: `contract.ts` asks the transport to render
+   * a `VisibleCorrection` here rather than the `CorrectionRequest` schema its
+   * `@spec` currently answers with, because otherwise the write path and the
+   * four read paths are five shapes minus one. Decoding the reply with the
+   * decoder the reads use is the only thing on this side that can tell whether
+   * that ask was met.
+   */
   const requestCorrection = useCallback(
-    async (engagementId: string, body: string): Promise<ProfileOutcome<Profile>> => {
+    async (
+      engagementId: string,
+      body: string,
+    ): Promise<ProfileOutcome<CorrectionRequest>> => {
       const outcome = await run(
         "correction",
         PROFILE_EVENTS.requestCorrection,
         { engagement_id: engagementId, body },
-        () => null,
+        decodeCorrectionRequest,
       );
 
       if (outcome.status === "ok") refresh({ own: true });

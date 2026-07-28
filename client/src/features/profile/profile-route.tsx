@@ -44,7 +44,7 @@
  * reason rather than for tidiness.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { useSession } from "../../session/session-context";
 import type {
@@ -479,6 +479,11 @@ function CorrectionControl({
  * -------------------------------------------- */
 
 function DeclaredEntries({ surface }: { readonly surface: ProfileSurface }) {
+  // The create form names no entry, because there is not one yet. `useId` is
+  // the only unique thing available to it, and a literal would be unique only
+  // for as long as this form is rendered once.
+  const newEntryFields = useId();
+
   return (
     <>
       <h2>Jobs you have written down yourself</h2>
@@ -500,6 +505,7 @@ function DeclaredEntries({ surface }: { readonly surface: ProfileSurface }) {
       )}
       <DeclaredEntryForm
         heading="Write one down"
+        fieldPrefix={newEntryFields}
         submitLabel="Write this down"
         onSubmit={surface.declareEntry}
       />
@@ -532,6 +538,7 @@ function OwnDeclaredEntry({
       {amending && (
         <DeclaredEntryForm
           heading={`Change ${entry.roleLabel} at ${entry.organisationName}`}
+          fieldPrefix={`declared-entry-${entry.declaredEntryId}`}
           submitLabel={`Save ${entry.roleLabel} at ${entry.organisationName}`}
           initial={{
             roleLabel: entry.roleLabel,
@@ -562,14 +569,34 @@ const EMPTY_DRAFT: DeclaredEntryDraft = {
  * constraints, so restating them in this file would be a third copy that goes
  * stale silently. A refusal arrives as `unprocessable_entity` with `fields`,
  * which is the one place the server's own words are shown.
+ *
+ * ## `fieldPrefix` names the entry and never the heading
+ *
+ * It was `heading`, which is `Change <role> at <organisation>` — **content**,
+ * and content two entries can share: a worker who did two stints as Chef at one
+ * place has two of them, which is exactly the record this form exists to let
+ * them write. Both forms then rendered `id="Change Chef at …-role"` for their
+ * first field and the same for the other three. A `<label for>` resolves through
+ * `getElementById`, which answers the *first* element with that id, so the
+ * second form's four fields had no label at all: clicking its "What you did"
+ * put the cursor in the first form's input, and a screen reader reading the
+ * second form announced the first form's names.
+ *
+ * So the prefix is the entry's own id, which is unique by construction, and it
+ * is a required prop rather than a default so that a caller cannot fall back
+ * into deriving one. `DisclosureControl` and `CorrectionControl` already key on
+ * `entry.attestedEntryId`; this form was the odd one out in its own file.
  */
 function DeclaredEntryForm({
   heading,
+  fieldPrefix,
   submitLabel,
   initial = EMPTY_DRAFT,
   onSubmit,
 }: {
   readonly heading: string;
+  /** Unique per rendered form. An entity id, or `useId()` where there is none. */
+  readonly fieldPrefix: string;
   readonly submitLabel: string;
   readonly initial?: DeclaredEntryDraft;
   readonly onSubmit: (draft: DeclaredEntryDraft) => Promise<{ readonly status: string }>;
@@ -595,36 +622,36 @@ function DeclaredEntryForm({
     <fieldset disabled={saving}>
       <legend>{heading}</legend>
 
-      <label htmlFor={`${heading}-role`}>What you did</label>
+      <label htmlFor={`${fieldPrefix}-role`}>What you did</label>
       <input
-        id={`${heading}-role`}
+        id={`${fieldPrefix}-role`}
         value={draft.roleLabel}
         onChange={(event) => {
           setDraft((current) => ({ ...current, roleLabel: event.target.value }));
         }}
       />
 
-      <label htmlFor={`${heading}-organisation`}>Where</label>
+      <label htmlFor={`${fieldPrefix}-organisation`}>Where</label>
       <input
-        id={`${heading}-organisation`}
+        id={`${fieldPrefix}-organisation`}
         value={draft.organisationName}
         onChange={(event) => {
           setDraft((current) => ({ ...current, organisationName: event.target.value }));
         }}
       />
 
-      <label htmlFor={`${heading}-starts`}>From</label>
+      <label htmlFor={`${fieldPrefix}-starts`}>From</label>
       <input
-        id={`${heading}-starts`}
+        id={`${fieldPrefix}-starts`}
         value={draft.startsAt}
         onChange={(event) => {
           setDraft((current) => ({ ...current, startsAt: event.target.value }));
         }}
       />
 
-      <label htmlFor={`${heading}-ends`}>Until</label>
+      <label htmlFor={`${fieldPrefix}-ends`}>Until</label>
       <input
-        id={`${heading}-ends`}
+        id={`${fieldPrefix}-ends`}
         value={draft.endsAt}
         onChange={(event) => {
           setDraft((current) => ({ ...current, endsAt: event.target.value }));
