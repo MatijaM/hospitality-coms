@@ -200,7 +200,7 @@ for.
 | 19 | A pending request whose visibility has lapsed reports state `:lapsed` to the requester | peers_test | unit | **issue scenario 3** |
 | 20 | …and accepting it is refused | peers_test | unit | **issue scenario 3**, from the addressee's side |
 | 21 | …and declining it still works | peers_test | unit | the addressee always being able to say no |
-| 22 | …and the requester may request again once it has lapsed | peers_test | unit | lapse clearing the outstanding row |
+| 22 | …and reports `:pending` again once the pair is co-rostered afresh | peers_test | unit | the state being derived rather than stored (revised — see below) |
 | 23 | Declining sets the block on the requester | peers_test | unit | **issue scenario 4** |
 | 24 | A declined requester cannot re-send | peers_test | unit | **issue scenario 4** |
 | 25 | The decliner can themselves initiate | peers_test | unit | **issue scenario 5** |
@@ -345,8 +345,38 @@ explicitly.
 7. **`EngagementsFixtures.purge/0` grew three deletes**, ahead of `people`, for the reason
    U6's four were added ahead of the bridge.
 
-8. **Every claim in this brief about what a test would catch was checked by breaking the
-   code.** Recorded in the final report.
+8. **Scenario 22 was wrong as written and is corrected rather than dropped.** It said "the
+   requester may request again once it has lapsed", which cannot happen: requesting needs
+   visibility, and a lapsed request is one whose visibility has gone. The honest statement
+   of the same property is its consequence — the pair being co-rostered again makes the same
+   row report `:pending` again, because the state is derived at the asking instant. Nothing
+   was destroyed when visibility went, so nothing has to be undestroyed when it returns, and
+   an addressee can decline a lapsed request at any time, so no requester is left holding a
+   row nobody can clear. That is now what the test asserts and what
+   `HospitalityComs.Peers`' moduledoc says.
+
+9. **`PeopleAuthTablesTest`'s dependent chain grew by two migrations.** Not anticipated in
+   the brief and it should have been: the peer tables hold foreign keys to `people` with
+   `ON DELETE RESTRICT`, so `DROP TABLE people` fails while they exist, and rolling
+   `create_people_auth_tables` back has to unwind them first. They are the first dependents
+   that hang off `people` **directly** rather than through the bridge. Five tests in that
+   file failed until the list was extended; a sixth was added, asserting the peer graph
+   comes back with its constraints, so the chain has a test of its own.
+
+10. **`Records.connection_of/2` does not compose the list query's ordering.**
+    `HospitalityComs.Peers.disconnect/2` composes the same predicate into an `update_all`,
+    and Ecto permits only `with_cte`, `where` and `join` there — an inherited `order_by`
+    raises `Ecto.QueryError` from inside the transaction. `party_to/2` is the shared
+    predicate and the ordering is applied by `connections_of/1` alone.
+
+11. **A fourth `.dialyzer_ignore.exs` entry.** The same `Ecto.Multi` / `MapSet.t()`
+    `call_without_opaque` false positive the tree already carries three of, reported three
+    times in `peers.ex` — once per multi-step write. Confirmed the same rather than assumed:
+    every warning names `%Ecto.Multi{:names => %MapSet{...}} (with opaque subterms)` in the
+    argument position of a `Multi.run/3` or `Multi.insert/4` call.
+
+12. **Every claim in this brief about what a test would catch was checked by breaking the
+    code.** Ten mutations, each reverted, recorded in the final report.
 
 ## Quality scores (self-assessed)
 
