@@ -200,8 +200,20 @@ defmodule HospitalityComs.Repo.Migrations.CreatePeerGraph do
 
     # KTD19's decline half, in the schema. The disconnect half is decided on
     # `peer_connections` and cannot be checked from here.
+    #
+    # `IS NOT DISTINCT FROM` rather than `=`, and that is the whole constraint.
+    # A CHECK is satisfied by NULL, and `NULL = requester_id` is NULL — so the
+    # plain equality passed for a declined row whose `blocked_initiator_id` was
+    # never written, which is exactly the row the constraint exists to refuse.
+    # The invariant would have rested on `decline_request/2` writing both
+    # columns in one statement rather than on the schema, which is the thing a
+    # check constraint is for. `peer_connections_closure_complete` below is
+    # NULL-proof by construction — paired `IS NULL` comparisons — so the shape
+    # was already in this file when this one was written with a gap in it.
     create constraint(:connection_requests, :connection_requests_decline_blocks_requester,
-             check: "declined_at IS NULL OR blocked_initiator_id = requester_id"
+             check:
+               "declined_at IS NULL OR " <>
+                 "blocked_initiator_id IS NOT DISTINCT FROM requester_id"
            )
   end
 
