@@ -43,6 +43,21 @@ defmodule HospitalityComsWeb.Router do
 
     get "/me", SessionController, :show
     delete "/log-out", SessionController, :delete
+
+    # U12's person-side reads. Fetch-once lists, not streams: two of them are
+    # lists you need *before* you have a room to ask through, so they cannot
+    # live on a room topic, and the third is a room's past rather than its
+    # present. `HospitalityComsWeb.RoomController` carries the argument for each
+    # path, including why the shift-room list hangs off the venue rather than
+    # off the venue room (KTD18).
+    #
+    # The limiter above is deliberately not extended to them: they need a live
+    # session, they write nothing, and their cost is bounded in
+    # `HospitalityComs.Rooms` rather than at the door.
+    get "/venue-rooms", RoomController, :venue_rooms
+    get "/venue-rooms/:venue_id/messages", RoomController, :venue_room_messages
+    get "/venues/:venue_id/shift-rooms", RoomController, :shift_rooms
+    get "/shift-rooms/:shift_room_id/messages", RoomController, :shift_room_messages
   end
 
   # The mailbox preview is how the magic link is read during development, since

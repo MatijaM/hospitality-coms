@@ -94,6 +94,7 @@ defmodule HospitalityComsWeb.ChannelAuth do
   alias HospitalityComs.Clock
   alias HospitalityComs.Engagements
   alias HospitalityComs.Engagements.Engagement
+  alias HospitalityComsWeb.EntityId
   alias HospitalityComsWeb.PersonAuth
   alias Phoenix.Socket
 
@@ -230,17 +231,15 @@ defmodule HospitalityComsWeb.ChannelAuth do
   function three channels call to say something it already does is a cost with
   no assertion behind it.
 
-  The shape is `HospitalityComs.Accounts.EmployerScope`'s `uuid!/1`, and taking
-  `byte_size(id) == 36` first is the load-bearing half rather than a cheap
-  pre-filter: `Ecto.UUID.cast/1` on its own also accepts sixteen raw bytes and
-  encodes them, so any sixteen-character string would come back a valid-looking
-  id. That module raises, because a scope built from nonsense fails three layers
-  away inside Postgres; this one returns, because a channel's answer to nonsense
-  is the same refusal it gives an id that names nothing.
+  **The rule itself now lives in `HospitalityComsWeb.EntityId`**, because U12's
+  room routes made a *path parameter* the third kind of outside id and a
+  controller calling `ChannelAuth` to parse one would be worse than the name
+  being historical. This delegates, so the three channels keep the function they
+  call and there is still one spelling. `EntityId` carries the argument for why
+  `byte_size(id) == 36` is the load-bearing half rather than a cheap pre-filter.
   """
   @spec topic_id(String.t()) :: {:ok, Ecto.UUID.t()} | :error
-  def topic_id(id) when byte_size(id) == 36, do: Ecto.UUID.cast(id)
-  def topic_id(_id), do: :error
+  defdelegate topic_id(id), to: EntityId, as: :cast
 
   @doc """
   A person scope for this socket, at a freshly read instant and with no lookup.

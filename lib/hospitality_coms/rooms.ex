@@ -121,6 +121,7 @@ defmodule HospitalityComs.Rooms do
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Lifecycle
   alias HospitalityComs.Repo
+  alias HospitalityComs.Rooms.MessagePage
   alias HospitalityComs.Rooms.Records
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComs.Rooms.ShiftRoom
@@ -139,6 +140,25 @@ defmodule HospitalityComs.Rooms do
   discloses nothing they did not supply.
   """
   @type refusal() :: :not_found | :not_a_member | :room_closed
+
+  @recent_message_limit 50
+
+  @doc """
+  How many messages a default history read answers with.
+
+  **The number lives here and no caller may pass one.** A route passing
+  `limit: 50` would leave the unbounded read one forgetful caller away from
+  production, which is exactly how both history functions came to be
+  `Repo.all/1` over a room's entire life. So `list_venue_room_messages/3` and
+  `list_shift_room_messages/3` take an *extent* — `:recent` or `:all` — and this
+  is what `:recent` means.
+
+  Exported because a caller has to be able to say "and there is more" without
+  restating the number, and because a test asserting a bound against a fixture
+  smaller than the bound certifies nothing.
+  """
+  @spec recent_message_limit() :: pos_integer()
+  def recent_message_limit, do: @recent_message_limit
 
   ## Shift rooms, from the employer's side
 
@@ -374,18 +394,44 @@ defmodule HospitalityComs.Rooms do
   end
 
   @doc """
-  The venue room's messages, oldest first.
+  The venue room's messages: the most recent page by default, oldest first
+  within it.
 
-  **Full history**, with no filter on when the reader's engagement began (R14,
-  KTD14). A person engaged today reads what was said before they arrived,
-  because a venue room is the venue's standing conversation rather than a record
-  of one shift.
+  **Full history is still what the room holds** (R14, KTD14), and the third
+  arity is how a caller asks for it. There is no filter on when the reader's
+  engagement began: a person engaged today reads what was said before they
+  arrived, because a venue room is the venue's standing conversation rather than
+  a record of one shift.
+
+  What is bounded is one *read*, not the room. See `list_venue_room_messages/3`
+  and `HospitalityComs.Rooms.MessagePage` for why the bound lives here and why
+  the caller names an extent rather than a number.
   """
   @spec list_venue_room_messages(PersonScope.t(), Ecto.UUID.t()) ::
-          {:ok, [RoomMessage.t()]} | {:error, :not_a_member}
+          {:ok, MessagePage.t()} | {:error, :not_a_member}
   def list_venue_room_messages(%PersonScope{} = scope, venue_id) when is_binary(venue_id) do
+    list_venue_room_messages(scope, venue_id, :recent)
+  end
+
+  @doc """
+  The same, at the extent asked for.
+
+  `:recent` is `recent_message_limit/0` messages and is what the two-arity form
+  answers; `:all` is every message the room holds, which is what this function
+  used to do unconditionally.
+
+  The unbounded read is deliberately still reachable — a venue room is a
+  standing conversation and a worker returning from leave has a real reason to
+  want the lot. What has changed is that it is now reached **because somebody
+  asked for it**, which is the difference between a considered cost and an
+  accidental one.
+  """
+  @spec list_venue_room_messages(PersonScope.t(), Ecto.UUID.t(), MessagePage.extent()) ::
+          {:ok, MessagePage.t()} | {:error, :not_a_member}
+  def list_venue_room_messages(%PersonScope{} = scope, venue_id, extent)
+      when is_binary(venue_id) and extent in [:recent, :all] do
     with {:ok, engagement} <- fetch_membership(scope, venue_id) do
-      {:ok, engagement.venue_id |> Records.venue_room_messages() |> Repo.all()}
+      {:ok, engagement.venue_id |> Records.venue_room_messages() |> page(extent)}
     end
   end
 
@@ -683,17 +729,65 @@ defmodule HospitalityComs.Rooms do
   ## Shift rooms, from the person's side
 
   @doc """
-  The shift rooms this person may read at their scope's instant.
+  The shift rooms this person may read at their scope's instant, across every
+  venue.
 
   Their roster periods that overlapped a room's open window, intersected with an
   engagement active now. A person engaged today sees no room from before their
   engagement, because they were on nobody's roster then — KTD14 refusing the
   day-one hire the venue's whole shift history.
+
+  **This arity is unbounded in a way `list_readable_shift_rooms/2` is not**, and
+  `HospitalityComsWeb.Endpoint` already says so: a person's readable shift-room
+  set grows with every shift they are ever rostered on. It has no HTTP surface
+  for that reason; the venue-filtered arity is the one a client asks.
   """
   @spec list_readable_shift_rooms(PersonScope.t()) :: [ShiftRoom.t()]
   def list_readable_shift_rooms(%PersonScope{person: %Person{id: person_id}, now: now})
       when is_binary(person_id) do
-    person_id |> Records.readable_shift_rooms(now) |> Repo.all()
+    read_person_shift_rooms(person_id, nil, now)
+  end
+
+  @doc """
+  The same, at one venue.
+
+  The filter is in the query rather than in whatever renders the answer. Not a
+  disclosure either way — every row is one this person may read — but shipping
+  more than was asked becomes a leak the first time the rule changes.
+
+  **It does not consult suspension, and that is KTD18 rather than an omission.**
+  A list of rooms "at a venue" reads like something a person out of that venue's
+  room should not get; suspension is the venue room only, and a suspended person
+  is still on their shift rosters and still reads and writes in their shift
+  rooms. `HospitalityComs.Rooms.Records.readable_shift_rooms/3` carries the
+  argument in full.
+
+  A venue this person holds no engagement at answers `[]` rather than a refusal:
+  the list's authorisation is the roster overlap, so an empty list for a venue
+  with no rooms and for a venue that is not theirs are the same answer, which is
+  AE1 satisfied by construction rather than by a clause.
+  """
+  @spec list_readable_shift_rooms(PersonScope.t(), Ecto.UUID.t()) :: [ShiftRoom.t()]
+  def list_readable_shift_rooms(
+        %PersonScope{person: %Person{id: person_id}, now: now},
+        venue_id
+      )
+      when is_binary(person_id) and is_binary(venue_id) do
+    read_person_shift_rooms(person_id, venue_id, now)
+  end
+
+  # The shift type carries the only display name either room kind has, so it is
+  # loaded for every caller of this list rather than by whoever remembers.
+  # `AGENTS.md` asks for preloads in the context function; it cannot be a
+  # `preload:` in the query, because `Records.distinct_rooms/1` selects a joined
+  # binding rather than the `from` source.
+  @spec read_person_shift_rooms(Ecto.UUID.t(), Ecto.UUID.t() | nil, DateTime.t()) ::
+          [ShiftRoom.t()]
+  defp read_person_shift_rooms(person_id, venue_id, now) do
+    person_id
+    |> Records.readable_shift_rooms(venue_id, now)
+    |> Repo.all()
+    |> Repo.preload(:shift_type)
   end
 
   @doc """
@@ -752,28 +846,64 @@ defmodule HospitalityComs.Rooms do
   end
 
   @doc """
-  A shift room's messages, oldest first, if this person may read it.
+  A shift room's messages: the most recent page by default, oldest first within
+  it, if this person may read it.
 
   `{:error, :not_found}` covers a room that does not exist and a room this
   person was never rostered on alike, so the refusal discloses nothing about
   which shifts a venue has run — which is what KTD14's scoping would otherwise
-  leak one id at a time.
+  leak one id at a time. The bound is a page of an answer the caller was already
+  entitled to, so it turns no refusal into an empty page.
   """
   @spec list_shift_room_messages(PersonScope.t(), Ecto.UUID.t()) ::
-          {:ok, [RoomMessage.t()]} | {:error, :not_found}
+          {:ok, MessagePage.t()} | {:error, :not_found}
   def list_shift_room_messages(%PersonScope{} = scope, shift_room_id)
       when is_binary(shift_room_id) do
-    scope
-    |> shift_room_readable?(shift_room_id)
-    |> read_shift_room_messages(shift_room_id)
+    list_shift_room_messages(scope, shift_room_id, :recent)
   end
 
-  @spec read_shift_room_messages(boolean(), Ecto.UUID.t()) ::
-          {:ok, [RoomMessage.t()]} | {:error, :not_found}
-  defp read_shift_room_messages(false, _shift_room_id), do: {:error, :not_found}
+  @doc """
+  The same, at the extent asked for. See `list_venue_room_messages/3`.
 
-  defp read_shift_room_messages(true, shift_room_id) do
-    {:ok, shift_room_id |> Records.shift_room_messages() |> Repo.all()}
+  A shift room's history is bounded by the shift rather than by the venue's
+  whole life, so it is the less likely of the two to reach the limit. It has the
+  same bound anyway: a bound applied to one of the two functions is a bound the
+  other is one forgetful caller away from not having, which is the shape this
+  unit exists to close.
+  """
+  @spec list_shift_room_messages(PersonScope.t(), Ecto.UUID.t(), MessagePage.extent()) ::
+          {:ok, MessagePage.t()} | {:error, :not_found}
+  def list_shift_room_messages(%PersonScope{} = scope, shift_room_id, extent)
+      when is_binary(shift_room_id) and extent in [:recent, :all] do
+    scope
+    |> shift_room_readable?(shift_room_id)
+    |> read_shift_room_messages(shift_room_id, extent)
+  end
+
+  @spec read_shift_room_messages(boolean(), Ecto.UUID.t(), MessagePage.extent()) ::
+          {:ok, MessagePage.t()} | {:error, :not_found}
+  defp read_shift_room_messages(false, _shift_room_id, _extent), do: {:error, :not_found}
+
+  defp read_shift_room_messages(true, shift_room_id, extent) do
+    {:ok, shift_room_id |> Records.shift_room_messages() |> page(extent)}
+  end
+
+  # The one place either extent becomes a query, so the two room kinds cannot
+  # come to disagree about what `:recent` means.
+  @spec page(Ecto.Queryable.t(), MessagePage.extent()) :: MessagePage.t()
+  defp page(queryable, :all) do
+    queryable |> Records.oldest_first() |> Repo.all() |> MessagePage.whole()
+  end
+
+  defp page(queryable, :recent) do
+    limit = recent_message_limit()
+
+    # One more than the page, which is how `MessagePage` answers "is this the
+    # whole history" without a second statement.
+    queryable
+    |> Records.most_recent(limit + 1)
+    |> Repo.all()
+    |> MessagePage.bounded(limit)
   end
 
   @doc """

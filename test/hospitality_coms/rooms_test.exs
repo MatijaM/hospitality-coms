@@ -71,6 +71,7 @@ defmodule HospitalityComs.RoomsTest do
   alias HospitalityComs.Lifecycle
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms
+  alias HospitalityComs.Rooms.MessagePage
   alias HospitalityComs.Rooms.Records
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComs.Rooms.ShiftRoom
@@ -222,7 +223,9 @@ defmodule HospitalityComs.RoomsTest do
       resumed = person_at(person, DateTime.add(@now, 3, :hour))
       {:ok, _closed} = Rooms.resume_venue_room(resumed, employer.venue_id)
 
-      assert {:ok, messages} = Rooms.list_venue_room_messages(resumed, employer.venue_id)
+      assert {:ok, %MessagePage{messages: messages}} =
+               Rooms.list_venue_room_messages(resumed, employer.venue_id)
+
       assert Enum.map(messages, & &1.body) == ["before", "while out"]
     end
 
@@ -407,7 +410,7 @@ defmodule HospitalityComs.RoomsTest do
 
       assert Rooms.shift_room_readable?(person_at(person, long_after), room.id)
 
-      assert {:ok, _messages} =
+      assert {:ok, %MessagePage{}} =
                Rooms.list_shift_room_messages(person_at(person, long_after), room.id)
     end
 
@@ -434,7 +437,7 @@ defmodule HospitalityComs.RoomsTest do
       refute Rooms.shift_room_member?(after_removal, room.id)
       assert Rooms.shift_room_readable?(after_removal, room.id)
 
-      assert {:ok, [%RoomMessage{body: "hello"}]} =
+      assert {:ok, %MessagePage{messages: [%RoomMessage{body: "hello"}]}} =
                Rooms.list_shift_room_messages(after_removal, room.id)
 
       # And what the colleague says afterwards is still readable too: the read
@@ -446,7 +449,7 @@ defmodule HospitalityComs.RoomsTest do
           "after"
         )
 
-      assert {:ok, [_first, %RoomMessage{body: "after"}]} =
+      assert {:ok, %MessagePage{messages: [_first, %RoomMessage{body: "after"}]}} =
                Rooms.list_shift_room_messages(after_removal, room.id)
     end
 
@@ -677,7 +680,9 @@ defmodule HospitalityComs.RoomsTest do
       later = person_at(person, DateTime.add(mid_shift, 1, :hour))
 
       assert {:error, :not_rostered} = Rooms.send_shift_room_message(later, room.id, "again")
-      assert {:ok, [%RoomMessage{body: "hello"}]} = Rooms.list_shift_room_messages(later, room.id)
+
+      assert {:ok, %MessagePage{messages: [%RoomMessage{body: "hello"}]}} =
+               Rooms.list_shift_room_messages(later, room.id)
     end
 
     test "refuses a room that does not exist" do
@@ -734,7 +739,7 @@ defmodule HospitalityComs.RoomsTest do
       later = DateTime.add(@now, 10, :day)
       %{person: newcomer} = engaged_at(employer, later)
 
-      assert {:ok, [%RoomMessage{body: "old news"}]} =
+      assert {:ok, %MessagePage{messages: [%RoomMessage{body: "old news"}]}} =
                Rooms.list_venue_room_messages(person_at(newcomer, later), employer.venue_id)
     end
 
@@ -776,6 +781,214 @@ defmodule HospitalityComs.RoomsTest do
 
       assert [%ShiftRoom{id: id}] = Rooms.list_readable_shift_rooms(after_close)
       assert id == room.id
+    end
+  end
+
+  ## The bound on history
+
+  describe "the message bound" do
+    test "answers the most recent page, and the page is not the oldest rows" do
+      # The unit's central claim, and its own control in one body.
+      #
+      # The count assertion alone certifies nothing: a bound that took the
+      # **oldest** fifty returns fifty rows and satisfies it. So the bodies are
+      # named — the first written must be absent and the last written present —
+      # and the fixture holds `limit + 1` rows, because a bound asserted against
+      # a room of twelve is a bound asserted against nothing.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+
+      limit = Rooms.recent_message_limit()
+      bodies = venue_room_messages_fixture(engagement, limit + 1, @now)
+
+      assert {:ok, %MessagePage{messages: page, complete: false}} =
+               Rooms.list_venue_room_messages(person, employer.venue_id)
+
+      assert length(page) == limit
+
+      read = Enum.map(page, & &1.body)
+
+      refute List.first(bodies) in read
+      assert List.last(bodies) in read
+    end
+
+    test "orders the page oldest first, like the stream it precedes" do
+      # Getting the newest fifty means ordering descending somewhere. If that
+      # ordering is the one the caller sees, the room renders backwards — and
+      # every assertion in the test above passes.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+
+      bodies = venue_room_messages_fixture(engagement, Rooms.recent_message_limit() + 1, @now)
+
+      assert {:ok, %MessagePage{messages: page}} =
+               Rooms.list_venue_room_messages(person, employer.venue_id)
+
+      assert Enum.map(page, & &1.body) == Enum.take(bodies, -Rooms.recent_message_limit())
+    end
+
+    test "lifts the bound for :all, which is the control for the bound existing at all" do
+      # A limit applied to `:all` too would satisfy every assertion above and
+      # make "load the whole history" a lie.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+
+      count = Rooms.recent_message_limit() + 1
+      bodies = venue_room_messages_fixture(engagement, count, @now)
+
+      assert {:ok, %MessagePage{messages: whole, complete: true}} =
+               Rooms.list_venue_room_messages(person, employer.venue_id, :all)
+
+      assert Enum.map(whole, & &1.body) == bodies
+    end
+
+    test "calls the history complete at exactly the limit" do
+      # The `limit + 1` probe's own boundary, and the control for `complete`
+      # being derived rather than hardcoded false.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+
+      limit = Rooms.recent_message_limit()
+      venue_room_messages_fixture(engagement, limit, @now)
+
+      assert {:ok, %MessagePage{messages: page, complete: true}} =
+               Rooms.list_venue_room_messages(person, employer.venue_id)
+
+      assert length(page) == limit
+    end
+
+    test "answers an empty room with an empty page that is complete" do
+      # The other end of `complete`. A flag derived from a non-empty list gets
+      # this one wrong.
+      %{employer: employer, person: person} = engaged()
+
+      assert {:ok, %MessagePage{messages: [], complete: true}} =
+               Rooms.list_venue_room_messages(person, employer.venue_id)
+    end
+
+    test "bounds a shift room's history the same way, and lifts it the same way" do
+      # The second function. A bound applied to one of the two is a bound the
+      # other is one forgetful caller away from not having.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+      room = shift_room(employer)
+      roster_entry_fixture(employer, room, engagement.id)
+
+      limit = Rooms.recent_message_limit()
+      bodies = shift_room_messages_fixture(engagement, room, limit + 1, @shift_starts)
+
+      reader = person_at(person, DateTime.add(@grace_closes, 1, :hour))
+
+      assert {:ok, %MessagePage{messages: page, complete: false}} =
+               Rooms.list_shift_room_messages(reader, room.id)
+
+      assert length(page) == limit
+      refute List.first(bodies) in Enum.map(page, & &1.body)
+      assert List.last(bodies) in Enum.map(page, & &1.body)
+
+      assert {:ok, %MessagePage{messages: whole, complete: true}} =
+               Rooms.list_shift_room_messages(reader, room.id, :all)
+
+      assert Enum.map(whole, & &1.body) == bodies
+    end
+
+    test "keeps the refusals it had, so the bound is not reached without authority" do
+      # The bound is a page of an answer the caller was already entitled to.
+      # Nothing about paging may turn a refusal into an empty page.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+
+      venue_room_messages_fixture(engagement, 3, @now)
+      {:ok, _suspension} = Rooms.suspend_venue_room(person, employer.venue_id)
+
+      assert {:error, :not_a_member} = Rooms.list_venue_room_messages(person, employer.venue_id)
+
+      assert {:error, :not_a_member} =
+               Rooms.list_venue_room_messages(person, employer.venue_id, :all)
+
+      assert {:error, :not_found} =
+               Rooms.list_shift_room_messages(person, Ecto.UUID.generate(), :all)
+    end
+  end
+
+  ## The venue-filtered shift room list
+
+  describe "list_readable_shift_rooms/2" do
+    test "answers one venue's rooms while the unfiltered arity answers both" do
+      # The filter, and its control. A filtered arity that returned `[]` for
+      # every venue satisfies the first assertion on its own; the unfiltered
+      # arity is what proves the fixture had two venues' rooms in it.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+      here = shift_room(employer)
+      roster_entry_fixture(employer, here, engagement.id)
+
+      {elsewhere_employer, _creation} = scoped_venue_fixture(@now)
+
+      elsewhere_engagement =
+        engagement_fixture(elsewhere_employer, person, %{
+          starts_at: @now,
+          ends_at: DateTime.add(@now, 90, :day),
+          code_expires_at: DateTime.add(@now, 7, :day)
+        })
+
+      there = shift_room(elsewhere_employer)
+      roster_entry_fixture(elsewhere_employer, there, elsewhere_engagement.id)
+
+      during = person_at(person, @shift_starts)
+
+      assert Enum.map(Rooms.list_readable_shift_rooms(during, employer.venue_id), & &1.id) ==
+               [here.id]
+
+      assert Enum.map(
+               Rooms.list_readable_shift_rooms(during, elsewhere_employer.venue_id),
+               & &1.id
+             ) == [there.id]
+
+      both = during |> Rooms.list_readable_shift_rooms() |> Enum.map(& &1.id) |> Enum.sort()
+
+      assert both == Enum.sort([here.id, there.id])
+    end
+
+    test "still answers a suspended person, who is out of the venue room and on their rosters" do
+      # KTD18, on the arity this unit adds. The filtered list must not grow a
+      # venue-room membership gate: suspension is the venue room only, and a
+      # suspended person is still on their shift rosters.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+      room = shift_room(employer)
+      roster_entry_fixture(employer, room, engagement.id)
+
+      {:ok, _suspension} = Rooms.suspend_venue_room(person, employer.venue_id)
+
+      during = person_at(person, @shift_starts)
+
+      # The control: the suspension is real, and it took the venue room away.
+      assert Rooms.list_venue_rooms(during) == []
+
+      assert Enum.map(Rooms.list_readable_shift_rooms(during, employer.venue_id), & &1.id) ==
+               [room.id]
+    end
+
+    test "answers an empty list for a venue this person holds no engagement at" do
+      # AE1 by construction rather than by a refusal: an empty list for a venue
+      # with no rooms and for a venue that is not yours are the same answer.
+      %{person: person} = engaged()
+      {stranger, _creation} = scoped_venue_fixture(@now)
+      _room = shift_room(stranger)
+
+      assert Rooms.list_readable_shift_rooms(person, stranger.venue_id) == []
+    end
+
+    test "carries the shift type's name, so a client renders a label rather than a uuid" do
+      # `ShiftRoom` has no display name of its own — only two instants and a
+      # `shift_type_id`. Without the association loaded, every room list in the
+      # client is uuid prefixes.
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+      shift_type = shift_type_fixture(employer, @grace_minutes)
+      room = shift_room_fixture(employer, shift_type, @shift_starts, @shift_ends)
+      roster_entry_fixture(employer, room, engagement.id)
+
+      during = person_at(person, @shift_starts)
+
+      assert [%ShiftRoom{shift_type: %ShiftType{name: name}}] =
+               Rooms.list_readable_shift_rooms(during, employer.venue_id)
+
+      assert name == shift_type.name
+
+      assert [%ShiftRoom{shift_type: %ShiftType{}}] = Rooms.list_readable_shift_rooms(during)
     end
   end
 
