@@ -1,11 +1,10 @@
 /**
- * Every way a channel can refuse, enumerated — the transport's half of
+ * The error envelope over a channel — the transport's half of
  * `src/api/errors.ts`.
  *
- * The envelope is the same contract on both transports. `ErrorEnvelope` builds
- * every refusal a channel replies with, exactly as it builds every HTTP error
- * body, so the payload of a refused join and the payload of a refused `"send"`
- * are the same two shapes:
+ * `ErrorEnvelope` builds every refusal a channel replies with, exactly as it
+ * builds every HTTP error body, so the payload of a refused join and the
+ * payload of a refused `"send"` are the same two shapes:
  *
  *     {"error": {"code": "gone", "message": "…"}}
  *     {"error": {"code": "unprocessable_entity", "message": "…",
@@ -13,68 +12,48 @@
  *
  * ## Why this is not `RequestFailure`
  *
- * Two reasons, and the second is the one that matters.
- *
  * `ApiError` carries a `status`, because an HTTP failure has one and reporting
  * a code nobody planned for needs the number. A channel reply has no status
- * line at all — `Phoenix.Channel`'s `{:reply, {:error, …}}` is a frame, not a
- * response — so a `status` here would be a number this client invented.
+ * line at all — `Phoenix.Channel`'s `{:reply, {:error, …}}` is a frame — so a
+ * `status` here would be a number this client invented.
  *
- * And the **vocabulary is different**. `KNOWN_ERROR_CODES` is what
- * `SessionController`, `PersonAuth` and `ErrorJSON` produce. The room channels
- * produce `forbidden` and `gone`, which no endpoint does, and produce neither
- * `not_found` nor `bad_gateway`, which endpoints do. Folding the two together
- * would mean one exhaustive switch writing log-in copy for a room refusal and
- * room copy for a log-in refusal; keeping them apart is what lets each surface
- * say something true.
+ * ## The envelope is shared; the vocabulary is the caller's
+ *
+ * **This module names no codes.** It used to, and that was a coupling with a
+ * date on it: a surface's copy is an exhaustive `switch` over the codes it can
+ * meet, so a single shared list makes *every* switch break when *any* surface
+ * gains a code. U8 puts nine events on one multiplexed `"peer"` channel, and a
+ * peer-only code on a shared list would have demanded a case inside
+ * `features/rooms/`, which knows nothing about peers and can say nothing
+ * useful about one.
+ *
+ * `src/api/errors.ts` gets away with one shared list because exactly one switch
+ * consumes it. Here there will be at least three.
+ *
+ * So `decodeChannelRefusal` takes the caller's own vocabulary and narrows to
+ * it: `features/rooms/refusal-message.ts` owns `ROOM_ERROR_CODES` and traces
+ * each one to the clause that emits it, and U8 can add `PEER_ERROR_CODES`
+ * without editing a room-owned file. Anything outside the caller's set is
+ * `unrecognised`, with the wire value kept in `rawCode` — which is also the
+ * right answer for a peer code arriving on a room topic: it is a code that
+ * surface cannot meet, and inventing copy for it would be worse than saying so.
  */
 
-import type { FieldErrors } from "../api/errors";
 import { isRecord, isStringArray } from "../api/decode";
-
-/**
- * The status atoms the two room channels are known to refuse with, traced
- * through `HospitalityComsWeb.VenueRoomChannel`, `ShiftRoomChannel` and
- * `RoomChannel`:
- *
- *   * `unauthorized` — every join refusal, and a send by a session that is not
- *     in the room. The refusal enumerates nothing, so an ended engagement, a
- *     suspension, a room at another venue and an id that names nothing are all
- *     this one code (AE1).
- *   * `bad_request` — `"send"` without a string `body`, and any event neither
- *     channel handles.
- *   * `forbidden` — a shift room this session may read but is not rostered on.
- *     KTD6b: a roster period already elapsed still earns the reading.
- *   * `gone` — a shift room past its `closes_at`. The grace window (KTD5),
- *     answered on the same channel process with no rejoin and no job having run.
- *   * `unprocessable_entity` — the message itself was rejected, with `fields`
- *     naming `body`.
- *
- * Anything else is `unrecognised`, with the wire value kept in `rawCode`.
- */
-export const KNOWN_CHANNEL_ERROR_CODES = [
-  "unauthorized",
-  "bad_request",
-  "forbidden",
-  "gone",
-  "unprocessable_entity",
-] as const;
-
-export type KnownChannelErrorCode = (typeof KNOWN_CHANNEL_ERROR_CODES)[number];
-export type ChannelErrorCode = KnownChannelErrorCode | "unrecognised";
+import type { FieldErrors } from "../api/errors";
 
 /** The channel refused, and named no input. */
-export type ChannelError = {
+export type ChannelError<Code extends string> = {
   readonly kind: "channel_error";
-  readonly code: ChannelErrorCode;
+  readonly code: Code | "unrecognised";
   readonly rawCode: string;
   readonly message: string;
 };
 
 /** The channel refused, and named the inputs it rejected. */
-export type ChannelFieldError = {
+export type ChannelFieldError<Code extends string> = {
   readonly kind: "channel_field_error";
-  readonly code: ChannelErrorCode;
+  readonly code: Code | "unrecognised";
   readonly rawCode: string;
   readonly message: string;
   readonly fields: FieldErrors;
@@ -102,20 +81,19 @@ export type MalformedRefusal = {
   readonly message: string;
 };
 
-export type ChannelFailure =
-  ChannelError | ChannelFieldError | ChannelTimeout | MalformedRefusal;
-
-export function isKnownChannelErrorCode(code: string): code is KnownChannelErrorCode {
-  return (KNOWN_CHANNEL_ERROR_CODES as readonly string[]).includes(code);
-}
+export type ChannelFailure<Code extends string> =
+  ChannelError<Code> | ChannelFieldError<Code> | ChannelTimeout | MalformedRefusal;
 
 /**
- * Turns a refusal payload into a failure, or into `malformed_refusal`.
+ * Turns a refusal payload into a failure drawn from the caller's vocabulary.
  *
  * Never returns `null` and never throws: every caller has a surface to put a
  * sentence on, and there is no case where saying nothing is right.
  */
-export function decodeChannelRefusal(payload: unknown): ChannelFailure {
+export function decodeChannelRefusal<Code extends string>(
+  payload: unknown,
+  known: readonly Code[],
+): ChannelFailure<Code> {
   if (!isRecord(payload)) return notTheEnvelope();
 
   const error = payload.error;
@@ -124,7 +102,7 @@ export function decodeChannelRefusal(payload: unknown): ChannelFailure {
   if (typeof error.message !== "string") return notTheEnvelope();
 
   const rawCode = error.code;
-  const code = isKnownChannelErrorCode(rawCode) ? rawCode : "unrecognised";
+  const code = known.find((candidate) => candidate === rawCode) ?? "unrecognised";
   const common = { code, rawCode, message: error.message } as const;
 
   // `fields` absent and `fields` present are two answers, for the reason

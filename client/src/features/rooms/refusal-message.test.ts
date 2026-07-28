@@ -1,23 +1,26 @@
 import { describe, expect, it } from "vitest";
 
-import type { ChannelFailure } from "../../socket/channel-failure";
-import {
-  KNOWN_CHANNEL_ERROR_CODES,
-  decodeChannelRefusal,
-  isKnownChannelErrorCode,
-} from "../../socket/channel-failure";
+import { decodeChannelRefusal } from "../../socket/channel-failure";
 import { failureMessage } from "../../app/failure-message";
-import { barFromRefusal, barMessage, refusalMessage } from "./refusal-message";
+import type { RoomFailure } from "./refusal-message";
+import {
+  ROOM_ERROR_CODES,
+  barFromRefusal,
+  barMessage,
+  endsAccess,
+  isRoomErrorCode,
+  refusalMessage,
+} from "./refusal-message";
 
 /**
  * Built the way the decoder builds one, so an unknown wire code narrows to
  * `unrecognised` here exactly as it does in production. A cast would let this
  * file assert about a value `decodeChannelRefusal` can never produce.
  */
-function refused(code: string, message = "SERVER-SIDE LOG SENTENCE"): ChannelFailure {
+function refused(code: string, message = "SERVER-SIDE LOG SENTENCE"): RoomFailure {
   return {
     kind: "channel_error",
-    code: isKnownChannelErrorCode(code) ? code : "unrecognised",
+    code: isRoomErrorCode(code) ? code : "unrecognised",
     rawCode: code,
     message,
   };
@@ -25,7 +28,7 @@ function refused(code: string, message = "SERVER-SIDE LOG SENTENCE"): ChannelFai
 
 describe("what a worker is told", () => {
   it("has a sentence for every code the room channels can refuse with", () => {
-    for (const code of KNOWN_CHANNEL_ERROR_CODES) {
+    for (const code of ROOM_ERROR_CODES) {
       const sentence = refusalMessage(refused(code));
 
       expect(sentence.length).toBeGreaterThan(0);
@@ -36,7 +39,10 @@ describe("what a worker is told", () => {
   it("names a code it does not know rather than saying nothing", () => {
     expect(
       refusalMessage(
-        decodeChannelRefusal({ error: { code: "im_a_teapot", message: "…" } }),
+        decodeChannelRefusal(
+          { error: { code: "im_a_teapot", message: "…" } },
+          ROOM_ERROR_CODES,
+        ),
       ),
     ).toContain("im_a_teapot");
   });
@@ -82,14 +88,30 @@ describe("what a refusal means for the composer afterwards", () => {
   });
 
   it("leaves it alone for the ones that are about the message or the session", () => {
-    // Barring on `unprocessable_entity` would make a typo look like a closure;
-    // barring on `unauthorized` would hide a room the next join may well admit.
+    // Barring on `unprocessable_entity` would make a typo look like a closure.
+    // `unauthorized` is not "no consequence" — it closes the composer through
+    // the connection instead, see below — but it must not be *remembered*,
+    // because the very next join settles it.
     expect(barFromRefusal(refused("unprocessable_entity"))).toBeNull();
     expect(barFromRefusal(refused("bad_request"))).toBeNull();
     expect(barFromRefusal(refused("unauthorized"))).toBeNull();
     expect(barFromRefusal(refused("im_a_teapot"))).toBeNull();
     expect(barFromRefusal({ kind: "channel_timeout" })).toBeNull();
     expect(barFromRefusal({ kind: "malformed_refusal", message: "x" })).toBeNull();
+  });
+
+  it("treats `unauthorized` as the access ending, and nothing else as that", () => {
+    // The one refusal that says this session is not in the room at all. It is
+    // answered at the connection level rather than as a bar, because it is a
+    // question `join/3` re-derives — so re-opening the room settles it, and
+    // remembering it would be a guess with a shelf life.
+    expect(endsAccess(refused("unauthorized"))).toBe(true);
+
+    for (const code of ROOM_ERROR_CODES.filter((each) => each !== "unauthorized")) {
+      expect(endsAccess(refused(code))).toBe(false);
+    }
+    expect(endsAccess({ kind: "channel_timeout" })).toBe(false);
+    expect(endsAccess({ kind: "malformed_refusal", message: "x" })).toBe(false);
   });
 
   it("describes each bar as the different thing it is", () => {

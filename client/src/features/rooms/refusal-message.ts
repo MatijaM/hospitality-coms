@@ -1,5 +1,5 @@
 /**
- * What to show a worker when a room refuses something.
+ * The codes a room channel can refuse with, and what to show a worker for each.
  *
  * `src/app/failure-message.ts`'s argument applies here unchanged: the
  * envelope's own documentation says `code` is the machine-readable
@@ -17,14 +17,53 @@
  * there: those messages come from Ecto's changeset traversal and name the input
  * — `body` — that the worker actually typed.
  *
- * Both switches are exhaustive, so a new member of either union fails the
- * build rather than falling through to silence.
+ * Every switch here is exhaustive, so a code added to `ROOM_ERROR_CODES` fails
+ * the build rather than falling through to silence.
  */
 
-import type { ChannelErrorCode, ChannelFailure } from "../../socket/channel-failure";
+import type { ChannelFailure } from "../../socket/channel-failure";
 import type { SendBar } from "./room";
 
-export function refusalMessage(failure: ChannelFailure): string {
+/**
+ * The status atoms the two room channels are known to refuse with, traced
+ * through `HospitalityComsWeb.VenueRoomChannel`, `ShiftRoomChannel` and
+ * `RoomChannel`:
+ *
+ *   * `unauthorized` — every join refusal, and a send by a session that is not
+ *     in the room. The refusal enumerates nothing, so an ended engagement, a
+ *     suspension, a room at another venue and an id that names nothing are all
+ *     this one code (AE1).
+ *   * `bad_request` — `"send"` without a string `body`, and any event neither
+ *     channel handles.
+ *   * `forbidden` — a shift room this session may read but is not rostered on.
+ *     KTD6b: a roster period already elapsed still earns the reading.
+ *   * `gone` — a shift room past its `closes_at`. The grace window (KTD5),
+ *     answered on the same channel process with no rejoin and no job having run.
+ *   * `unprocessable_entity` — the message itself was rejected, with `fields`
+ *     naming `body`.
+ *
+ * **This list is the rooms' own**, not the transport's. `channel-failure.ts`
+ * names no codes precisely so that U8's peer codes cannot force a case into
+ * this file's switches; anything outside this list arrives as `unrecognised`.
+ */
+export const ROOM_ERROR_CODES = [
+  "unauthorized",
+  "bad_request",
+  "forbidden",
+  "gone",
+  "unprocessable_entity",
+] as const;
+
+export type RoomErrorCode = (typeof ROOM_ERROR_CODES)[number];
+
+/** A channel refusal drawn from the rooms' vocabulary. */
+export type RoomFailure = ChannelFailure<RoomErrorCode>;
+
+export function isRoomErrorCode(code: string): code is RoomErrorCode {
+  return (ROOM_ERROR_CODES as readonly string[]).includes(code);
+}
+
+export function refusalMessage(failure: RoomFailure): string {
   switch (failure.kind) {
     case "channel_timeout":
       return "The server did not answer in time. Your message may or may not have been sent — check the room before sending it again.";
@@ -36,7 +75,7 @@ export function refusalMessage(failure: ChannelFailure): string {
   }
 }
 
-function codeMessage(code: ChannelErrorCode, rawCode: string): string {
+function codeMessage(code: RoomErrorCode | "unrecognised", rawCode: string): string {
   switch (code) {
     case "unauthorized":
       return "You are not in this room. Either the engagement that let you in has ended, or the room is not one you can reach.";
@@ -56,13 +95,22 @@ function codeMessage(code: ChannelErrorCode, rawCode: string): string {
 /**
  * What a refused send means for the composer from here on.
  *
- * Two of the five codes say something durable about the room rather than about
- * this attempt — the room is closed, or this session is off the roster — and
- * both leave a room that is still perfectly readable. The other three are about
- * the message or the session and change nothing about the room, so they leave
- * the composer alone.
+ * Two of the five codes say something durable about the **room** — it is
+ * closed, or this session is off its roster — and both leave a room that is
+ * still perfectly readable. Those are bars: remembered, rendered, and cleared
+ * only by "Check again".
+ *
+ * `unauthorized` is deliberately **not** one of them, and it is not "no
+ * consequence" either. It says nothing about the room and everything about
+ * whether this session is still in it, which is a question `join/3` re-derives
+ * — so `use-room.ts` answers it at the connection level instead, and re-opening
+ * the room is what asks again. Making it a bar would persist a guess about
+ * access that the very next join settles for free.
+ *
+ * The remaining three are about the message or about this attempt, and change
+ * nothing at all.
  */
-export function barFromRefusal(failure: ChannelFailure): SendBar | null {
+export function barFromRefusal(failure: RoomFailure): SendBar | null {
   if (failure.kind !== "channel_error" && failure.kind !== "channel_field_error") {
     return null;
   }
@@ -78,6 +126,20 @@ export function barFromRefusal(failure: ChannelFailure): SendBar | null {
     case "unrecognised":
       return null;
   }
+}
+
+/**
+ * Whether a refused send means this session is no longer in the room at all.
+ *
+ * Only `unauthorized`, which is what both channels answer a send from a
+ * session `fetch_venue_room_membership/2` or `fetch_shift_room_reader/2` no
+ * longer returns an engagement for.
+ */
+export function endsAccess(failure: RoomFailure): boolean {
+  return (
+    (failure.kind === "channel_error" || failure.kind === "channel_field_error") &&
+    failure.code === "unauthorized"
+  );
 }
 
 /** How a room whose composer is barred describes itself. */

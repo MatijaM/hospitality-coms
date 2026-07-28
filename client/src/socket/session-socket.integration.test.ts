@@ -22,6 +22,15 @@
  * rather than modelled — `Channel`'s default `rejoinAfterMs` is 1s, 2s, 5s,
  * so four seconds spans two rejoins that a looping client would have made.
  *
+ * **Those margins are pinned to `phoenix`'s current backoff table, and nothing
+ * checks that.** `rejoinAfterMs` is `[1000, 2000, 5000]` in 1.8.9; a future
+ * version that started at, say, 5s would make the four-second window span no
+ * rejoin at all and the six-second control span one, and both assertions would
+ * keep passing while measuring nothing. Compounding it, this file is opt-in and
+ * outside `npm test`, so a `phoenix` upgrade will not trip it — the numbers
+ * here are a thing to re-check when the dependency moves, not a thing that will
+ * announce itself.
+ *
  * ## Getting the two variables
  *
  * The server needs a database, and the repository's own `CLAUDE.md` is
@@ -58,6 +67,7 @@ import { Socket } from "phoenix";
 import { createSessionSocket } from "./session-socket";
 import { decodeChannelRefusal } from "./channel-failure";
 import { decodeJoinedEngagementId, decodeRoomMessage } from "../features/rooms/decode";
+import { ROOM_ERROR_CODES } from "../features/rooms/refusal-message";
 
 const socketUrl =
   process.env.HOSPITALITY_COMS_SOCKET_URL ?? "ws://localhost:4000/socket/person";
@@ -106,7 +116,7 @@ describe.skipIf(token === "")("against a running server", () => {
     }, 10_000);
 
     expect(onJoined).not.toHaveBeenCalled();
-    expect(decodeChannelRefusal(onRefused.mock.calls[0]?.[0])).toEqual({
+    expect(decodeChannelRefusal(onRefused.mock.calls[0]?.[0], ROOM_ERROR_CODES)).toEqual({
       kind: "channel_error",
       code: "unauthorized",
       rawCode: "unauthorized",
@@ -162,7 +172,9 @@ describe.skipIf(token === "")("against a running server", () => {
       expect(onRefused).toHaveBeenCalled();
     }, 10_000);
 
-    expect(decodeChannelRefusal(onRefused.mock.calls[0]?.[0])).toMatchObject({
+    expect(
+      decodeChannelRefusal(onRefused.mock.calls[0]?.[0], ROOM_ERROR_CODES),
+    ).toMatchObject({
       kind: "channel_error",
       code: "unauthorized",
     });
@@ -184,7 +196,9 @@ describe.skipIf(token === "")("against a running server", () => {
       expect(onRefused).toHaveBeenCalled();
     }, 10_000);
 
-    expect(decodeChannelRefusal(onRefused.mock.calls[0]?.[0])).toMatchObject({
+    expect(
+      decodeChannelRefusal(onRefused.mock.calls[0]?.[0], ROOM_ERROR_CODES),
+    ).toMatchObject({
       kind: "channel_error",
       code: "unauthorized",
     });
@@ -254,7 +268,10 @@ describe.skipIf(token === "" || venueId === "")("a room this session is in", () 
 
     expect(outcome.status).toBe("error");
     expect(
-      decodeChannelRefusal(outcome.status === "error" ? outcome.payload : null),
+      decodeChannelRefusal(
+        outcome.status === "error" ? outcome.payload : null,
+        ROOM_ERROR_CODES,
+      ),
     ).toMatchObject({
       kind: "channel_field_error",
       code: "unprocessable_entity",
@@ -278,7 +295,10 @@ describe.skipIf(token === "" || venueId === "")("a room this session is in", () 
     const outcome = await room.push("nonsense", {});
 
     expect(
-      decodeChannelRefusal(outcome.status === "error" ? outcome.payload : null),
+      decodeChannelRefusal(
+        outcome.status === "error" ? outcome.payload : null,
+        ROOM_ERROR_CODES,
+      ),
     ).toMatchObject({ kind: "channel_error", code: "bad_request" });
 
     socket.disconnect();
