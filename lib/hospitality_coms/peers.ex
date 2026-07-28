@@ -177,9 +177,17 @@ defmodule HospitalityComs.Peers do
 
   @typedoc """
   Why a disconnect was refused, by step name.
+
+  `:request_gone` is the invariant `block_counterpart/4` used to assert with a
+  `{1, _}` match. It is unreachable while `peer_connections.request_id` is
+  `NOT NULL` with `ON DELETE RESTRICT` — U10's erasure deliberately retains
+  `connection_requests` rows for exactly that reason, since the row *is* KTD19's
+  block — and it is enumerated rather than matched so that revisiting the schema
+  decision produces a refusal instead of a `MatchError` crashing a transaction.
   """
   @type disconnect_failure() ::
           {:error, :close, :not_found | :already_disconnected, map()}
+          | {:error, :block, :request_gone, map()}
 
   ## Visibility
 
@@ -891,29 +899,115 @@ defmodule HospitalityComs.Peers do
   # somebody asks again — so "who may initiate next" is read off one row as it
   # is everywhere else.
   @spec block_counterpart(Ecto.Repo.t(), map(), Ecto.UUID.t(), DateTime.t()) ::
-          {:ok, Ecto.UUID.t()}
+          {:ok, Ecto.UUID.t()} | {:error, :request_gone}
   defp block_counterpart(repo, %{close: %Connection{} = connection}, person_id, now) do
+    block_on(repo, connection, person_id, now)
+  end
+
+  # The invariant this rests on is a schema decision:
+  # `peer_connections.request_id` is `NOT NULL` and references
+  # `connection_requests` with `ON DELETE RESTRICT`, so the row cannot be absent
+  # while the connection exists, and U10's erasure retains request rows
+  # deliberately — the row *is* KTD19's block, and deleting it would destroy the
+  # counterpart's protection.
+  #
+  # It used to be asserted with `{1, _rows} = …`, which turns a revisited schema
+  # decision into a `MatchError` that crashes the transaction rather than
+  # refusing it. It is enumerated instead, so the invariant fails loudly and in
+  # the shape this repository's callers already handle.
+  @spec block_on(Ecto.Repo.t(), Connection.t(), Ecto.UUID.t(), DateTime.t()) ::
+          {:ok, Ecto.UUID.t()} | {:error, :request_gone}
+  defp block_on(repo, %Connection{} = connection, person_id, now) do
     stamped_at = DateTime.truncate(now, :second)
     blocked = Connection.counterpart(connection, person_id)
 
-    # `{1, _}` and not a softer match: `peer_connections.request_id` is `NOT
-    # NULL` and references `connection_requests` with `ON DELETE RESTRICT`, so
-    # the row cannot be absent while the connection exists. **U10 is where that
-    # stops being true** — an erasure that deletes request rows would turn this
-    # into a `MatchError` that crashes the transaction rather than refusing it.
-    # See `HospitalityComs.Peers`' note on what U10 inherits.
-    {1, _rows} =
-      repo.update_all(
-        Records.request_by_id(connection.request_id),
-        set: [blocked_initiator_id: blocked, updated_at: stamped_at]
-      )
-
-    {:ok, blocked}
+    connection.request_id
+    |> Records.request_by_id()
+    |> repo.update_all(set: [blocked_initiator_id: blocked, updated_at: stamped_at])
+    |> blocked(blocked)
   end
+
+  @spec blocked({non_neg_integer(), nil}, Ecto.UUID.t()) ::
+          {:ok, Ecto.UUID.t()} | {:error, :request_gone}
+  defp blocked({1, _rows}, blocked), do: {:ok, blocked}
+  defp blocked({0, _rows}, _blocked), do: {:error, :request_gone}
 
   @spec disconnected({:ok, map()} | disconnect_failure()) ::
           {:ok, Connection.t()} | disconnect_failure()
   defp disconnected({:ok, %{close: %Connection{} = connection}}) do
+    announce_disconnection(connection)
+    {:ok, connection}
+  end
+
+  defp disconnected({:error, _step, _reason, _changes} = failure), do: failure
+
+  @doc """
+  Ends every conversation this person is a party to, without a scope.
+
+  **The lifecycle's disconnect**, and the reason it exists is that `disconnect/2`
+  takes a live `PersonScope` acting for itself and an erasure has none to hand
+  it. It runs inside the caller's transaction — hence the repo argument — and
+  announces nothing: `HospitalityComs.Lifecycle` calls
+  `announce_disconnection/1` after the commit, for
+  `HospitalityComs.Engagements.end_engagement/2`'s reason.
+
+  The remedy semantics stay here rather than being reimplemented one context
+  over. Each conversation closes at `now`, attributed to this person, and each
+  counterpart is blocked from approaching again — KTD19's disconnect half,
+  applied from the erasing party's side, which is the reading the origin
+  document's remedy requires.
+
+  One conditional `update_all` over the whole set, so a conversation another
+  party is closing at the same instant is closed once and this call simply does
+  not see it.
+
+  `{:error, :request_gone}` propagates `block_counterpart/4`'s enumerated
+  refusal; see `t:disconnect_failure/0` for why it cannot happen today.
+  """
+  @spec disconnect_all(Ecto.Repo.t(), Ecto.UUID.t(), DateTime.t()) ::
+          {:ok, [Connection.t()]} | {:error, :request_gone}
+  def disconnect_all(repo, person_id, %DateTime{} = now) when is_binary(person_id) do
+    stamped_at = DateTime.truncate(now, :second)
+
+    {_count, connections} =
+      person_id
+      |> Records.live_connections_of()
+      |> repo.update_all(
+        set: [
+          disconnected_at: stamped_at,
+          disconnected_by_id: person_id,
+          updated_at: stamped_at
+        ]
+      )
+
+    block_all(repo, connections, person_id, now)
+  end
+
+  @spec block_all(Ecto.Repo.t(), [Connection.t()], Ecto.UUID.t(), DateTime.t()) ::
+          {:ok, [Connection.t()]} | {:error, :request_gone}
+  defp block_all(repo, connections, person_id, now) do
+    Enum.reduce_while(connections, {:ok, connections}, fn connection, outcome ->
+      repo |> block_on(connection, person_id, now) |> blocked_or_halt(outcome)
+    end)
+  end
+
+  @spec blocked_or_halt(
+          {:ok, Ecto.UUID.t()} | {:error, :request_gone},
+          {:ok, [Connection.t()]}
+        ) :: {:cont, {:ok, [Connection.t()]}} | {:halt, {:error, :request_gone}}
+  defp blocked_or_halt({:ok, _blocked}, outcome), do: {:cont, outcome}
+  defp blocked_or_halt({:error, :request_gone} = failure, _outcome), do: {:halt, failure}
+
+  @doc """
+  Tells both parties a conversation has closed.
+
+  Public so `HospitalityComs.Lifecycle` can announce after its own commit. Best
+  effort and logged rather than propagated, like every other announcement in
+  this module: the write has already committed, and failing an erasure in order
+  to report that a socket was not told would be the wrong trade.
+  """
+  @spec announce_disconnection(Connection.t()) :: :ok
+  def announce_disconnection(%Connection{} = connection) do
     announce(
       Connection.parties(connection),
       {:peer_disconnected,
@@ -923,11 +1017,7 @@ defmodule HospitalityComs.Peers do
          at: connection.disconnected_at
        }}
     )
-
-    {:ok, connection}
   end
-
-  defp disconnected({:error, _step, _reason, _changes} = failure), do: failure
 
   ## Reading a connection
 

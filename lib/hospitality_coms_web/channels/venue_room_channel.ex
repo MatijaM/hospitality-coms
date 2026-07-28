@@ -189,7 +189,8 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
   def handle_in(_event, _payload, socket), do: RoomChannel.unknown_event(socket)
 
   @spec sent(
-          {:ok, RoomMessage.t()} | {:error, :not_a_member | Ecto.Changeset.t(RoomMessage.t())},
+          {:ok, RoomMessage.t()}
+          | {:error, :not_a_member | :room_closed | Ecto.Changeset.t(RoomMessage.t())},
           Socket.t()
         ) :: {:reply, RoomChannel.reply(), Socket.t()}
   defp sent({:ok, %RoomMessage{} = message}, socket) do
@@ -198,7 +199,11 @@ defmodule HospitalityComsWeb.VenueRoomChannel do
     {:reply, {:ok, rendered}, socket}
   end
 
-  defp sent({:error, :not_a_member}, socket) do
+  # A venue that has been closed and a session that is not in its room get the
+  # same sentence, for AE1's reason one layer up: which of the two it is says
+  # whether that venue is still trading, and a session already refused has no
+  # claim on the answer.
+  defp sent({:error, refusal}, socket) when refusal in [:not_a_member, :room_closed] do
     {:reply, {:error, ErrorEnvelope.new(:unauthorized, @refusal)}, socket}
   end
 

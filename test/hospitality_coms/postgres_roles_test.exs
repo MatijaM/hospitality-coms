@@ -60,6 +60,7 @@ defmodule HospitalityComs.PostgresRolesTest do
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
   alias HospitalityComs.Repo.Migrations.GrantPeerZone
   alias HospitalityComs.Repo.Migrations.GrantProfileZone
+  alias HospitalityComs.Repo.Migrations.GrantRetentionZone
   alias HospitalityComs.Repo.Migrations.GrantRoomZone
 
   @roles_migration "create_postgres_roles"
@@ -68,6 +69,7 @@ defmodule HospitalityComs.PostgresRolesTest do
   @room_grants_migration "grant_room_zone"
   @peer_grants_migration "grant_peer_zone"
   @profile_grants_migration "grant_profile_zone"
+  @retention_grants_migration "grant_retention_zone"
 
   # In the order Ecto applies them, which is the reverse of the order
   # `rolled_back_grants/0` unwinds them in. Every unit that grants adds an
@@ -79,7 +81,8 @@ defmodule HospitalityComs.PostgresRolesTest do
     {@engagement_grants_migration, GrantEngagementZone},
     {@room_grants_migration, GrantRoomZone},
     {@peer_grants_migration, GrantPeerZone},
-    {@profile_grants_migration, GrantProfileZone}
+    {@profile_grants_migration, GrantProfileZone},
+    {@retention_grants_migration, GrantRetentionZone}
   ]
 
   @migrations [{@roles_migration, CreatePostgresRoles} | @grant_migrations]

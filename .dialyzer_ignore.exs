@@ -53,5 +53,32 @@
   # it came from; sending a message takes the conversation under `FOR SHARE` and
   # then inserts. Each is a decision and a write that must not be able to
   # half-happen, which is exactly the shape AGENTS.md requires `Ecto.Multi` for.
-  {"lib/hospitality_coms/peers.ex", :call_without_opaque}
+  {"lib/hospitality_coms/peers.ex", :call_without_opaque},
+
+  # The fifth instance of the same `Ecto.Multi` / `MapSet.t()` false positive,
+  # reported twice in this file — once for erasure's multi and once for venue
+  # closure's. Confirmed to be the same one rather than assumed: both warnings
+  # name `%Ecto.Multi{:names => %MapSet{...}} (with opaque subterms)` in the
+  # first argument of `Multi.run/3`, which is the struct's own field and not
+  # anything this module constructs or reads.
+  #
+  # Neither call can go away, and this is the file where a half-happened write
+  # would matter most. Erasure ends every engagement, pseudonymises the person,
+  # deletes their tokens and disconnects their conversations; closing a venue
+  # stamps a deletion deadline on its whole room history. Each is irreversible
+  # and each has to be all-or-nothing, which is exactly the shape AGENTS.md
+  # requires `Ecto.Multi` for.
+  {"lib/hospitality_coms/lifecycle.ex", :call_without_opaque},
+
+  # The sixth instance of the same `Ecto.Multi` / `MapSet.t()` false positive,
+  # reported twice in this file — once for each of the two sends. Confirmed to
+  # be the same one rather than assumed: both warnings name
+  # `%Ecto.Multi{:names => %MapSet{...}}` as the expected term, which is the
+  # struct's own field and nothing this module constructs or reads.
+  #
+  # Neither call can go away, and this is why the sends became multi-step at
+  # all: a message and the author's own copy of it are written together or not
+  # at all (KTD16), and the venue-room send resolves its venue under `FOR SHARE`
+  # in the same transaction so a closure cannot commit behind it.
+  {"lib/hospitality_coms/rooms.ex", :call_without_opaque}
 ]

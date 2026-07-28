@@ -40,6 +40,7 @@ defmodule HospitalityComs.Rooms.RoomMessage do
   import Ecto.Changeset
 
   alias HospitalityComs.Engagements.Engagement
+  alias HospitalityComs.Lifecycle
   alias HospitalityComs.Rooms.ShiftRoom
   alias HospitalityComs.Venues.Venue
 
@@ -48,6 +49,14 @@ defmodule HospitalityComs.Rooms.RoomMessage do
   schema "room_messages" do
     field :body, :string
     field :sent_at, :utc_datetime
+
+    # KTD16's deadline, stamped rather than joined. `closes_at + 30 days` for a
+    # shift-room message, from the room the sender had already resolved; **null**
+    # for a venue-room message, because venue-room history has no clock at all
+    # while the venue exists. `HospitalityComs.Lifecycle.close_venue/2` is what
+    # gives it one, and it stamps only the rows where this is still null — so a
+    # shift message's deadline is never moved by the venue closing.
+    field :delete_after, :utc_datetime
 
     belongs_to :venue, Venue
     belongs_to :shift_room, ShiftRoom
@@ -67,6 +76,7 @@ defmodule HospitalityComs.Rooms.RoomMessage do
           author_engagement: Engagement.t() | Ecto.Association.NotLoaded.t() | nil,
           body: String.t() | nil,
           sent_at: DateTime.t() | nil,
+          delete_after: DateTime.t() | nil,
           inserted_at: DateTime.t() | nil,
           updated_at: DateTime.t() | nil
         }
@@ -109,6 +119,7 @@ defmodule HospitalityComs.Rooms.RoomMessage do
     engagement
     |> base_changeset(body, now)
     |> put_change(:shift_room_id, room.id)
+    |> put_change(:delete_after, Lifecycle.history_deadline(room.closes_at))
     |> declare_constraints()
   end
 

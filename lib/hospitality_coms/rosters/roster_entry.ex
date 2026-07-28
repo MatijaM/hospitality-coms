@@ -82,6 +82,7 @@ defmodule HospitalityComs.Rosters.RosterEntry do
   import Ecto.Changeset
 
   alias HospitalityComs.Engagements.Engagement
+  alias HospitalityComs.Lifecycle
   alias HospitalityComs.Rooms.ShiftRoom
   alias HospitalityComs.Venues.Venue
 
@@ -90,6 +91,13 @@ defmodule HospitalityComs.Rosters.RosterEntry do
   schema "roster_entries" do
     field :joined_at, :utc_datetime_usec
     field :left_at, :utc_datetime_usec
+
+    # KTD16's shift-history deadline, stamped at insert from the room's
+    # `closes_at` and never joined afterwards. Whole seconds, unlike the two
+    # bounds above: nothing derives a period from it, and the sweep's comparison
+    # is `delete_after < instant`, so a second of slop moves a deletion by a
+    # second rather than changing an overlap that has already elapsed.
+    field :delete_after, :utc_datetime
 
     belongs_to :venue, Venue
     belongs_to :shift_room, ShiftRoom
@@ -109,6 +117,7 @@ defmodule HospitalityComs.Rosters.RosterEntry do
           engagement: Engagement.t() | Ecto.Association.NotLoaded.t() | nil,
           joined_at: DateTime.t() | nil,
           left_at: DateTime.t() | nil,
+          delete_after: DateTime.t() | nil,
           inserted_at: DateTime.t() | nil,
           updated_at: DateTime.t() | nil
         }
@@ -147,6 +156,7 @@ defmodule HospitalityComs.Rosters.RosterEntry do
       shift_room_id: room.id,
       engagement_id: engagement.id,
       joined_at: now,
+      delete_after: Lifecycle.history_deadline(room.closes_at),
       inserted_at: stamped_at,
       updated_at: stamped_at
     )

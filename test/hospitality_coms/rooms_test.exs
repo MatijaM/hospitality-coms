@@ -68,6 +68,7 @@ defmodule HospitalityComs.RoomsTest do
   alias HospitalityComs.Engagements
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Engagements.Records, as: EngagementRecords
+  alias HospitalityComs.Lifecycle
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms
   alias HospitalityComs.Rooms.Records
@@ -1051,8 +1052,9 @@ defmodule HospitalityComs.RoomsTest do
     Repo.query!(
       """
       INSERT INTO roster_entries
-        (id, venue_id, shift_room_id, engagement_id, joined_at, left_at, inserted_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+        (id, venue_id, shift_room_id, engagement_id, joined_at, left_at,
+         delete_after, inserted_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $8, $7, $7)
       """,
       [
         uuid(id),
@@ -1061,7 +1063,11 @@ defmodule HospitalityComs.RoomsTest do
         uuid(engagement.id),
         offset_instant(lower),
         offset_instant(upper),
-        DateTime.truncate(@now, :second)
+        DateTime.truncate(@now, :second),
+        # U10's stamped retention deadline. The column is `NOT NULL`, so a raw
+        # insert has to carry what `RosterEntry.join_changeset/3` would have
+        # stamped from the room.
+        Lifecycle.history_deadline(room.closes_at)
       ]
     )
 

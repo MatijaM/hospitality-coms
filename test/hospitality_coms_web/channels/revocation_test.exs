@@ -39,6 +39,7 @@ defmodule HospitalityComsWeb.RevocationTest do
   use Oban.Testing, repo: HospitalityComs.Repo
 
   alias HospitalityComs.Engagements
+  alias HospitalityComs.Lifecycle
   alias HospitalityComs.Rooms
   alias HospitalityComs.Workers.EngagementSweeper
   alias HospitalityComs.Workers.ExpireEngagement
@@ -196,6 +197,60 @@ defmodule HospitalityComsWeb.RevocationTest do
       assert_receive {:EXIT, ^b_pid, {:shutdown, :revoked}}
 
       assert {:ok, _reply, _rejoined} = join(world.socket, venue_topic(world.a.venue), %{})
+    end
+  end
+
+  describe "erasing the person a channel is open for" do
+    # CLAUDE.md names U10 as "the one to watch" for the residue a per-join
+    # session derivation leaves: a channel authenticates its session at join and
+    # authorises per inbound event (KTD5), so a token deleted mid-session leaves
+    # that channel able to send until it next joins — unless
+    # `PersonAuth.disconnect_sessions/1` reached it, which erasure has no way to
+    # do from a context.
+    #
+    # The decision U10 took is that the teardown is not what makes the channel
+    # powerless. Erasure ends every engagement in the same transaction, so the
+    # *authorisation* half fails on the very next event, on the same process,
+    # with nothing having rejoined. These two tests are that decision rather
+    # than a description of it.
+
+    test "refuses the next send on a channel that is still joined" do
+      Process.flag(:trap_exit, true)
+      world = two_venues()
+      %{venue: venue} = world.a
+
+      {:ok, _reply, channel} = subscribe_and_join(world.socket, venue_topic(venue), %{})
+
+      # The control, first: the same channel sending successfully, so what
+      # follows is about the erasure rather than about a broken transport.
+      ref = push(channel, "send", %{"body" => "before"})
+      assert_reply ref, :ok, _sent
+
+      assert {:ok, _erasure} = Lifecycle.erase_person(world.person)
+
+      ref = push(channel, "send", %{"body" => "after"})
+      assert_reply ref, :error, refusal
+      assert refusal.error.code == "unauthorized"
+    end
+
+    test "and refuses the rejoin, at every venue at once" do
+      # Unlike ending one engagement, erasure crosses venues — which is why it
+      # runs as the application's own role and why no employer session can do
+      # it. The second venue is the control: after `end_engagement/2` the same
+      # socket can still join venue B, and after an erasure it cannot.
+      Process.flag(:trap_exit, true)
+      world = two_venues()
+
+      assert {:ok, _reply, _channel} =
+               subscribe_and_join(world.socket, venue_topic(world.b.venue), %{})
+
+      assert {:ok, _erasure} = Lifecycle.erase_person(world.person)
+
+      assert {:error, refusal} = join(world.socket, venue_topic(world.a.venue), %{})
+      assert refusal.error == @refused
+
+      assert {:error, refusal} = join(world.socket, venue_topic(world.b.venue), %{})
+      assert refusal.error == @refused
     end
   end
 
