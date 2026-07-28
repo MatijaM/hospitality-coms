@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { MemoryRouter } from "react-router";
@@ -44,9 +44,11 @@ function renderApp(
     </MemoryRouter>
   );
 
-  render(options.strict === true ? <StrictMode>{tree}</StrictMode> : tree);
+  const { unmount } = render(
+    options.strict === true ? <StrictMode>{tree}</StrictMode> : tree,
+  );
 
-  return { api, tokenStore, roomStore };
+  return { api, tokenStore, roomStore, unmount };
 }
 
 const signedIn = { currentPerson: () => Promise.resolve(ok(somePerson)) };
@@ -296,6 +298,14 @@ describe("an authenticated session", () => {
     expect(
       await screen.findByRole("heading", { name: /not reachable from here yet/i }),
     ).toBeVisible();
+    // The heading is not the claim; the two entries under it are. Both went
+    // false when U10 and U11 shipped, and a version of this test that asserted
+    // the heading alone stayed green through it. Asserted on the sentence each
+    // entry makes rather than on its label, because a bullet reduced back to
+    // "erasure" or "the demo controls" is exactly the regression — it names a
+    // unit's leftovers instead of what a worker cannot do.
+    expect(screen.getByText(/no endpoint and no channel/i)).toBeVisible();
+    expect(screen.getByText(/x-demo-control/i)).toBeVisible();
   });
 
   // The previous version of this asserted only that a heading existed, so the
@@ -308,7 +318,14 @@ describe("an authenticated session", () => {
   // `PersonSocket` does not route. `sockets_test.exs` pins that routing table
   // exactly, with a control, so adding the channel fails there — and this is
   // the assertion that should then be replaced by an "offers the profile
-  // surface" test, the way rooms got one below when its channel landed.
+  // surface" test, the way rooms got one when its channel landed and the tab
+  // tests below inherited.
+  //
+  // The record is behind a tab now rather than a link, so the door has to be
+  // opened before "Your record" is in the document. That is deliberately not
+  // the weaker test it looks like: the link version proved a door existed,
+  // and this proves the surface behind it mounts — which is what makes "the
+  // screen cannot connect" a claim about something rather than about nothing.
   it("warns that the profile screen cannot connect, because no channel serves it", async () => {
     renderApp({
       path: "/",
@@ -316,22 +333,182 @@ describe("an authenticated session", () => {
       tokenStore: createMemoryTokenStore("c2Vzc2lvbg"),
     });
 
-    const profile = await screen.findByRole("link", { name: /your record/i });
+    await userEvent.click(await screen.findByRole("tab", { name: "Profile" }));
 
-    expect(profile).toBeVisible();
-    expect(await screen.findByText(/cannot connect yet/i)).toBeVisible();
+    expect(await screen.findByRole("heading", { name: /^your record$/i })).toBeVisible();
+    expect(screen.getByText(/cannot connect yet/i)).toBeVisible();
   });
+});
 
-  it("offers the rooms surface, which is no longer one of the absences", async () => {
-    renderApp({
+/**
+ * The landing page's tabs.
+ *
+ * Two shapes are avoided throughout, both of which this project has shipped
+ * before: a tab test that passes because the panel was never rendered either
+ * way, and an assertion on a heading standing in for one on the panel's
+ * content. So every claim about a panel is made against a sentence only that
+ * surface renders, and every "it is gone" assertion is made in a test that
+ * saw it there first.
+ */
+describe("the landing page's tabs", () => {
+  /** A sentence each surface renders and neither of the other two does. */
+  const ROOMS = /no rooms yet\. add one by its id/i;
+  const PEERS = /anybody you worked with at the same place at the same time/i;
+  const PROFILE = /no employer has confirmed a job for you yet/i;
+
+  function landOnHome() {
+    return renderApp({
       path: "/",
       api: createFakeApi(signedIn),
       tokenStore: createMemoryTokenStore("c2Vzc2lvbg"),
     });
+  }
 
-    await userEvent.click(await screen.findByRole("link", { name: /rooms/i }));
+  async function panel(): Promise<HTMLElement> {
+    return screen.findByRole("tabpanel");
+  }
 
-    expect(await screen.findByRole("heading", { name: /^rooms$/i })).toBeVisible();
+  it("opens on the rooms surface with nothing to click", async () => {
+    landOnHome();
+
+    expect(within(await panel()).getByText(ROOMS)).toBeVisible();
+  });
+
+  it("puts the peer surface on screen and takes the rooms one off", async () => {
+    landOnHome();
+
+    // Reached first, so that the absence below is "unmounted" rather than
+    // "never rendered" — the distinction a 2026-07 review found this suite
+    // could not make anywhere it asserted one.
+    expect(within(await panel()).getByText(ROOMS)).toBeVisible();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Peers" }));
+
+    expect(within(await panel()).getByText(PEERS)).toBeVisible();
+    expect(screen.queryByText(ROOMS)).not.toBeInTheDocument();
+  });
+
+  it("puts the record on screen and takes the rooms surface off", async () => {
+    landOnHome();
+
+    expect(within(await panel()).getByText(ROOMS)).toBeVisible();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Profile" }));
+
+    expect(within(await panel()).getByText(PROFILE)).toBeVisible();
+    expect(screen.queryByText(ROOMS)).not.toBeInTheDocument();
+  });
+
+  it("never has two surfaces mounted at once", async () => {
+    // The rule `usePeerSurface`'s moduledoc states — one instance, because one
+    // topic — read off the DOM rather than off the hook. Hiding a panel with
+    // CSS instead of unmounting it passes every assertion above this one and
+    // fails these.
+    landOnHome();
+    await panel();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Peers" }));
+
+    expect(screen.getAllByRole("tabpanel")).toHaveLength(1);
+    expect(screen.queryByText(ROOMS)).not.toBeInTheDocument();
+    expect(screen.queryByText(PROFILE)).not.toBeInTheDocument();
+  });
+
+  it("moves aria-selected and the panel wiring together", async () => {
+    landOnHome();
+
+    const rooms = await screen.findByRole("tab", { name: "Rooms", selected: true });
+    expect(rooms.getAttribute("aria-controls")).toBe((await panel()).id);
+    expect((await panel()).getAttribute("aria-labelledby")).toBe(rooms.id);
+    expect(screen.getByRole("tab", { name: "Peers", selected: false })).toBeVisible();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Peers" }));
+
+    const peers = await screen.findByRole("tab", { name: "Peers", selected: true });
+    // Both halves, and the ids differ per tab, so a wiring hard-coded to the
+    // first panel passes the assertions above and fails these.
+    expect(peers.getAttribute("aria-controls")).toBe((await panel()).id);
+    expect((await panel()).getAttribute("aria-labelledby")).toBe(peers.id);
+    expect(screen.getByRole("tab", { name: "Rooms", selected: false })).toBeVisible();
+  });
+
+  it("walks the strip with the arrow keys, wrapping at the end", async () => {
+    landOnHome();
+
+    (await screen.findByRole("tab", { name: "Rooms" })).focus();
+
+    await userEvent.keyboard("{ArrowRight}");
+    expect(screen.getByRole("tab", { name: "Peers" })).toHaveFocus();
+    expect(within(await panel()).getByText(PEERS)).toBeVisible();
+
+    // Wrapping is the half a handler written as `min`/`max` gets wrong, and
+    // the third press is what reaches it.
+    await userEvent.keyboard("{ArrowRight}{ArrowRight}");
+    expect(screen.getByRole("tab", { name: "Rooms" })).toHaveFocus();
+    expect(within(await panel()).getByText(ROOMS)).toBeVisible();
+
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(screen.getByRole("tab", { name: "Profile" })).toHaveFocus();
+    expect(within(await panel()).getByText(PROFILE)).toBeVisible();
+  });
+
+  it("jumps to either end with Home and End", async () => {
+    landOnHome();
+
+    (await screen.findByRole("tab", { name: "Rooms" })).focus();
+
+    await userEvent.keyboard("{End}");
+    expect(screen.getByRole("tab", { name: "Profile" })).toHaveFocus();
+    expect(within(await panel()).getByText(PROFILE)).toBeVisible();
+
+    // From the far end rather than from the middle, so a `Home` that returns
+    // the tab it was already on cannot pass.
+    await userEvent.keyboard("{Home}");
+    expect(screen.getByRole("tab", { name: "Rooms" })).toHaveFocus();
+    expect(within(await panel()).getByText(ROOMS)).toBeVisible();
+  });
+
+  it("keeps the identity block out of the tabs", async () => {
+    landOnHome();
+
+    // Not "it is on the page" — with three tabs and one log-out control, the
+    // failure to guard against is somebody folding it into a panel, and a
+    // presence assertion is satisfied by that.
+    expect(await screen.findByText("worker@example.com")).toBeVisible();
+    expect(
+      within(await panel()).queryByRole("button", { name: /log out/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /log out/i })).toBeVisible();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Profile" }));
+
+    expect(screen.getByText("worker@example.com")).toBeVisible();
+    expect(
+      within(await panel()).queryByRole("button", { name: /log out/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /log out/i })).toBeVisible();
+  });
+
+  it("still serves each surface at its own path", async () => {
+    // The tabs are a second door. These three paths are what every test above
+    // the three surfaces enters through, so a landing page that took them over
+    // would invalidate about eighty-five assertions elsewhere in one commit.
+    for (const [path, text] of [
+      ["/rooms", ROOMS],
+      ["/peers", PEERS],
+      ["/profile", PROFILE],
+    ] as const) {
+      const { unmount } = renderApp({
+        path,
+        api: createFakeApi(signedIn),
+        tokenStore: createMemoryTokenStore("c2Vzc2lvbg"),
+      });
+
+      expect(await screen.findByText(text)).toBeVisible();
+      expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+
+      unmount();
+    }
   });
 });
 

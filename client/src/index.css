@@ -155,6 +155,32 @@ code {
   color: var(--muted);
 }
 
+/* The landing page's tab strip. Three buttons that must not read as three
+   things to press: the rule under the strip and the one under the open tab are
+   doing the whole job, so the buttons give up the accent fill they get above. */
+
+[role="tablist"] {
+  display: flex;
+  gap: 0.25rem;
+  margin: 1.5rem 0 2rem;
+  border-bottom: 1px solid var(--line);
+}
+
+[role="tab"] {
+  margin-top: 0;
+  padding: 0.5rem 0.75rem;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+[role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--ink);
+}
+
 /* The room list and the conversation. Both are lists and neither reads as one:
    the first is a row of controls, the second is a transcript. */
 
