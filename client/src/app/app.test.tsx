@@ -293,7 +293,33 @@ describe("an authenticated session", () => {
       tokenStore: createMemoryTokenStore("c2Vzc2lvbg"),
     });
 
-    expect(await screen.findByRole("heading", { name: /not built yet/i })).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: /not reachable from here yet/i }),
+    ).toBeVisible();
+  });
+
+  // The previous version of this asserted only that a heading existed, so the
+  // list under it — which said "waiting on U9", "waiting on U10", "waiting on
+  // U11" long after all three shipped — was covered by nothing.
+  //
+  // A heading is not the claim. The claim is which surfaces a signed-in person
+  // cannot use, and the one most likely to come true without anyone editing
+  // this file is the profile: it needs a `profile:*` channel that
+  // `PersonSocket` does not route. `sockets_test.exs` pins that routing table
+  // exactly, with a control, so adding the channel fails there — and this is
+  // the assertion that should then be replaced by an "offers the profile
+  // surface" test, the way rooms got one below when its channel landed.
+  it("warns that the profile screen cannot connect, because no channel serves it", async () => {
+    renderApp({
+      path: "/",
+      api: createFakeApi(signedIn),
+      tokenStore: createMemoryTokenStore("c2Vzc2lvbg"),
+    });
+
+    const profile = await screen.findByRole("link", { name: /your record/i });
+
+    expect(profile).toBeVisible();
+    expect(await screen.findByText(/cannot connect yet/i)).toBeVisible();
   });
 
   it("offers the rooms surface, which is no longer one of the absences", async () => {

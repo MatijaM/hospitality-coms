@@ -148,7 +148,7 @@ everybody can. So the pause is not the requirement. These are:
 
 Where a human is present, stop and ask. The artifact and its ordering are unchanged either way.
 
-For bug fixes, use `/compound-engineering:ce-debug` to understand and reproduce the issue, then use the test design gate to harden the regression coverage before applying the fix. Skip the gate only for documentation-only work, routine logging instrumentation covered by the logging exception below, or a purely mechanical test-only change where no production implementation will follow.
+For bug fixes, use `/compound-engineering:ce-debug` to understand and reproduce the issue, then use the test design gate to harden the regression coverage before applying the fix. Skip the gate only for documentation-only work, routine logging instrumentation covered by the logging exception below, a purely mechanical test-only change where no production implementation will follow, or a change to user-visible copy that alters no behaviour — a brief predicting the first failure of "this sentence is false and here is the true one" is ceremony, and a gate that produces ceremony is one people learn to route around. The test still comes with it; the brief does not.
 
 ### Every Bug Fix Must Have a Regression Test
 
