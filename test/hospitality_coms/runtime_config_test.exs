@@ -28,6 +28,7 @@ defmodule HospitalityComs.RuntimeConfigTest do
 
   @credentials %{
     "DATABASE_URL" => "ecto://postgres:postgres@localhost/hospitality_coms_prod",
+    "EMPLOYER_DATABASE_URL" => "ecto://employer_login:secret@localhost/hospitality_coms_prod",
     "SECRET_KEY_BASE" => String.duplicate("s", 64)
   }
 
@@ -112,7 +113,33 @@ defmodule HospitalityComs.RuntimeConfigTest do
     end
   end
 
+  describe "the employer repo's own credential" do
+    test "refuses to boot without one" do
+      # Issue #17. Before it, `EmployerRepo` shared `DATABASE_URL` and assumed
+      # `employer_role` afterwards, so its session user was the role that owns
+      # every table and `RESET ROLE` took the grant tier off. Falling back to
+      # `DATABASE_URL` here would not fail — it would quietly undo that, which
+      # is the same class of silent failure as the two rules above.
+      assert_raise RuntimeError, ~r/EMPLOYER_DATABASE_URL/, fn ->
+        @required |> Map.delete("EMPLOYER_DATABASE_URL") |> read_prod()
+      end
+    end
+
+    test "points the employer repo at it, and not at the owner's" do
+      # The control for the refusal above, and the assertion that matters: a
+      # required variable that was read and then ignored would still pass the
+      # test above. The two repos must not resolve to the same URL.
+      config = read_prod(@required)
+
+      assert employer_repo(config)[:url] == @credentials["EMPLOYER_DATABASE_URL"]
+      assert primary_repo(config)[:url] == @credentials["DATABASE_URL"]
+      refute employer_repo(config)[:url] == primary_repo(config)[:url]
+    end
+  end
+
   defp endpoint(config), do: config[:hospitality_coms][HospitalityComsWeb.Endpoint]
+  defp employer_repo(config), do: config[:hospitality_coms][HospitalityComs.EmployerRepo]
+  defp primary_repo(config), do: config[:hospitality_coms][HospitalityComs.Repo]
 
   test "leaves the development default alone" do
     config = read_env(:dev, %{})

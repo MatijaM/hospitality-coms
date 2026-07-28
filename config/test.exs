@@ -13,9 +13,15 @@ config :hospitality_coms, HospitalityComs.Repo,
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
 
+# A different Postgres role from the one above, which is issue #17 and is the
+# whole of what makes `RESET ROLE` futile on an employer connection. The
+# password is not a secret and never was: it sits beside the `postgres` one, the
+# local cluster authenticates with `trust` and ignores it, and CI's service
+# container authenticates with `scram-sha-256` and needs it. The role is created
+# by `*_create_employer_login_role.exs`, which reads this value.
 config :hospitality_coms, HospitalityComs.EmployerRepo,
-  username: "postgres",
-  password: "postgres",
+  username: "employer_login",
+  password: "employer_login",
   hostname: "localhost",
   database: "hospitality_coms_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,

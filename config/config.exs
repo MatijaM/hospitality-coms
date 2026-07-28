@@ -86,9 +86,20 @@ config :hospitality_coms, Oban,
 # never make progress again.
 config :hospitality_coms, HospitalityComs.Lifecycle, batch_size: 500, ceiling: 5_000
 
-# The employer zone acts as a Postgres role that will hold no privilege on
-# person-zone tables. The role is assumed on connection rather than logged in
-# as, so there is no second credential to manage.
+# The employer zone acts as a Postgres role that holds no privilege on
+# person-zone tables.
+#
+# It *authenticates* as `employer_login` and then assumes `employer_role`, and
+# the two being different roles is issue #17. Until it landed, these connections
+# borrowed the application's own superuser credentials, so `RESET ROLE` — over a
+# raw query, which neither BEAM guard sees — put the owner of every table in
+# this database back on the connection and the grant tier was defeatable from
+# the same code position as the guards above it.
+#
+# `employer_login` is `NOINHERIT` and holds no privilege in its own name, so
+# `RESET ROLE` now lands on a role holding *less* than `employer_role`. The
+# credential itself is per-environment and lives in `config/dev.exs`,
+# `config/test.exs` and `config/runtime.exs` beside the primary repo's.
 config :hospitality_coms, HospitalityComs.EmployerRepo,
   after_connect: {Postgrex, :query!, ["SET ROLE employer_role", []]},
   priv: "priv/employer_repo"

@@ -60,6 +60,42 @@ alone is very hard.
   its own database on the shared one. See
   `../developer-experience/worktree-isolation-does-not-isolate-the-database.md`.
 
+## Membership is the exception, and it fails in the opposite direction
+
+`GRANT <role> TO <role>` writes **no** `pg_shdepend` row — role membership lives in the shared
+`pg_auth_members` catalog. Measured. Two consequences, and they point opposite ways:
+
+- **Good.** A login role granted membership of a restricted role costs nothing on the
+  cross-database axis. It stays droppable from anywhere, which is why such a role should be
+  granted membership and no object privilege at all.
+- **Bad, and silent.** `DROP ROLE restricted_role` therefore does **not** fail while a login role
+  is a member of it. It removes the membership without complaint, and re-creating the role does
+  not restore it — the role that comes back is a fresh one with no members. So rolling a roles
+  migration back underneath a live login role leaves a credential that can still authenticate and
+  can no longer assume anything, and the application cannot open a connection until somebody
+  re-runs the migration that granted the membership.
+
+The mitigation is the same list already described above, extended: the migration that grants
+membership is rolled back **before** the migration that creates the role it points at, and the
+property is pinned as its own test — because unlike a `pg_shdepend` conflict, nothing about this
+one is loud.
+
+## Whether `down` should drop cluster-global roles at all
+
+Asked and answered on this project, in the direction of keeping it. The reasoning is worth
+copying because the deciding facts are environmental rather than architectural:
+
+- **A fresh cluster per CI job removes the hazard from CI entirely.** One service container, one
+  database, nothing to collide with — provided partitioned test runs that interpolate a partition
+  id into the database name are prohibited, since each partition database runs the grant
+  migrations.
+- **What is left is one developer's two databases, which the detection above already names.**
+- **Moving role creation to a provisioning step outside migrations trades a detected failure for
+  an undetected one**, and it gets worse once a repo *logs in* as one of the roles: a missing
+  provisioning step stops being "a grant is absent" and becomes "the application cannot boot".
+- **The reversibility property is worth keeping** — migrating up then down leaving no role behind
+  is one of the few things that proves the migration is honest about what it did.
+
 ## The related trap in the same family
 
 `ALTER DEFAULT PRIVILEGES` must never be used where a role is meant to be denied by default. It

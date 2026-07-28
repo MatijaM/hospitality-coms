@@ -38,11 +38,17 @@ defmodule HospitalityComsWeb.Presence do
       no employer-side venue-room membership function to hang one off — U6
       declined to write one for this reason.
 
-  What remains is the same residue `CLAUDE.md` records for `RESET ROLE`: any
-  code running in this VM can call `list/1` on any topic, because presence is a
-  process registry rather than a privilege. The boundary here is strong against
-  accident and against a session; it is not a Postgres grant and does not claim
-  to be.
+  What remains is that any code running in this VM can call `list/1` on any
+  topic, because presence is a process registry rather than a privilege. The
+  boundary here is strong against accident and against a session; it is not a
+  Postgres grant and does not claim to be.
+
+  This used to cite `RESET ROLE` as the same residue, and since #17 that
+  comparison is wrong in a way worth correcting rather than deleting.
+  `EmployerRepo` now authenticates as a role that holds no privilege of its own,
+  so the grant tier is *not* defeatable from this code position any more — where
+  presence still is. The two are no longer the same kind of control, and this is
+  the weaker one.
 
   ## Three things on the record, none of them closed here
 

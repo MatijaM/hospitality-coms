@@ -62,9 +62,17 @@ defmodule HospitalityComs.EmployerRepo do
   respect that matters: its connections run as the Postgres role
   `employer_role`, which holds no privilege on any person-zone table. That is
   the boundary — the only tier whose violation produces an error rather than a
-  leak. The role is assumed on connection rather than logged in as, so there is
-  no second credential to manage, and the repo is deliberately absent from
-  `:ecto_repos` because migrations belong to `HospitalityComs.Repo` alone.
+  leak. The repo is deliberately absent from `:ecto_repos` because migrations
+  belong to `HospitalityComs.Repo` alone.
+
+  It authenticates as `employer_login` and *becomes* `employer_role` on connect,
+  and those being two different roles is issue #17. Until it landed, these
+  connections borrowed the application's own credentials — a superuser owning
+  every table in the database — so the session user was still the owner and one
+  `RESET ROLE` took the whole grant tier off. `employer_login` is `NOINHERIT`
+  and holds no privilege in its own name, so a connection that resets its role
+  lands on strictly *less* than `employer_role`, not more. See the "escapes"
+  section below for what that changed and what it did not.
 
   What is here is everything above that tier, and none of it is the guarantee.
 
@@ -114,9 +122,10 @@ defmodule HospitalityComs.EmployerRepo do
 
   ## What the guards do not see
 
-  Three holes, pinned by tests in `HospitalityComs.BoundaryTest` rather than
-  only described here, because a documented hole nobody asserts is a hole
-  somebody closes by accident and reopens by accident.
+  Two holes, pinned by tests in `HospitalityComs.BoundaryTest` rather than only
+  described here, because a documented hole nobody asserts is a hole somebody
+  closes by accident and reopens by accident. There were three; #17 closed the
+  third, and the test that pinned it is now inverted.
 
   Writes go through `default_options/1` but not through `prepare_query/3`;
   Ecto has no hook on the insert path that sees a table. An
@@ -133,15 +142,34 @@ defmodule HospitalityComs.EmployerRepo do
   satisfy it — and closing it would mean closing the door the wrapper comes in
   through.
 
-  Raw SQL is also how the role assumption is escapable. Connections log in as
-  the application's own role and assume `employer_role` with `SET ROLE`, so a
-  single `RESET ROLE` puts the login role back and with it every privilege the
-  grants were withholding. The grant tier is therefore defeatable from the BEAM
-  exactly as the two guards are; what the whole boundary is strong against is
-  *accident* — a join, a forgotten filter, a context function called from the
-  wrong zone — and not against a caller who means to get out. Closing it needs
-  `EmployerRepo` to log in as a dedicated role of its own, which is an
-  infrastructure decision rather than a code one and is filed separately.
+  ## The one that is closed, and what it cost
+
+  Raw SQL used to be how the role assumption itself was escapable. Connections
+  logged in as the application's own role and assumed `employer_role` with
+  `SET ROLE`, so a single `RESET ROLE` put the owner back and with it every
+  privilege the grants were withholding — which meant the grant tier was
+  defeatable from the same code position as the two guards above it, and the
+  boundary had one tier rather than three.
+
+  #17 gave this repo `employer_login` to authenticate as. It is `NOINHERIT`, a
+  member of `employer_role` and of no other role, and it holds no privilege on
+  any relation in either zone, so `RESET ROLE` lands on a role holding *less*
+  than the one it started with: the person zone stays shut and the employer
+  zone closes too. There is nothing to reset to.
+
+  **What that did not change.** Raw SQL still bypasses both BEAM guards, and it
+  still has to — `write_settings/1` depends on it. What is different is where
+  such a statement ends up: at the grant tier, which is now genuinely below the
+  guards rather than beside them. A caller who means to get out reaches
+  Postgres and is refused there, in a message naming the role.
+
+  **What remains open, honestly.** `HospitalityComs.Repo` is in the same BEAM
+  and connects as a superuser, so code that means to get out can simply use the
+  other repo — that has always been true, is what `Repo` is *for*, and is not a
+  hole in this boundary. What the zone partition is strong against is a query
+  issued through *this* repo: a join, a forgotten filter, a context function
+  called from the wrong zone. Those are now refused by three independent things
+  rather than by two and a costume.
   """
 
   use Ecto.Repo,

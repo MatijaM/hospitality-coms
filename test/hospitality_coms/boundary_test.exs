@@ -2261,36 +2261,227 @@ defmodule HospitalityComs.BoundaryTest do
       end
     end
 
-    test "RESET ROLE gives back every privilege the grants were withholding" do
-      # The grant tier is one `SET ROLE` deep. Connections log in as the
-      # application's own role and assume `employer_role` on connect, and
-      # `GRANT employer_role TO CURRENT_USER` from U1 is what lets them — so
-      # the login role is still there to go back to, and raw SQL is how you get
-      # at it.
+    test "RESET ROLE lands on the login role, which holds less than employer_role rather than more" do
+      # **This assertion is the inverse of the one it replaces, and the
+      # inversion is the point of issue #17.**
       #
-      # This is not a tier below the BEAM guards. It is the same tier: code
-      # that means to get out, gets out. What the boundary is strong against is
-      # accident. Closing it needs `EmployerRepo` to log in as a role of its
-      # own, which is infrastructure rather than code and is filed separately.
+      # It used to read "RESET ROLE gives back every privilege the grants were
+      # withholding", and it was true: `EmployerRepo` logged in with the
+      # application's own superuser credentials and assumed `employer_role`
+      # afterwards, so one raw statement — which no guard sees — put the owner
+      # of every table in this database back on the connection.
       #
-      # The role is restored by the sandbox: `SET ROLE` is transactional, and
-      # every connection here is inside a transaction that is rolled back.
+      # That test was never a claim about the boundary. It was #3's decision to
+      # pin a known defect as a test rather than leave it as prose somebody
+      # would rediscover as news. The defect is fixed, so asserting it still
+      # works would be asserting a bug back into existence.
+      #
+      # `EmployerRepo` now logs in as `employer_login`: `NOINHERIT`, a member of
+      # `employer_role` and of nothing else, holding no privilege in its own
+      # name. So `RESET ROLE` does not merely fail to help — it costs the
+      # caller the employer zone too, which is what `NOINHERIT` buys over
+      # `INHERIT` and what the `venues` assertion below is for.
+      #
+      # The role is restored by the sandbox as well: `SET ROLE` is
+      # transactional, and every connection here is inside a transaction that is
+      # rolled back.
+      # The employer zone is asserted as a privilege bit rather than as a read,
+      # because every employer-zone table carries a row-level security policy
+      # whose predicate raises where `app.employer_id` is unset — so an
+      # unwrapped `SELECT count(*) FROM venues` fails for a reason that has
+      # nothing to do with #17. The bit is the better evidence anyway, and this
+      # file's moduledoc says why: a refused query proves *this* query was
+      # refused, and a privilege bit proves every query is.
+      assert employer_holds?("venues", "SELECT")
+      refute employer_holds?("people", "SELECT")
+
       assert_raise Postgrex.Error, ~r/permission denied for table people/, fn ->
         EmployerRepo.query!("SELECT count(*) FROM people", [])
       end
 
       EmployerRepo.query!("RESET ROLE", [])
 
-      assert %{rows: [[_count]]} = EmployerRepo.query!("SELECT count(*) FROM people", [])
+      # The first control. Without it, every refusal below would pass on a
+      # connection where the `RESET ROLE` never took effect — which is exactly
+      # what a green test asserting a closed escape must not be allowed to mean.
+      assert employer_current_user() == Zones.employer_login_role()
 
-      EmployerRepo.query!("SET ROLE #{Zones.employer_role()}", [])
+      refute employer_holds?("people", "SELECT")
 
-      # And back, on this connection, before it can be lent to anything else.
-      # Without this the test above would leave an open door behind it and
-      # every refusal in this file could start passing for the wrong reason.
       assert_raise Postgrex.Error, ~r/permission denied for table people/, fn ->
         EmployerRepo.query!("SELECT count(*) FROM people", [])
       end
+
+      # The second control, and the one that distinguishes `NOINHERIT` from
+      # `INHERIT`. Under `INHERIT` the login role would carry `employer_role`'s
+      # privileges without assuming it, this bit would still be true, and the
+      # escape would be neutral rather than costly.
+      #
+      # Only as a bit, and that is a fact about Postgres rather than a hedge:
+      # `venues` carries a row-level security policy granted to `PUBLIC`, and
+      # the planner folds its `app_current_employer_id()` — which raises where
+      # `app.employer_id` is unset — before the executor reaches the privilege
+      # check. Measured: the statement fails with P0001 rather than with
+      # `permission denied`, whichever role issues it. The privilege bit is
+      # what the boundary rests on in any case.
+      refute employer_holds?("venues", "SELECT")
+
+      EmployerRepo.query!("SET ROLE #{Zones.employer_role()}", [])
+
+      # The third control. `after_connect` runs once per connection rather than
+      # per checkout, so a connection that reset its role stays reset for its
+      # lifetime. Escaping has to be futile, not a way to take a pooled
+      # connection down with you.
+      assert employer_holds?("venues", "SELECT")
+      refute employer_holds?("people", "SELECT")
+    end
+  end
+
+  describe "the login role" do
+    # Issue #17. The grant tier used to be one `SET ROLE` deep, because
+    # `EmployerRepo` borrowed the application's own credentials. It now holds a
+    # credential of its own, and everything here is about what that credential
+    # can and cannot do — asserted about the role rather than about a query,
+    # for the reason this file's moduledoc gives: a refused query is evidence
+    # that *this* query was refused, and a privilege bit is evidence that every
+    # query is.
+
+    test "is what the employer repo authenticates as, while it still acts as employer_role" do
+      # Two different questions, and the whole unit is the gap between them.
+      # `session_user` is who logged in and is the only thing `RESET ROLE` can
+      # return to; `current_user` is who the connection is acting as.
+      assert employer_session_user() == Zones.employer_login_role()
+      assert employer_current_user() == Zones.employer_role()
+    end
+
+    test "is not the role that owns the tables, which still logs in as a superuser" do
+      # The property #17 must not break. `HospitalityComs.Repo` keeps its
+      # superuser identity because KTD3's argument depends on it — a superuser
+      # bypasses row-level security whether or not a policy is FORCEd, which is
+      # why the employer-visible surface is an owner-privileged view and not a
+      # policy. Only `EmployerRepo`'s login identity moved.
+      assert superuser?()
+      refute employer_session_user() == repo_current_user()
+    end
+
+    test "cannot become the owner, by SET ROLE or by SET SESSION AUTHORIZATION" do
+      # Both of the two ways a session can change who it is. The second needs
+      # superuser and would be the escape if the first were closed alone.
+      EmployerRepo.query!("RESET ROLE", [])
+
+      assert_raise Postgrex.Error, ~r/permission denied to set role/, fn ->
+        EmployerRepo.query!(~s(SET ROLE "#{repo_current_user()}"), [])
+      end
+
+      assert_raise Postgrex.Error, ~r/permission denied to set session authorization/, fn ->
+        EmployerRepo.query!(~s(SET SESSION AUTHORIZATION "#{repo_current_user()}"), [])
+      end
+
+      # The control for both, on the same connection inside the same test: a
+      # session that cannot assume *anything* — a broken one, or one whose
+      # statements are all erroring — would pass the two assertions above for a
+      # reason that has nothing to do with the boundary.
+      EmployerRepo.query!("SET ROLE #{Zones.employer_role()}", [])
+
+      assert employer_current_user() == Zones.employer_role()
+    end
+
+    test "is neither a superuser nor exempt from row-level security" do
+      assert role_attributes(Zones.employer_login_role()) == %{
+               "rolsuper" => false,
+               "rolbypassrls" => false,
+               "rolcanlogin" => true,
+               "rolinherit" => false
+             }
+    end
+
+    test "is a member of employer_role and of nothing else" do
+      # An inventory rather than an absence, so it cannot pass empty: a login
+      # role that had lost its one membership would fail this as loudly as one
+      # that had gained a second.
+      assert memberships_of(Zones.employer_login_role()) == [Zones.employer_role()]
+    end
+
+    test "holds no privilege of its own on any relation in either zone" do
+      assert Zones.privileges(Repo, every_relation(), Zones.employer_login_role()) == []
+    end
+
+    test "is what the sweep above would report if one were granted behind its back" do
+      # The load-bearing control. Postgres default-denies, so the assertion
+      # above passes on a database where the login role was never created at
+      # all — and it would also pass on a sweep that quietly kept asking about
+      # `employer_role`, which is the shape this file has been caught by before.
+      Repo.query!("GRANT SELECT ON venues TO #{Zones.employer_login_role()}")
+
+      assert {"venues", "SELECT"} in Zones.privileges(
+               Repo,
+               every_relation(),
+               Zones.employer_login_role()
+             )
+
+      # And the employer role's own inventory is untouched by it, so the two
+      # sweeps are demonstrably asking about different roles.
+      refute {"venues", "INSERT"} in Zones.privileges(
+               Repo,
+               ["venues"],
+               Zones.employer_login_role()
+             )
+    end
+
+    test "spends no cluster-wide dependency, so it is droppable from anywhere" do
+      # It needs CONNECT on the database and USAGE on the schema, and it has
+      # both from PUBLIC. Granting either explicitly would write a
+      # `pg_shdepend` row and make `DROP ROLE employer_login` fail in every
+      # other database on the cluster — the hazard issue #20 is about — for a
+      # privilege it already holds.
+      #
+      # Measured: `GRANT employer_role TO employer_login` writes no such row.
+      # Role membership lives in `pg_auth_members`.
+      assert dependent_objects(Zones.employer_login_role()) == []
+    end
+
+    test "is what the check above would notice, since a grant is all it takes" do
+      Repo.query!("GRANT SELECT ON venues TO #{Zones.employer_login_role()}")
+
+      assert dependent_objects(Zones.employer_login_role()) == ["table venues"]
+    end
+
+    test "carries no role-level settings, so U1's timeouts are not enabled by accident" do
+      # A finding this unit surfaces and deliberately does not act on. U1 set
+      # `statement_timeout` and `idle_in_transaction_session_timeout` on
+      # `employer_role` and called them part of the time model. Measured: they
+      # have never taken effect, because role-level settings are applied at
+      # login for the *session user* and `SET ROLE` does not re-apply them.
+      #
+      # Moving them onto the login role is what would make them effective, and
+      # that is a behaviour change with its own risk — a ten-second
+      # idle-in-transaction cap on a sandbox connection that holds a
+      # transaction open for the length of a test is a flake generator. This
+      # assertion is what stops it happening as a side effect of #17.
+      assert role_settings(Zones.employer_login_role()) == []
+    end
+
+    test "is measured by a query that can see a setting, which is what makes the above mean anything" do
+      # The control. Every role in the cluster has no settings by default, so
+      # an empty list is also what a query reading the wrong column returns.
+      settings = role_settings(Zones.employer_role())
+
+      assert Enum.any?(settings, &String.starts_with?(&1, "statement_timeout="))
+      assert Enum.any?(settings, &String.starts_with?(&1, "idle_in_transaction_session_timeout="))
+    end
+
+    test "is the only role in the model that can log in, which person_role deliberately is not" do
+      # The symmetry question #17 asks and this unit answers with no. Nothing
+      # assumes `person_role` — `Repo` connects as the application's own role
+      # and there is no `SET ROLE person_role` anywhere in the tree — so a
+      # login credential for it would be a live authenticating credential for a
+      # role no code path uses.
+      #
+      # The second assertion is the control: "cannot log in" is true of most
+      # roles in a cluster, including ones that do not exist as far as a
+      # mistyped query is concerned.
+      refute can_login?("person_role")
+      assert can_login?(Zones.employer_login_role())
     end
   end
 
@@ -3006,7 +3197,7 @@ defmodule HospitalityComs.BoundaryTest do
   # sequence or a type — while `DROP ROLE` still failed on it. The
   # `current_database()` narrowing is forced by the catalogue; that one was
   # not.
-  defp dependent_objects do
+  defp dependent_objects(role \\ Zones.employer_role()) do
     %{rows: rows} =
       Repo.query!(
         """
@@ -3017,11 +3208,101 @@ defmodule HospitalityComs.BoundaryTest do
           AND d.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
         ORDER BY 1
         """,
-        [Zones.employer_role()]
+        [role]
       )
 
     Enum.map(rows, &hd/1)
   end
+
+  ## The login role
+
+  # Who authenticated, as against who the connection is acting as. `RESET ROLE`
+  # can only return a session to the first, which is the whole of issue #17.
+  defp employer_session_user do
+    %{rows: [[name]]} = EmployerRepo.query!("SELECT session_user", [])
+    name
+  end
+
+  defp employer_current_user do
+    %{rows: [[name]]} = EmployerRepo.query!("SELECT current_user", [])
+    name
+  end
+
+  defp repo_current_user do
+    %{rows: [[name]]} = Repo.query!("SELECT current_user", [])
+    name
+  end
+
+  # Asked of the employer connection about whoever it is currently acting as,
+  # which is the one question `RESET ROLE` changes the answer to.
+  defp employer_holds?(relation, privilege) do
+    %{rows: [[held]]} =
+      EmployerRepo.query!("SELECT has_table_privilege($1, $2)", [relation, privilege])
+
+    held
+  end
+
+  # Read as a map rather than as four separate queries so that a role which does
+  # not exist fails the assertion with an empty map rather than passing a
+  # `refute` for the wrong reason.
+  defp role_attributes(role) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT rolsuper, rolbypassrls, rolcanlogin, rolinherit
+        FROM pg_authid WHERE rolname = $1
+        """,
+        [role]
+      )
+
+    attributes_from_rows(rows)
+  end
+
+  defp attributes_from_rows([[super?, bypass?, login?, inherit?]]) do
+    %{
+      "rolsuper" => super?,
+      "rolbypassrls" => bypass?,
+      "rolcanlogin" => login?,
+      "rolinherit" => inherit?
+    }
+  end
+
+  defp attributes_from_rows(_rows), do: %{}
+
+  defp can_login?(role), do: Map.get(role_attributes(role), "rolcanlogin", false)
+
+  defp memberships_of(role) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT g.rolname
+        FROM pg_auth_members m
+        JOIN pg_roles g ON g.oid = m.roleid
+        JOIN pg_roles member ON member.oid = m.member
+        WHERE member.rolname = $1
+        ORDER BY 1
+        """,
+        [role]
+      )
+
+    Enum.map(rows, &hd/1)
+  end
+
+  # `rolconfig` is NULL for a role carrying none, which is a different value
+  # from an empty array and would make `Enum.any?/2` raise.
+  defp role_settings(role) do
+    %{rows: rows} = Repo.query!("SELECT rolconfig FROM pg_roles WHERE rolname = $1", [role])
+    settings_from_rows(rows)
+  end
+
+  defp settings_from_rows([[settings]]) when is_list(settings), do: settings
+  defp settings_from_rows(_rows), do: []
+
+  # Every relation the boundary has an opinion about: all three zones' tables
+  # and both employer views. The login role must hold nothing on any of them,
+  # which is a stronger claim than the person-zone sweep makes about
+  # `employer_role`.
+  defp every_relation, do: Zones.classified_tables() ++ Zones.employer_views()
 
   # Every table a grant migration granted on, as `pg_describe_object/3` names
   # it, which is what `dependent_objects/0` reports.

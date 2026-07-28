@@ -41,10 +41,42 @@ if config_env() == :prod do
     # pool_count: 4,
     socket_options: maybe_ipv6
 
-  # Same database, different Postgres role. See HospitalityComs.EmployerRepo.
+  # Same database, different Postgres role — and since #17, a different
+  # *credential*, which is the point rather than a detail.
+  #
+  # `EmployerRepo` used to share `DATABASE_URL` and assume `employer_role` with
+  # `SET ROLE`. Its session user was therefore the application's own role, and a
+  # single `RESET ROLE` over a raw query — which neither BEAM guard sees — put
+  # every privilege back. It now authenticates as `employer_login`, a NOINHERIT
+  # role holding no privilege in its own name, so `RESET ROLE` lands somewhere
+  # strictly worse than where it started.
+  #
+  # A second URL rather than a second password beside `DATABASE_URL`, and the
+  # reason is mechanical: `Ecto.Repo.Supervisor.init_config/4` merges the parsed
+  # URL *over* explicit options, so a `username: "employer_login"` written next
+  # to the shared URL would be silently overwritten by that URL's own userinfo
+  # and the repo would go on connecting as the owner with nothing to say so.
+  # Required rather than defaulted for the same reason MAGIC_LINK_BASE_URL is:
+  # falling back to `DATABASE_URL` would not fail, it would quietly undo #17.
+  employer_database_url =
+    System.get_env("EMPLOYER_DATABASE_URL") ||
+      raise """
+      environment variable EMPLOYER_DATABASE_URL is missing.
+      It is the connection HospitalityComs.EmployerRepo authenticates with, and
+      it must name the `employer_login` role — not the role DATABASE_URL names,
+      which owns every table in the database.
+      For example: ecto://employer_login:PASS@HOST/DATABASE
+
+      Provision that role's password out of band before migrating. The role is
+      created by priv/repo/migrations/*_create_employer_login_role.exs, which
+      writes a password only when the role does not already exist — so a
+      pre-provisioned role keeps a secret that never reaches a migration, and
+      therefore never reaches the Postgres statement log.
+      """
+
   config :hospitality_coms, HospitalityComs.EmployerRepo,
     # ssl: true,
-    url: database_url,
+    url: employer_database_url,
     pool_size: String.to_integer(System.get_env("EMPLOYER_POOL_SIZE") || "10"),
     socket_options: maybe_ipv6
 
