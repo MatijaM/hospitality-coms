@@ -9,6 +9,13 @@ config :hospitality_coms, HospitalityComs.Repo,
   username: "postgres",
   password: "postgres",
   hostname: "localhost",
+  port: String.to_integer(System.get_env("HC_TEST_PGPORT") || "5432"),
+  # A second checkout needs its own cluster, not its own database on the shared
+  # one: worktree isolation isolates the filesystem and not Postgres, and a
+  # second *database* holding grants makes `DROP ROLE` fail in both
+  # (issue #20). `PGPORT` alone does not reach here — Ecto pins `:port` before
+  # Postgrex would read the environment — so the override has to be explicit.
+  port: String.to_integer(System.get_env("HC_TEST_PGPORT") || "5432"),
   database: "hospitality_coms_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
