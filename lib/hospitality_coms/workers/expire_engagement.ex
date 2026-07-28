@@ -119,9 +119,10 @@ defmodule HospitalityComs.Workers.ExpireEngagement do
   def perform(%Oban.Job{args: %{"engagement_id" => engagement_id}}) do
     instant = Clock.now()
 
-    engagement_id
-    |> Engagements.revoke_if_expired(instant)
-    |> retain(engagement_id, instant)
+    expiry = Engagements.revoke_if_expired(engagement_id, instant)
+    {:ok, _written} = Lifecycle.retain_own_messages(engagement_id, instant)
+
+    {:ok, expiry}
   end
 
   # **The one write on this path, and it is not to `engagements`.** KTD16 asks
@@ -137,16 +138,17 @@ defmodule HospitalityComs.Workers.ExpireEngagement do
   # covers explicit ending too, because `end_engagement/2` rewrites `ends_at` to
   # the closing instant and `EngagementSweeper`'s window then finds it.
   #
-  # It runs only on `:revoked`. `:still_active` is a renewal that happened first
-  # and there is nothing to archive; `:gone` is an engagement that no longer
-  # exists. `HospitalityComs.Lifecycle.retain_own_messages/2` is idempotent, so a
-  # retry after a failure here writes no second copy.
-  @spec retain(Engagements.expiry(), Ecto.UUID.t(), DateTime.t()) ::
-          {:ok, Engagements.expiry()}
-  defp retain(:revoked, engagement_id, instant) do
-    {:ok, _written} = Lifecycle.retain_own_messages(engagement_id, instant)
-    {:ok, :revoked}
-  end
-
-  defp retain(expiry, _engagement_id, _instant), do: {:ok, expiry}
+  # **It is called unconditionally, and not only on `:revoked`.** Dispatching on
+  # the expiry looks tidier and was written that way first; it made the guard
+  # inside `retain_own_messages/2` unreachable, so *neither* guard was
+  # load-bearing and a mutation of either killed nothing. One guard, in the
+  # function whose invariant it is: an archive is written when a term has
+  # closed, whoever asks and however often — which is also the rule U11's demo
+  # control needs when it drives the worker directly, and which a dispatch here
+  # would not have covered.
+  #
+  # It is idempotent — one copy per (engagement, message) under a unique index —
+  # so a retry after a failure writes no second copy, and it answers `{:ok, 0}`
+  # for a term that is still open, for an engagement that no longer exists, and
+  # for an erased person.
 end
