@@ -208,6 +208,13 @@ defmodule HospitalityComs.LifecycleReapTest do
       # their tokens with them — and this ordering is what makes "it can never
       # take a *live* credential" true without appealing to the argument that
       # an unconfirmed person cannot hold a session token.
+      #
+      # `HospitalityComs.Lifecycle` now checks this ordering at **compile time**
+      # against the same three functions, so a retention that breaks it does not
+      # build and can never reach here. What these three assertions guard is the
+      # check being the right check: drop a validity from the `Enum.max/1` it
+      # ranges over and the module still compiles at a horizon that no longer
+      # outlives that token, and this is the only thing that says so.
       assert Lifecycle.unconfirmed_retention_days() > PersonToken.session_validity_in_days()
 
       assert Lifecycle.unconfirmed_retention_days() * 24 * 60 >

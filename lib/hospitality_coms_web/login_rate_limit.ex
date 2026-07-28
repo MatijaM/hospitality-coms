@@ -25,11 +25,22 @@ defmodule HospitalityComsWeb.LoginRateLimit do
   body reaches the counter.
 
   **The shape to refuse for ever is a per-address throttle** — "one link per
-  address per fifteen minutes" — which answers `429` for an address that was
-  just used and `202` for one that was not. That is a *better* oracle than the
-  merged door closed: no timing analysis and no mailbox, just a status code. A
-  future duplicate-suppression must suppress the *email* and leave the
-  *response* alone.
+  address per window" — which answers `429` for an address that was just used
+  and `202` for one that was not. That is a *better* oracle than the merged door
+  closed: no timing analysis and no mailbox, just a status code. A future
+  duplicate-suppression must suppress the *email* and leave the *response*
+  alone.
+
+  ## The window is not a setting, it is the link's own validity
+
+  `@limit` and `@window_seconds` are a pair, and the sentence they exist to make
+  true is **one caller can cause at most `limit/0` outbound emails inside the
+  lifetime of any single link they caused.** That only holds while the window
+  *is* the magic link's validity, so `@window_seconds` is derived from
+  `HospitalityComs.Accounts.PersonToken.magic_link_validity_in_minutes/0` at
+  compile time rather than declared beside it. Two literals agreeing is a
+  property a test can only report *after* they have stopped agreeing; a
+  derivation cannot stop.
 
   Two consequences of counting requests rather than successes, both deliberate.
   A malformed address and a bodyless request consume the same budget a valid one
@@ -85,21 +96,23 @@ defmodule HospitalityComsWeb.LoginRateLimit do
   import Plug.Conn
 
   alias HospitalityComs.Accounts.PersonScope
+  alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComsWeb.ErrorEnvelope
   alias Phoenix.Controller
 
   @table :login_rate_limit
 
-  # Requests per address per window. The window is the magic link's own validity
-  # (`PersonToken.magic_link_validity_in_minutes/0` is fifteen), and the two are
-  # a pair rather than two settings: **one caller can cause at most ten outbound
-  # emails inside the lifetime of any single link they caused.** That is the
-  # sentence the number is chosen to make true.
+  # Requests per address per window, and the window is not a number chosen here:
+  # it is the magic link's own validity, read at compile time. The remote call
+  # is what puts this module in `PersonToken`'s compile-time dependency set, so
+  # changing the validity recompiles the limiter with it and the pair cannot
+  # drift. See the moduledoc for the sentence the pair makes true.
   #
-  # It is generous on purpose. A venue's staff behind one NAT address share a
-  # bucket, and the cost of being refused is a wait rather than a lockout.
+  # `@limit` is generous on purpose. A venue's staff behind one NAT address
+  # share a bucket, and the cost of being refused is a wait rather than a
+  # lockout.
   @limit 10
-  @window_seconds 15 * 60
+  @window_seconds PersonToken.magic_link_validity_in_minutes() * 60
 
   @doc """
   How many log-in attempts one address may make inside one window.
@@ -110,8 +123,10 @@ defmodule HospitalityComsWeb.LoginRateLimit do
   @doc """
   How long a window lasts, in seconds.
 
-  Public, like `limit/0`, so a test asks for the bound the plug will actually
-  apply rather than restating it — which is how the two would drift.
+  Derived from `HospitalityComs.Accounts.PersonToken.magic_link_validity_in_minutes/0`
+  rather than declared, for the reason in the moduledoc. Public, like `limit/0`,
+  so a caller asks for the bound the plug will actually apply rather than
+  restating it — which is how the two would drift.
   """
   @spec window_seconds() :: pos_integer()
   def window_seconds, do: @window_seconds

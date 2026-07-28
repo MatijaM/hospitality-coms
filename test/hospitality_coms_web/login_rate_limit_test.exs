@@ -131,9 +131,19 @@ defmodule HospitalityComsWeb.LoginRateLimitTest do
       # while limiting nothing.
       #
       # So the pair is asserted directly, in the form the moduledoc claims it
-      # in. The window is the magic link's own validity, so "one caller can
+      # in: the window is the magic link's own validity, so "one caller can
       # cause at most `limit` outbound emails inside the lifetime of any single
       # link they caused" is a sentence about these two numbers together.
+      #
+      # `@window_seconds` is *derived* from
+      # `PersonToken.magic_link_validity_in_minutes/0` at compile time, so this
+      # no longer guards two literals continuing to agree — they cannot come
+      # apart, and a test that reported it would report it too late anyway. It
+      # guards the derivation being the **right** one: a dropped `* 60`, the
+      # other token's validity read by mistake, or a literal put back in its
+      # place all fail here and are invisible to every other test in the file,
+      # each of which takes its window from `window_seconds/0` and would move
+      # with it.
       assert LoginRateLimit.window_seconds() ==
                PersonToken.magic_link_validity_in_minutes() * 60
 

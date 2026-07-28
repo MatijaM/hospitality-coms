@@ -262,7 +262,32 @@ defmodule HospitalityComs.Lifecycle do
   # `ON DELETE CASCADE`, so reaping a person takes their tokens with them and
   # this ordering is what makes "never a live credential" true without appealing
   # to the argument that an unconfirmed person cannot hold a session token.
+  #
+  # The constraint is an *ordering* rather than an equality, so the number is
+  # declared and the ordering is checked below at compile time — which is the
+  # difference between a value that cannot ship broken and one a test reports on
+  # after it already has. The three remote calls are also what put this module
+  # in `PersonToken`'s compile-time dependency set, so shortening this horizon
+  # or lengthening a validity recompiles whichever file did not change.
   @unconfirmed_retention_days 30
+
+  @token_validity_ceiling_in_minutes Enum.max([
+                                       PersonToken.session_validity_in_days() * 24 * 60,
+                                       PersonToken.change_email_validity_in_days() * 24 * 60,
+                                       PersonToken.magic_link_validity_in_minutes()
+                                     ])
+
+  if @unconfirmed_retention_days * 24 * 60 <= @token_validity_ceiling_in_minutes do
+    raise """
+    @unconfirmed_retention_days is #{@unconfirmed_retention_days} days, which does \
+    not outlive every validity in HospitalityComs.Accounts.PersonToken (the \
+    longest is #{@token_validity_ceiling_in_minutes} minutes).
+
+    people_tokens.person_id is ON DELETE CASCADE, so reaping an unconfirmed \
+    person deletes their tokens. Raise the retention or shorten the validity; \
+    do not delete this check.
+    """
+  end
 
   # Rows per `insert_all` on the archive's backfill path. `insert_all` binds one
   # parameter per field per row and Postgres refuses more than 65535 of them, so
