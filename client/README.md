@@ -413,19 +413,26 @@ would make the product look smaller than it is.
 room, message rendering and a composer. Three behaviours are the point of it,
 and each has an assertion that fails when it regresses.
 
-### The list is local, because there is nothing to fetch
+### Two lists: the server's, and this browser's
 
-**There is no endpoint that lists rooms**, and no channel event that enumerates
-them. `router.ex` still declares four API routes; U6 built
-`Rooms.list_venue_rooms/1` and `list_readable_shift_rooms/1` as context
-functions with no HTTP surface; and a room channel's join replies with the room
-and the engagement and nothing else.
+**The server lists rooms now.** `GET /api/venue-rooms` answers the venue rooms
+this person is in **by name**, and `GET /api/venues/:venue_id/shift-rooms`
+answers the shift rooms they may read at one of them, labelled with the shift
+type's name — `features/rooms/rooms-api.ts` owns the paths and the decoders.
+That is the browse list, and it is where a room is _found_. Nothing in it is a
+uuid prefix, which is what made the old layout read as broken.
 
-So the list is a bookmark file in this browser and a room is added by its id.
-It is an **input** to a join and never an authority: everything about a room —
-whether this session may read it, may write to it, or still has access at all —
-comes from the server on every join and every send, which is where KTD8 puts it.
-A room this session may not read is refused like any other.
+The **local** list is kept and is not a cache of it. It holds `barred`, the one
+thing on this surface that was _learned_ rather than fetched — nothing on the
+wire says in advance that a shift room is past its `closes_at` — and it is what
+is still open after a reload. The paste box is kept for the same reason: it is
+the only way into a room the browse list does not show.
+
+Neither is an authority: everything about a room — whether this session may read
+it, may write to it, or still has access at all — comes from the server on every
+join and every send, which is where KTD8 puts it. A browsed room and a pasted
+one take exactly the same path into a channel, and a room this session may not
+read is refused like any other.
 
 **It is emptied when the session ends**, on both paths that drop the token — the
 explicit log out and the 401. Hospitality is a shared-terminal industry, and
@@ -491,8 +498,13 @@ one in four.
 
 ### What the rooms deliberately do not have
 
-- **No history.** A joined room shows what arrives after the join. There is no
-  `"history"` event and no endpoint for `Rooms.list_venue_room_messages/2`.
+- **No history _event_.** History arrives over HTTP —
+  `GET /api/venue-rooms/:venue_id/messages` and
+  `GET /api/shift-rooms/:id/messages` — bounded to the most recent page, with
+  `complete` saying whether that is the lot and a "load the whole history"
+  control that appears only when it is not. The fetch and the join are
+  independent, so `mergeMessages` keys on the id. There is still no `"history"`
+  event on either channel: a room's past is not a thing its stream carries.
 - **No presence.** `RoomChannel.joined/1` pushes `"presence_state"` and the
   tracker pushes `"presence_diff"`; no handler is registered for either, so
   `phoenix` drops them. Worth rendering, not one of the three things this
@@ -738,10 +750,11 @@ record at a time.
 ### It is built against a transport that does not exist, and that was a choice
 
 **Measured at `3063e9c`, which is U9 merged:** `grep -rn 'Profiles'
-lib/hospitality_coms_web/` finds nothing, `router.ex` still declares the same
-four API routes, `PeerChannel` handles nine events and none carries an entry or
-a disclosure, and `EmployerVenueChannel`'s only `handle_in/3` clause is the
-terminal one. U9's issue named contexts, migrations and one test file, and its
+lib/hospitality_coms_web/` finds nothing, the router declared four API routes,
+`PeerChannel` handles nine events and none carries an entry or a disclosure, and
+`EmployerVenueChannel`'s only `handle_in/3` clause is the terminal one. Issue #48
+has since added four room routes and nothing profile-shaped, so only the count
+in that sentence has moved. U9's issue named contexts, migrations and one test file, and its
 verification is a context-level claim, so the absence is deliberate on that side.
 
 The two honest options were to build against the shapes the contexts return and
@@ -894,12 +907,16 @@ The worker-facing profile surface is **built** and its transport is not; that is
 "waiting on U9" would be wrong in both directions — U9 has landed, and the
 events still do not exist.
 
-`lib/hospitality_coms_web/router.ex` still declares four API routes plus the dev
-mailbox preview, and those four are exactly what `src/api/` covers. U5 and U6
-built contexts, not endpoints: there is no HTTP surface for engagements, rooms,
-messages or rosters, which is why the room list is local. U8 built no endpoint
-either — the peer surface is entirely `PeerChannel`, which is why it needs no
-list held in this browser.
+`lib/hospitality_coms_web/router.ex` declares the four session routes plus the
+four room reads issue #48 added, and the dev mailbox preview. `src/api/client.ts`
+covers the session four as named methods and everything else through one generic
+`read`; the room paths and decoders live in `features/rooms/rooms-api.ts`, which
+is the shape the profile surface should copy rather than adding methods to the
+client.
+
+There is still no HTTP surface for engagements, rosters or anything an employer
+does. U8 built no endpoint either — the peer surface is entirely `PeerChannel`,
+which is why it needs no list held in this browser.
 
 ### Things that were tempting to guess, and were not
 

@@ -366,3 +366,112 @@ controller reads the clock through `PersonAuth.fetch_person_scope/2`.
 | Regression protection | 4/5 | rests on ten existing files; one return type changes and is disclosed in advance with the caller count measured |
 | Falsifiability | 5/5 | every row names a mechanism whose removal fails it |
 | Risk of a vacuous pass | 4/5 | the 51-row fixture closes the headline one; the residue is that the client tests run against a fake API, so a path typo is caught by the decoder tests rather than by the surface |
+
+## Revisions made during implementation
+
+Recorded rather than silently applied, because the gate exists to be departed from explicitly.
+The sections above are not edited to agree with what shipped.
+
+1. **The brief did not say which *end* of the probe batch to drop, and that is the unit's one
+   silent mistake.** It said "ask for one more than you will return and notice", which is right,
+   and left the page's own order to a later paragraph. Those two interact: because
+   `Records.most_recent/2` re-orders **ascending** in SQL around the descending scan, the extra row
+   is the **oldest** of the batch, so `MessagePage.bounded/2` has to take from the end.
+   `Enum.take(rows, limit)` — the obvious spelling — returns the oldest fifty and satisfies every
+   count assertion in the matrix. **Measured: mutation 1 kills five tests**, all of them because
+   the first and last bodies are named rather than counted. Row 2 was the right control and the
+   brief did not know how close the mistake was to the surface.
+
+2. **The shift type could not be a `preload:` in the query.** The brief assumed it would be one.
+   `Records.distinct_rooms/1` is `SELECT DISTINCT` over the joined `:room` binding rather than over
+   the query's `from` source (`RosterEntry`), and Ecto refuses a preload on a query whose `from`
+   binding it does not select. It is `Repo.preload/2` in `Rooms.list_readable_shift_rooms/2`
+   instead — which is where `AGENTS.md` asks for preloads anyway ("in the context function"), so
+   the correction lands on the standard rather than beside it. Restructuring the query so
+   `ShiftRoom` were the source was the alternative and was refused: it would delete
+   `distinct_rooms/1`, which exists for the rostered-removed-rostered case U6 measured.
+
+3. **Two React hooks derive `idle` and `loading` rather than storing them**, which the brief did
+   not anticipate and which is `use-room.ts`'s recorded rule arriving from the linter:
+   `react-hooks/set-state-in-effect` refuses a synchronous `setState` in an effect body. The only
+   write in either hook now happens in the promise's callback and carries the request it answers;
+   anything else is derived. That is strictly better than what the brief implied — a stale answer
+   is now *unrenderable* rather than merely discarded, because the stamp will not match.
+
+4. **The browse panel's status lines are `aria-live="polite"`, not `role="status"`.** Two reasons
+   and both are stated because only the first is a design argument: this screen already has exactly
+   one thing whose state a worker is waiting on — the open room — and two competing `status`
+   regions make the important one harder to find. The second is mechanical: `app.test.tsx` and
+   `rooms.test.tsx` both call `findByRole("status")` **singularly**, so a second `status` region
+   would have broken six existing tests for a reason that has nothing to do with what they assert.
+   `aria-live` without the role announces identically and matches neither query.
+
+5. **One existing test's text sentinel changed.** `app.test.tsx` identifies the rooms surface by
+   `/no rooms yet\. add one by its id/i`, and the empty local list now points at the browse list
+   above it ("Open one from the list above, or add one by its id"). The regex moved and gained a
+   comment saying why. No assertion is added, removed or weakened; six tests use it and all six
+   assert the same things.
+
+6. **Rows do not map one-to-one onto test bodies**, as U8, U9, U10 and #18 all recorded. Thirty-three
+   rows became **twenty-six** new Elixir bodies (twelve in `rooms_test.exs`, fifteen in the new
+   `room_controller_test.exs`, minus overlap) and **twenty-nine** new client bodies across five
+   files, one of them new (`room-lists.test.tsx`).
+
+7. **Row 20's malformed-id claim splits across two files and the brief only named one.** Measured:
+   dropping `byte_size(id) == 36` from `EntityId.cast/1` kills **one** test in
+   `room_controller_test.exs` (the sixteen-raw-bytes path) and **one** in
+   `test/hospitality_coms_web/channels/`. Row 25 predicted the second and the brief filed it as a
+   regression risk rather than as coverage; it is coverage, and the delegation is what makes both
+   true at once.
+
+8. **Baseline arithmetic.** Elixir: **1072/1076** before, **1098/1102** after — twenty-six new
+   bodies, and the same four `PostgresRolesTest` failures naming `hospitality_coms_dev`
+   (issue #20). Client: **338 passed / 15 skipped** before, **367 / 15** after, identical under
+   `NODE_OPTIONS="--localstorage-file=$(mktemp)"`.
+
+## Mutation record
+
+Twenty-seven mutations, each applied to a clean tree, measured against the narrowest file that
+could answer, then restored. Every new behavioural test is killed by at least one.
+
+| # | Mutation | Tests killed |
+|---|----------|--------------|
+| 1 | `MessagePage.bounded/2` takes the page from the **front** | 5 |
+| 2 | `MessagePage.bounded/2` hardcodes `complete: false` | 2 |
+| 3 | `Records.most_recent/2` drops the outer ascending order | 5 |
+| 4 | `Rooms.page/2` bounds `:all` as well | 2 |
+| 5 | `Rooms.page/2` asks for `limit` rather than `limit + 1` | 2 |
+| 6 | `Records.readable_shift_rooms/3` ignores the venue | 1 |
+| 7 | `Rooms` drops the shift-type preload | 4 |
+| 8 | `list_readable_shift_rooms/2` gates on venue-room membership (KTD18 broken) | 2 |
+| 9 | `EntityId.cast/1` drops the byte-size guard | 2 (one controller, one channel) |
+| 10 | `RoomController.extent/1` falls back to `:recent` for an unknown word | 1 |
+| 11 | `RoomController` answers a refusal `403` rather than `404` | 4 |
+| 12 | `render_message/1` grows a field | 1 |
+| 13 | `render_venue_room/1` loses the name | 1 |
+| 14 | `venues_of_person/2` stops applying `unsuspended/2` (KTD18, other side) | 3 |
+| 15 | the venue-room list renders the id instead of the name | 1 |
+| 16 | `shiftRoomLabel` drops the shift type's name | 3 |
+| 17 | `shiftRoomLabel` drops the term | 2 |
+| 18 | the shift-room panel fetches on mount rather than on choosing | 2 |
+| 19 | the history control is offered whatever `complete` says | 2 |
+| 20 | `loadAll` keeps asking for the recent extent | 1 |
+| 21 | the room renders only the live stream, never the fetched history | 4 |
+| 22 | `mergeMessages` concatenates without keying on the id | 1 |
+| 23 | a failed list renders as an empty list rather than as a failure | 1 |
+| 24 | `decodeMessagePage` defaults `complete` to `true` when absent | 1 |
+| 25 | `decodeEach` drops entries it cannot read instead of failing the body | 3 |
+| 26 | `ApiClient.read` accepts a status other than 200 | 2 |
+| 27 | `rooms-api` asks an unfiltered shift-room path | 2 |
+
+**Mutations 1, 3 and 21 are the ones worth reading twice.** The first two are the bound's two
+silent failure modes — the wrong fifty, and the right fifty in the wrong order — and both leave
+every count assertion green. The third is the whole third sub-item: rendering only the live stream
+is what the surface did before this branch, and it is a change a refactor could undo without any
+test noticing unless one asserts on a message nobody sent during the test.
+
+Two things are deliberately **not** asserted. Nothing pins the number fifty from the client side —
+`recent_message_limit/0` is the server's and a client that knew it would be a second place for it
+to be wrong. And no test asserts that `?limit=` is refused, because there is no such parameter to
+refuse: its absence is the design, and a test for the absence of a feature would pass for ever
+whether or not anything guarded it.

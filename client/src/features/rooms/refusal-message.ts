@@ -21,6 +21,7 @@
  * the build rather than falling through to silence.
  */
 
+import type { RequestFailure } from "../../api/errors";
 import type { ChannelFailure } from "../../socket/channel-failure";
 import type { SendBar } from "./room";
 
@@ -149,5 +150,46 @@ export function barMessage(bar: SendBar): string {
       return "This room is closed. It is read-only from here.";
     case "not_rostered":
       return "You are not on this shift's roster. This room is read-only for you.";
+  }
+}
+
+/**
+ * What to show when one of the four HTTP room reads fails.
+ *
+ * A **third** switch, and the reason is the one that already separates the two
+ * above it: the codes overlap in spelling and not in meaning.
+ * `app/failure-message.ts` renders `not_found` as "That address does not exist
+ * on this server", which is right for a route the router did not recognise and
+ * wrong for a room — `HospitalityComsWeb.RoomController` answers `404` for a
+ * room that does not exist, a room this session may not reach, an engagement
+ * that has ended and a suspension in force, identically and on purpose (AE1).
+ * One switch would have to pick one of those sentences and be wrong about the
+ * others.
+ *
+ * `bad_request` is `extent` — which this client is the only thing that sets, so
+ * it is a bug here rather than something a worker can correct. It says so.
+ */
+export function readFailureMessage(failure: RequestFailure): string {
+  switch (failure.kind) {
+    case "network_error":
+      return "That list could not be loaded. Check your connection and try again.";
+    case "malformed_response":
+      return `The server answered in a way this client does not understand (${failure.status.toString()}).`;
+    case "api_error":
+    case "api_field_error":
+      return readCodeMessage(failure.code, failure.status);
+  }
+}
+
+function readCodeMessage(code: string, status: number): string {
+  switch (code) {
+    case "not_found":
+      return "That room is not one you can reach. Either it does not exist, the engagement that let you in has ended, or you have suspended it.";
+    case "unauthorized":
+      return "Your session has ended. Sign in again.";
+    case "bad_request":
+      return "This client asked for that in a way the server refused. Nothing was changed.";
+    default:
+      return `The server refused with a status this client does not know about (${status.toString()}).`;
   }
 }

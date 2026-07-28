@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   isRoomId,
+  mergeMessages,
   normaliseRoomId,
   roomKey,
   roomKindLabel,
   roomTopic,
   sameRoom,
+  shiftRoomLabel,
 } from "./room";
 
 const ID = "11111111-1111-4111-8111-111111111111";
@@ -86,5 +88,82 @@ describe("what may be a topic suffix", () => {
     ]) {
       expect(isRoomId(value)).toBe(false);
     }
+  });
+});
+
+describe("a shift room's label", () => {
+  const kitchen = {
+    shiftRoomId: "22222222-2222-4222-8222-222222222222",
+    venueId: ID,
+    shiftTypeName: "Kitchen",
+    startsAt: "2026-03-09T13:00:00Z",
+    endsAt: "2026-03-09T21:00:00Z",
+    closesAt: "2026-03-09T21:30:00Z",
+  };
+
+  it("names the shift type, because the room has no name of its own", () => {
+    // `ShiftRoom` carries two instants and a `shift_type_id` and nothing else a
+    // person could read. Without the type's name the list is uuid prefixes,
+    // which is what `GET /api/venues/:venue_id/shift-rooms` exists to stop.
+    expect(shiftRoomLabel(kitchen)).toContain("Kitchen");
+    expect(shiftRoomLabel(kitchen)).not.toContain(kitchen.shiftRoomId);
+  });
+
+  it("tells two shifts of one type apart, which the name alone cannot", () => {
+    // Two Tuesdays of one shift type are two rooms with one name, so a label
+    // that were only `shiftTypeName` would be as ambiguous as the uuid it
+    // replaced — differently, and less obviously.
+    const tuesday = {
+      ...kitchen,
+      shiftRoomId: "33333333-3333-4333-8333-333333333333",
+      startsAt: "2026-03-10T13:00:00Z",
+      endsAt: "2026-03-10T21:00:00Z",
+      closesAt: "2026-03-10T21:30:00Z",
+    };
+
+    expect(shiftRoomLabel(tuesday)).not.toBe(shiftRoomLabel(kitchen));
+  });
+
+  it("falls back to the raw instants rather than rendering Invalid Date", () => {
+    // An instant this client cannot read is still something a worker can
+    // compare against another one.
+    const broken = { ...kitchen, startsAt: "whenever", endsAt: "later" };
+
+    expect(shiftRoomLabel(broken)).toContain("whenever");
+    expect(shiftRoomLabel(broken)).not.toContain("Invalid");
+  });
+});
+
+describe("merging a room's history with its stream", () => {
+  const message = (id: string, body: string) => ({
+    id,
+    body,
+    sentAt: "2026-07-28T09:00:00Z",
+    authorEngagementId: "33333333-3333-4333-8333-333333333333",
+  });
+
+  it("puts the fetched history first and appends what arrived after", () => {
+    const merged = mergeMessages([message("a", "one")], [message("b", "two")]);
+
+    expect(merged.map((entry) => entry.body)).toEqual(["one", "two"]);
+  });
+
+  it("shows a message once when it arrives on both paths", () => {
+    // The history is fetched over HTTP and the channel is joined separately, so
+    // a message sent between the two is in both answers. Keying on the id is
+    // the same manoeuvre `use-room.ts` makes for the send reply and the
+    // broadcast of one message.
+    const merged = mergeMessages(
+      [message("a", "one"), message("b", "two")],
+      [message("b", "two"), message("c", "three")],
+    );
+
+    expect(merged.map((entry) => entry.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("is the stream alone when nothing was fetched", () => {
+    expect(mergeMessages([], [message("a", "one")]).map((entry) => entry.id)).toEqual([
+      "a",
+    ]);
   });
 });

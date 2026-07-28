@@ -18,15 +18,37 @@
  * happens, and there is no sentence anywhere saying why. So every disabled
  * state here carries its reason, and every one of them carries a way forward:
  * "Check again" for a bar, and re-opening the room for a lost one.
+ *
+ * ## History comes over HTTP and the stream comes over the channel
+ *
+ * `useRoomHistory` fetches what was said before this session opened the room;
+ * `useRoom` collects what arrives after. They are two independent requests and
+ * neither waits for the other, so a message sent between them arrives twice and
+ * `mergeMessages` keys on the id — the same manoeuvre `use-room.ts` already
+ * makes for the send reply and the broadcast of one message.
+ *
+ * **The "load the whole history" control is conditional on `complete`.** The
+ * server bounds the default read at `HospitalityComs.Rooms
+ * .recent_message_limit/0` and says whether that was the lot; offering the
+ * control unconditionally would tell somebody whose room holds three messages
+ * that there are more. That is also the only thing this client knows about the
+ * bound — there is no number here and there must not be one.
  */
 
 import { useState } from "react";
 
 import type { ChannelFieldError } from "../../socket/channel-failure";
 import type { RoomClosure, RoomEntry, RoomMessage, SendBar } from "./room";
-import { roomKindLabel } from "./room";
+import { mergeMessages, roomKindLabel } from "./room";
 import type { RoomErrorCode } from "./refusal-message";
-import { barFromRefusal, barMessage, refusalMessage } from "./refusal-message";
+import {
+  barFromRefusal,
+  barMessage,
+  readFailureMessage,
+  refusalMessage,
+} from "./refusal-message";
+import type { RoomHistory } from "./use-room-history";
+import { useRoomHistory } from "./use-room-history";
 import type { Room, RoomConnection, SendState } from "./use-room";
 import { useRoom } from "./use-room";
 
@@ -48,6 +70,11 @@ export function RoomView({ entry, onEnded, onBarred, onClearBar }: RoomViewProps
       if (bar !== null) onBarred(entry, bar);
     },
   });
+
+  const history = useRoomHistory(entry.ref);
+
+  const fetched = history.state.status === "ready" ? history.state.page.messages : [];
+  const messages = mergeMessages(fetched, room.messages);
 
   // Clearing the bar re-enables the composer. Leaving the sentence that closed
   // it sitting above the now-usable input says the room is still refusing,
@@ -74,10 +101,40 @@ export function RoomView({ entry, onEnded, onBarred, onClearBar }: RoomViewProps
         </div>
       )}
 
-      <Messages messages={room.messages} connection={room.connection} />
+      <History history={history} />
+      <Messages messages={messages} connection={room.connection} />
       <Composer entry={entry} room={room} />
     </section>
   );
+}
+
+/**
+ * What the history fetch is doing, and the control that lifts its bound.
+ *
+ * `aria-live` without `role="status"` for `rooms-route.tsx`'s reason: the one
+ * status region on this screen is the room's own connection, and a second one
+ * competing with it makes the important one harder to find.
+ */
+function History({ history }: { readonly history: RoomHistory }) {
+  switch (history.state.status) {
+    case "idle":
+      return null;
+    case "loading":
+      return <p aria-live="polite">Loading what was said before…</p>;
+    case "failed":
+      return <p aria-live="polite">{readFailureMessage(history.state.failure)}</p>;
+    case "ready":
+      return history.state.page.complete ? null : (
+        <div>
+          <p aria-live="polite">
+            This is the most recent part of the room. There is more before it.
+          </p>
+          <button type="button" onClick={history.loadAll}>
+            Load the whole history
+          </button>
+        </div>
+      );
+  }
 }
 
 function ConnectionState({ connection }: { readonly connection: RoomConnection }) {
@@ -134,10 +191,6 @@ function Messages({
 
   return (
     <>
-      <p>
-        This room shows what has been said since you opened it. There is no endpoint that
-        serves the history.
-      </p>
       <ul aria-label="Messages">
         {messages.map((message) => (
           <li key={message.id}>

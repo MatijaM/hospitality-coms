@@ -17,9 +17,10 @@
  * readability and membership as separate questions, and KTD6b says no write
  * withdraws access a period already earned. The only thing that changes is that
  * a send is refused. Nothing on the wire says so in advance — `join/3` replies
- * with the room and the engagement and no window, and there is no HTTP surface
- * for `Rooms.list_readable_shift_rooms/1` — so the **client learns a room is
- * closed by being told, once, and remembers**. Otherwise the closed state is
+ * with the room and the engagement and no window, and the shift-room list's
+ * `closesAt` is an instant on the *server's* clock, which is offsettable and
+ * which this browser must not compare against its own (see `room.ts`) — so the
+ * **client learns a room is closed by being told, once, and remembers**. Otherwise the closed state is
  * something the worker has to rediscover by losing a message they typed, on
  * every reload.
  *
