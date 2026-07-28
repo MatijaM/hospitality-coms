@@ -39,7 +39,39 @@ defmodule HospitalityComsWeb.ConnCase do
 
   setup tags do
     HospitalityComs.DataCase.setup_sandbox(tags)
-    {:ok, conn: Phoenix.ConnTest.build_conn()}
+    {:ok, conn: with_own_remote_ip(Phoenix.ConnTest.build_conn())}
+  end
+
+  @doc """
+  Gives a conn a remote address no other test in the suite will use.
+
+  Issue #15 put a per-address rate limiter in front of `POST /api/log-in`, and
+  its counter is one ETS table for the whole node that nothing resets. **The key
+  space is what isolates the tests**: every test is a different client of the
+  same live counter, so no test can spend another's budget, and none of them has
+  to know the limiter is there.
+
+  A reset hook was the alternative and is worse — it is a second mechanism to
+  forget, and forgetting it fails in whichever file happens to run next rather
+  than in the one that forgot. It would also put a test-only export in `lib/`.
+
+  This matters immediately rather than hypothetically:
+  `session_controller_test.exs` makes ten `POST /api/log-in` calls at one pinned
+  instant, so on one shared address the file would go red at whichever call
+  crossed the limit.
+  """
+  @spec with_own_remote_ip(Plug.Conn.t()) :: Plug.Conn.t()
+  def with_own_remote_ip(%Plug.Conn{} = conn) do
+    %{conn | remote_ip: unique_remote_ip()}
+  end
+
+  # A documentation-range address per test, from the same counter every unique
+  # fixture value in this suite comes from.
+  @spec unique_remote_ip() :: :inet.ip4_address()
+  defp unique_remote_ip do
+    n = System.unique_integer([:positive])
+
+    {198, rem(div(n, 65_536), 256), rem(div(n, 256), 256), rem(n, 256)}
   end
 
   @doc """

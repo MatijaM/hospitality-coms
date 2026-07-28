@@ -63,7 +63,14 @@ config :hospitality_coms, Oban,
        # often is that a deadline is honoured up to an hour late — which is
        # nothing, since `delete_after` is stamped and does not move — while the
        # cost of running several at once is two passes taking the same batch.
-       {"0 * * * *", HospitalityComs.Workers.RetentionSweeper}
+       {"0 * * * *", HospitalityComs.Workers.RetentionSweeper},
+       # Issue #15's reaper, hourly and on the same queue, at a minute of its
+       # own because that queue has a concurrency of one and two jobs staged
+       # together would simply queue behind each other. Nothing here is urgent:
+       # a token past its horizon authenticates nothing whether or not anything
+       # has deleted it, so being an hour late costs a row rather than a
+       # session.
+       {"30 * * * *", HospitalityComs.Workers.AccountReaper}
      ]},
     {Oban.Plugins.Pruner, max_age: 7 * 24 * 60 * 60}
   ]

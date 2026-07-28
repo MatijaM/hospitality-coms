@@ -255,6 +255,40 @@ defmodule HospitalityComs.Lifecycle do
   # tick and the sweep would never make progress again.
   @default_ceiling 5_000
 
+  # How long a `people` row that never confirmed an address survives (issue
+  # #15). Chosen against a constraint rather than picked: it must exceed every
+  # token validity in `HospitalityComs.Accounts.PersonToken`, because
+  # `people_tokens.person_id` is the one foreign key into `people` that is
+  # `ON DELETE CASCADE`, so reaping a person takes their tokens with them and
+  # this ordering is what makes "never a live credential" true without appealing
+  # to the argument that an unconfirmed person cannot hold a session token.
+  #
+  # The constraint is an *ordering* rather than an equality, so the number is
+  # declared and the ordering is checked below at compile time — which is the
+  # difference between a value that cannot ship broken and one a test reports on
+  # after it already has. The three remote calls are also what put this module
+  # in `PersonToken`'s compile-time dependency set, so shortening this horizon
+  # or lengthening a validity recompiles whichever file did not change.
+  @unconfirmed_retention_days 30
+
+  @token_validity_ceiling_in_minutes Enum.max([
+                                       PersonToken.session_validity_in_days() * 24 * 60,
+                                       PersonToken.change_email_validity_in_days() * 24 * 60,
+                                       PersonToken.magic_link_validity_in_minutes()
+                                     ])
+
+  if @unconfirmed_retention_days * 24 * 60 <= @token_validity_ceiling_in_minutes do
+    raise """
+    @unconfirmed_retention_days is #{@unconfirmed_retention_days} days, which does \
+    not outlive every validity in HospitalityComs.Accounts.PersonToken (the \
+    longest is #{@token_validity_ceiling_in_minutes} minutes).
+
+    people_tokens.person_id is ON DELETE CASCADE, so reaping an unconfirmed \
+    person deletes their tokens. Raise the retention or shorten the validity; \
+    do not delete this check.
+    """
+  end
+
   # Rows per `insert_all` on the archive's backfill path. `insert_all` binds one
   # parameter per field per row and Postgres refuses more than 65535 of them, so
   # ten fields put the hard wall at 6553; this is the same order of magnitude as
@@ -284,6 +318,15 @@ defmodule HospitalityComs.Lifecycle do
 
   @typedoc "What closing a venue did."
   @type closure() :: %{venue: Venue.t(), messages_stamped: non_neg_integer()}
+
+  @typedoc """
+  What one reap deleted: tokens past their own context's validity, and people
+  who never confirmed an address.
+  """
+  @type reaping() :: %{
+          expired_tokens: non_neg_integer(),
+          unconfirmed_people: non_neg_integer()
+        }
 
   @typedoc """
   What one archive pass did: copies it wrote, and copies whose deletion clock it
@@ -335,6 +378,12 @@ defmodule HospitalityComs.Lifecycle do
   def archive_deadline(%DateTime{} = ends_at) do
     ends_at |> DateTime.add(@own_copy_retention_days, :day) |> DateTime.truncate(:second)
   end
+
+  @doc """
+  How long a person who never confirmed an address survives.
+  """
+  @spec unconfirmed_retention_days() :: pos_integer()
+  def unconfirmed_retention_days, do: @unconfirmed_retention_days
 
   @doc """
   How many rows one trigger deletes in one run.
@@ -826,6 +875,97 @@ defmodule HospitalityComs.Lifecycle do
           RetentionRun.t()
   defp insert_run(instant, outcome, ceiling, counts) do
     instant |> RetentionRun.changeset(outcome, ceiling, counts) |> Repo.insert!()
+  end
+
+  ## The reap
+
+  @doc """
+  Deletes expired auth tokens and people who never confirmed an address.
+
+  Issue #15's second and third halves. `POST /api/log-in` writes a `people` row
+  and a `people_tokens` row for any address an anonymous caller posts, and
+  nothing removed either past its horizon except consumption — so both tables
+  grew monotonically behind an endpoint that had no limiter in front of it
+  either.
+
+  One transaction, two bounded statements, each capped at `batch_size/0`, and
+  **no lower bound on either**. That is deliberate and it is the opposite of
+  `HospitalityComs.Engagements.list_expired/3`, which needs a window precisely
+  because it does *not* consume the rows it finds: a limit with no floor pins
+  that sweep to the same oldest batch for ever. Both statements here delete what
+  they select, so the sweep advances by construction, and a floor would leave
+  everything older than the window unreaped for ever — which is the growth this
+  function exists to stop, arriving through the fix.
+
+  ## This is not `sweep/1` and it is deliberately not two more of its triggers
+
+  Every trigger in `sweep/1` reads a `delete_after` column that was **stamped
+  once, by an event, from a value that can no longer move**, and never computes
+  a deadline (KTD16). Both predicates here **compute** one, from `inserted_at`.
+  That is correct in this case for reasons that do not generalise — the column
+  is written at insert and no changeset in the tree rewrites it, and the horizon
+  is a constant rather than another row's period — and a list of six triggers,
+  four of which must never compute and two of which do, is a list a future
+  author copies the wrong half of.
+
+  ## Why an unconfirmed `people` row can be deleted at all
+
+  `people_tokens.person_id` is the only foreign key into `people` that is not
+  `ON DELETE RESTRICT`; every other one — `engagements`, the three peer tables,
+  `declared_entries`, `attested_entry_disclosures` — is. **An unconfirmed person
+  can hold none of them**, and structurally rather than by survey:
+  `confirmed_at` is set by `HospitalityComs.Accounts.login_person_by_magic_link/2`,
+  which is the only path that mints a session token, and every context function
+  that writes any of those tables takes a `PersonScope` carrying a real person,
+  which needs one.
+
+  If a later unit breaks that, the delete raises `foreign_key_violation`, this
+  transaction rolls back and the job fails. **A loudly failing unattended
+  deleter is the right failure**, and it is why the predicate is not padded with
+  a list of `NOT EXISTS` subqueries: a list of five tables is a list somebody
+  gets wrong later, and getting it wrong is silent where the foreign key is not.
+
+  ## Sweeping frees the address, and that is the accepted trade
+
+  `people_email_index` is partial on `erased_at IS NULL` and the reaped row is
+  *gone* rather than pseudonymised, so **an unconfirmed address becomes
+  re-registerable**, exactly as if it had never been used. An address that was
+  sent a link and never redeemed for a month is not in use; and the alternative
+  — keeping the row for ever so the address can never be claimed again — hands
+  an anonymous caller a permanent way to burn other people's addresses, which is
+  the abuse this issue is about rather than a defence against it.
+
+  No `HospitalityComs.Lifecycle.RetentionRun` is written and no table records
+  this. That record exists because retention destroys the only surviving copy of
+  a person's words; this destroys a credential the authenticator had already
+  stopped honouring at the same instant, and a row whose owner recovers it by
+  typing the same address into the same endpoint. The counts are returned, and
+  `HospitalityComs.Workers.AccountReaper` logs them.
+
+  Always `{:ok, _}`.
+  """
+  @spec reap(DateTime.t()) :: {:ok, reaping()}
+  def reap(%DateTime{} = instant) do
+    Repo.transaction(fn -> reap_due(instant) end)
+  end
+
+  # Tokens first, so the count is every token that was expired in its own right;
+  # the person delete that follows cascades only the tokens still inside their
+  # horizon, of which an unconfirmed person thirty days old has none.
+  @spec reap_due(DateTime.t()) :: reaping()
+  defp reap_due(instant) do
+    limit = batch_size()
+
+    %{
+      expired_tokens: delete_batch(PersonToken, Records.expired_tokens(instant, limit)),
+      unconfirmed_people:
+        delete_batch(Person, Records.unconfirmed_people(unconfirmed_horizon(instant), limit))
+    }
+  end
+
+  @spec unconfirmed_horizon(DateTime.t()) :: DateTime.t()
+  defp unconfirmed_horizon(instant) do
+    instant |> DateTime.add(-@unconfirmed_retention_days, :day) |> DateTime.truncate(:second)
   end
 
   @spec setting(atom(), pos_integer()) :: pos_integer()

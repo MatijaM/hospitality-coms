@@ -551,6 +551,110 @@ defmodule HospitalityComs.Lifecycle.Records do
       select: entry.id
   end
 
+  ## The reap (issue #15)
+
+  @doc """
+  Tokens whose own context's validity has elapsed at `instant`, bounded.
+
+  **This is the exact complement of the three `verify_*_query` functions in
+  `HospitalityComs.Accounts.PersonToken`.** Each of them admits a token when
+  `inserted_at > instant - validity`, strictly, so a token whose validity
+  elapses exactly at the instant asked about is already refused — and the
+  predicate here is therefore `<=` rather than the `<` the retention sweep uses.
+  The two boundaries differ by one instant and each matches the rule that
+  governs it: a credential's own liveness there, `delete_after` there.
+
+  The three validities are read from `PersonToken` rather than restated. A
+  second copy of a number is a copy that drifts from the query that honours it,
+  and `HospitalityComs.LifecycleReapTest` asserts the complement behaviourally
+  rather than by comparing constants.
+
+  **The fourth clause is a catch-all and it is not padding.** Three contexts
+  exist today; an enumeration of them is a hole on the day a later unit writes a
+  fourth, and the hole is silent — the table simply starts growing again. An
+  unrecognised context is therefore reaped at the longest horizon this
+  application honours anywhere, which is the most conservative answer available
+  without knowing what the context means.
+  """
+  @spec expired_tokens(DateTime.t(), pos_integer()) :: Ecto.Query.t()
+  def expired_tokens(%DateTime{} = instant, limit) when is_integer(limit) and limit > 0 do
+    from token in PersonToken,
+      where: ^expired_by_context(instant),
+      order_by: [asc: token.inserted_at, asc: token.id],
+      limit: ^limit,
+      select: token.id
+  end
+
+  # Split into the three the application writes and the ones it does not, which
+  # is also the shape of the argument: the first half is the complement of three
+  # named liveness rules, the second is the conservative answer for a context
+  # whose rule nobody has written yet.
+  @spec expired_by_context(DateTime.t()) :: Ecto.Query.dynamic_expr()
+  defp expired_by_context(instant) do
+    session = horizon(instant, PersonToken.session_validity_in_days(), :day)
+    login = horizon(instant, PersonToken.magic_link_validity_in_minutes(), :minute)
+    change = horizon(instant, PersonToken.change_email_validity_in_days(), :day)
+
+    # The longest validity is the *earliest* horizon, so the catch-all is the
+    # minimum of the three rather than a fourth constant.
+    longest = Enum.min([session, login, change], DateTime)
+
+    dynamic(
+      [token],
+      ^known_context_expired(session, login, change) or ^unknown_context_expired(longest)
+    )
+  end
+
+  @spec known_context_expired(DateTime.t(), DateTime.t(), DateTime.t()) ::
+          Ecto.Query.dynamic_expr()
+  defp known_context_expired(session, login, change) do
+    dynamic(
+      [token],
+      (token.context == "session" and token.inserted_at <= ^session) or
+        (token.context == "login" and token.inserted_at <= ^login) or
+        (like(token.context, "change:%") and token.inserted_at <= ^change)
+    )
+  end
+
+  @spec unknown_context_expired(DateTime.t()) :: Ecto.Query.dynamic_expr()
+  defp unknown_context_expired(longest) do
+    dynamic(
+      [token],
+      token.context not in ["session", "login"] and
+        not like(token.context, "change:%") and
+        token.inserted_at <= ^longest
+    )
+  end
+
+  @doc """
+  People who never confirmed an address and were registered before `horizon`,
+  bounded.
+
+  `<` rather than `<=`, half-open in the direction `due_copies/2` and its
+  siblings use: a row whose horizon is exactly the instant survives. There is no
+  authenticator to complement here, so the tree's own convention decides it.
+
+  Two predicates that look defensive are not. `erased_at IS NULL` keeps the
+  pseudonymised tombstone erasure leaves behind, which carries no address and
+  which nothing may delete; and `confirmed_at IS NULL` is what makes the row
+  safe to delete at all — see `HospitalityComs.Lifecycle.reap/1`.
+
+  There is deliberately no `NOT EXISTS` over the tables that reference `people`.
+  Five subqueries would be five chances to write the list wrong, and being wrong
+  would be *silent*, where the `ON DELETE RESTRICT` keys those tables already
+  carry make it loud.
+  """
+  @spec unconfirmed_people(DateTime.t(), pos_integer()) :: Ecto.Query.t()
+  def unconfirmed_people(%DateTime{} = horizon, limit) when is_integer(limit) and limit > 0 do
+    from person in Person,
+      where: is_nil(person.confirmed_at),
+      where: is_nil(person.erased_at),
+      where: person.inserted_at < ^horizon,
+      order_by: [asc: person.inserted_at, asc: person.id],
+      limit: ^limit,
+      select: person.id
+  end
+
   @doc """
   Rows of a table by primary key, which is what every delete here is given.
 
@@ -560,6 +664,15 @@ defmodule HospitalityComs.Lifecycle.Records do
   @spec by_ids(module(), [Ecto.UUID.t()]) :: Ecto.Query.t()
   def by_ids(schema, ids) when is_atom(schema) and is_list(ids) do
     from row in schema, where: row.id in ^ids
+  end
+
+  # `inserted_at` is second-precision on both tables and Ecto refuses to dump a
+  # `:utc_datetime` parameter carrying microseconds, so the horizon is truncated
+  # rather than compared at a precision the column does not have — the same
+  # manoeuvre `PersonToken` makes for the same reason.
+  @spec horizon(DateTime.t(), pos_integer(), :day | :minute) :: DateTime.t()
+  defp horizon(instant, amount, unit) do
+    instant |> DateTime.add(-amount, unit) |> DateTime.truncate(:second)
   end
 
   @spec due_messages(DateTime.t(), pos_integer()) :: Ecto.Query.t()

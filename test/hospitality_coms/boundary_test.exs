@@ -89,6 +89,7 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Peers.Connection, as: PeerConnection
   alias HospitalityComs.Peers.ConnectionRequest
   alias HospitalityComs.Repo
+  alias HospitalityComs.Repo.Migrations.AddReaperIndexes
   alias HospitalityComs.Repo.Migrations.AddRetentionColumns
   alias HospitalityComs.Repo.Migrations.CreateEmployerVisibleView
   alias HospitalityComs.Repo.Migrations.CreateEngagements
@@ -140,6 +141,7 @@ defmodule HospitalityComs.BoundaryTest do
   @profile_zone_migration "grant_profile_zone"
   @retention_tables_migration "add_retention_columns"
   @retention_zone_migration "grant_retention_zone"
+  @reaper_index_migration "add_reaper_indexes"
 
   # The employer-zone table U5 added that `employer_role` deliberately holds no
   # privilege on. KTD3: hidden attested entries are a per-row rule, which grants
@@ -228,6 +230,7 @@ defmodule HospitalityComs.BoundaryTest do
     load_migration(@profile_zone_migration, Code.ensure_loaded?(GrantProfileZone))
     load_migration(@retention_tables_migration, Code.ensure_loaded?(AddRetentionColumns))
     load_migration(@retention_zone_migration, Code.ensure_loaded?(GrantRetentionZone))
+    load_migration(@reaper_index_migration, Code.ensure_loaded?(AddReaperIndexes))
 
     :ok
   end
@@ -1420,6 +1423,35 @@ defmodule HospitalityComs.BoundaryTest do
       assert "delete_after" in columns("roster_entries")
       assert "closed_at" in columns("venues")
       assert Zones.privileges(Repo, @retention_tables) == []
+    end
+
+    test "and issue #15's two indexes come off and go back on with them" do
+      # An index-only migration, and the cheapest kind to leave unexercised: a
+      # `down` nobody runs is a `down` that is wrong the first time somebody
+      # needs it. Nothing else in this nest reaches it — the indexes are on
+      # `people` and `people_tokens`, which no rollback here touches — so it is
+      # rolled on its own.
+      #
+      # The predicate is compared as text rather than only the name, because
+      # the partial index's `WHERE` is the reap's own two `IS NULL` clauses and
+      # an index whose predicate drifted from the query would still be present
+      # under the same name.
+      before = reaper_indexes()
+
+      assert Enum.any?(before, &(&1 =~ "confirmed_at IS NULL"))
+      assert Enum.any?(before, &(&1 =~ "people_tokens"))
+
+      migrate_engagement_zone({@reaper_index_migration, AddReaperIndexes}, :down)
+
+      # The control: comparing two identical nothings would pass on a migration
+      # whose `up` and `down` were both empty.
+      assert reaper_indexes() == []
+
+      capture_log(fn ->
+        migrate_engagement_zone({@reaper_index_migration, AddReaperIndexes}, :up)
+      end)
+
+      assert reaper_indexes() == before
     end
 
     test "refuse to let the profile tables be rolled down beneath them" do
@@ -2886,6 +2918,24 @@ defmodule HospitalityComs.BoundaryTest do
 
       result
     end)
+  end
+
+  # Issue #15's two, by definition rather than by name — see the test that uses
+  # this.
+  defp reaper_indexes do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT indexdef FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname IN ('people_tokens_context_inserted_at_index',
+                            'people_unconfirmed_inserted_at_index')
+        ORDER BY indexname
+        """,
+        []
+      )
+
+    List.flatten(rows)
   end
 
   defp migration_version(migration) do

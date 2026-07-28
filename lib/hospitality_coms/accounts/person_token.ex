@@ -80,6 +80,17 @@ defmodule HospitalityComs.Accounts.PersonToken do
   def magic_link_validity_in_minutes, do: @magic_link_validity_in_minutes
 
   @doc """
+  Returns the number of days a change-email token stays valid for.
+
+  Exported for the same reason the other two are, and by issue #15: the reaper
+  in `HospitalityComs.Lifecycle` deletes a token once its own context's horizon
+  has passed, and a second copy of any of these three numbers is a copy that
+  drifts from the query that honours it.
+  """
+  @spec change_email_validity_in_days() :: pos_integer()
+  def change_email_validity_in_days, do: @change_email_validity_in_days
+
+  @doc """
   Hashes a token into the value the database holds for it.
 
   This is the one direction that exists. The digest identifies a row — for

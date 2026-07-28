@@ -1,6 +1,7 @@
 defmodule HospitalityComsWeb.Router do
   use HospitalityComsWeb, :router
 
+  import HospitalityComsWeb.LoginRateLimit
   import HospitalityComsWeb.PersonAuth
 
   # There is no browser pipeline. This application serves JSON and, from U7, two
@@ -15,10 +16,25 @@ defmodule HospitalityComsWeb.Router do
     plug :require_authenticated_person
   end
 
+  # Issue #15's limiter, and it is a pipeline of its own rather than a line in
+  # `:api` because exactly one route may have it: `POST /api/log-in` is the only
+  # endpoint an anonymous caller can use to write a row and send an email.
+  # Redemption is bounded by holding a link, and everything else needs a
+  # session. It must come *after* `:fetch_person_scope`, which is where the
+  # instant it derives its window from is captured.
+  pipeline :rate_limited_log_in do
+    plug :limit_login
+  end
+
+  scope "/api", HospitalityComsWeb do
+    pipe_through [:api, :rate_limited_log_in]
+
+    post "/log-in", SessionController, :create
+  end
+
   scope "/api", HospitalityComsWeb do
     pipe_through :api
 
-    post "/log-in", SessionController, :create
     post "/log-in/token", SessionController, :confirm
   end
 
