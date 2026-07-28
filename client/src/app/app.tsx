@@ -1,15 +1,23 @@
 /**
  * The routing shell.
  *
- * Six routes. `/rooms` is U7's and `/peers` is U8's, and they are the two
- * surfaces here that need a socket. The rest of what the plan describes — the
- * profile, disclosure, archived engagements, the demo controls — still needs an
- * endpoint or a channel that does not exist, and a placeholder route for one
- * would be a guess at a URL somebody else is about to choose.
+ * Seven routes. `/rooms` is U7's, `/peers` is U8's and `/profile` is U9's, and
+ * they are the three surfaces here that need a socket. What is left of the plan
+ * — archived engagements, erasure, the demo controls — still needs an endpoint
+ * or a channel that does not exist, and a placeholder route for one would be a
+ * guess at a URL somebody else is about to choose.
  *
- * `/peers` takes no prop, and that is the difference between it and `/rooms`
- * worth noticing here: the peer channel enumerates its own lists, so the peer
- * surface holds nothing this file would have to build once and hand in.
+ * **`/profile` is the one route here whose channel does not exist either**, and
+ * that is a deliberate exception rather than the rule quietly bending: U9
+ * settled the shapes and added no transport, so the surface is built against
+ * the shapes with the envelope written down in one place. Read
+ * `features/profile/contract.ts` before assuming anything behind this route
+ * answers.
+ *
+ * `/peers` and `/profile` take no prop, and that is the difference between them
+ * and `/rooms` worth noticing here: both channels enumerate their own lists, so
+ * neither surface holds anything this file would have to build once and hand
+ * in.
  *
  * The room store is a prop rather than something this file reaches for, for
  * the reason `main.tsx` gives about the API client and the token store: it is
@@ -24,6 +32,7 @@
 import { Route, Routes } from "react-router";
 
 import { PeersRoute } from "../features/peers/peers-route";
+import { ProfileRoute } from "../features/profile/profile-route";
 import { RoomsRoute } from "../features/rooms/rooms-route";
 import type { RoomStore } from "../features/rooms/room-store";
 import { HomeRoute } from "./routes/home-route";
@@ -57,6 +66,14 @@ export function App({ roomStore }: { readonly roomStore: RoomStore }) {
           element={
             <RequireSession>
               <PeersRoute />
+            </RequireSession>
+          }
+        />
+        <Route
+          path="/profile"
+          element={
+            <RequireSession>
+              <ProfileRoute />
             </RequireSession>
           }
         />
