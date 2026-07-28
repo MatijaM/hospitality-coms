@@ -1,11 +1,15 @@
 /**
  * The routing shell.
  *
- * Five routes. `/rooms` is U7's, and it is the only surface here that needs a
- * socket. The rest of what the plan describes — peers, the profile,
- * disclosure, archived engagements, the demo controls — still needs an
+ * Six routes. `/rooms` is U7's and `/peers` is U8's, and they are the two
+ * surfaces here that need a socket. The rest of what the plan describes — the
+ * profile, disclosure, archived engagements, the demo controls — still needs an
  * endpoint or a channel that does not exist, and a placeholder route for one
  * would be a guess at a URL somebody else is about to choose.
+ *
+ * `/peers` takes no prop, and that is the difference between it and `/rooms`
+ * worth noticing here: the peer channel enumerates its own lists, so the peer
+ * surface holds nothing this file would have to build once and hand in.
  *
  * The room store is a prop rather than something this file reaches for, for
  * the reason `main.tsx` gives about the API client and the token store: it is
@@ -19,6 +23,7 @@
 
 import { Route, Routes } from "react-router";
 
+import { PeersRoute } from "../features/peers/peers-route";
 import { RoomsRoute } from "../features/rooms/rooms-route";
 import type { RoomStore } from "../features/rooms/room-store";
 import { HomeRoute } from "./routes/home-route";
@@ -44,6 +49,14 @@ export function App({ roomStore }: { readonly roomStore: RoomStore }) {
           element={
             <RequireSession>
               <RoomsRoute store={roomStore} />
+            </RequireSession>
+          }
+        />
+        <Route
+          path="/peers"
+          element={
+            <RequireSession>
+              <PeersRoute />
             </RequireSession>
           }
         />
