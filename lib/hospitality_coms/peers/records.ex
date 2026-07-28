@@ -384,6 +384,22 @@ defmodule HospitalityComs.Peers.Records do
   end
 
   @doc """
+  Every live connection `person_id` is a party to, unordered, returning the rows.
+
+  Unordered because `HospitalityComs.Peers.disconnect_all/3` composes it into an
+  `update_all` — see `party_to/2` for the trap. `select` so the closed rows come
+  back, which is what the caller announces and what carries the counterpart to
+  block.
+  """
+  @spec live_connections_of(Ecto.UUID.t()) :: Ecto.Query.t()
+  def live_connections_of(person_id) when is_binary(person_id) do
+    Connection
+    |> party_to(person_id)
+    |> where([connection], is_nil(connection.disconnected_at))
+    |> select([connection], connection)
+  end
+
+  @doc """
   One connection `person_id` is a party to, by id.
 
   A connection they are not a party to and an id that names nothing match

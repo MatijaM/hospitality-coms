@@ -72,6 +72,8 @@ defmodule HospitalityComs.BoundaryTest do
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.EnableProfileRowLevelSecurity}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreateEmployerVisibleView}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantProfileZone}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.AddRetentionColumns}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantRetentionZone}
 
   import Ecto.Query
   import ExUnit.CaptureLog
@@ -87,6 +89,7 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Peers.Connection, as: PeerConnection
   alias HospitalityComs.Peers.ConnectionRequest
   alias HospitalityComs.Repo
+  alias HospitalityComs.Repo.Migrations.AddRetentionColumns
   alias HospitalityComs.Repo.Migrations.CreateEmployerVisibleView
   alias HospitalityComs.Repo.Migrations.CreateEngagements
   alias HospitalityComs.Repo.Migrations.CreatePeerGraph
@@ -103,6 +106,7 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
   alias HospitalityComs.Repo.Migrations.GrantPeerZone
   alias HospitalityComs.Repo.Migrations.GrantProfileZone
+  alias HospitalityComs.Repo.Migrations.GrantRetentionZone
   alias HospitalityComs.Repo.Migrations.GrantRoomZone
   alias HospitalityComs.Repo.Migrations.GrantZones
   alias HospitalityComs.Rooms.VenueRoomSuspension
@@ -134,6 +138,8 @@ defmodule HospitalityComs.BoundaryTest do
   @profile_row_security_migration "enable_profile_row_level_security"
   @employer_view_migration "create_employer_visible_view"
   @profile_zone_migration "grant_profile_zone"
+  @retention_tables_migration "add_retention_columns"
+  @retention_zone_migration "grant_retention_zone"
 
   # The employer-zone table U5 added that `employer_role` deliberately holds no
   # privilege on. KTD3: hidden attested entries are a per-row rule, which grants
@@ -167,6 +173,13 @@ defmodule HospitalityComs.BoundaryTest do
   # U9's three, written out for the same reason.
   @profile_tables ~w(declared_entries attested_entry_disclosures correction_requests)
   @profile_person_tables ~w(declared_entries attested_entry_disclosures)
+
+  # U10's two, written out for the same reason. `retention_runs` holds no
+  # personal data at all — an instant, four counts and an outcome — and is
+  # person zone anyway, because the zones answer which privileges
+  # `employer_role` may hold rather than whose data a table holds, and a log of
+  # what the deleter did across every venue is a report on other venues.
+  @retention_tables ~w(retained_message_copies retention_runs)
 
   @now ~U[2026-03-01 12:00:00.000000Z]
 
@@ -213,6 +226,8 @@ defmodule HospitalityComs.BoundaryTest do
 
     load_migration(@employer_view_migration, Code.ensure_loaded?(CreateEmployerVisibleView))
     load_migration(@profile_zone_migration, Code.ensure_loaded?(GrantProfileZone))
+    load_migration(@retention_tables_migration, Code.ensure_loaded?(AddRetentionColumns))
+    load_migration(@retention_zone_migration, Code.ensure_loaded?(GrantRetentionZone))
 
     :ok
   end
@@ -379,7 +394,8 @@ defmodule HospitalityComs.BoundaryTest do
       revoked =
         GrantZones.person_zone_tables() ++
           GrantRoomZone.person_zone_tables() ++
-          GrantPeerZone.person_zone_tables() ++ GrantProfileZone.person_zone_tables()
+          GrantPeerZone.person_zone_tables() ++
+          GrantProfileZone.person_zone_tables() ++ GrantRetentionZone.person_zone_tables()
 
       assert Enum.sort(revoked) == Enum.sort(Zones.person_zone_tables())
     end
@@ -585,7 +601,8 @@ defmodule HospitalityComs.BoundaryTest do
         GrantEmployerZone.granted_tables() ++
           GrantEngagementZone.granted_tables() ++
           GrantRoomZone.granted_tables() ++
-          GrantPeerZone.granted_tables() ++ GrantProfileZone.granted_tables()
+          GrantPeerZone.granted_tables() ++
+          GrantProfileZone.granted_tables() ++ GrantRetentionZone.granted_tables()
 
       assert Enum.sort(granted ++ @ungranted_tables) ==
                Enum.sort(Zones.employer_zone_tables() ++ Zones.shared_tables())
@@ -993,6 +1010,7 @@ defmodule HospitalityComs.BoundaryTest do
                "engagements_invitation_fkey" => {"f", false},
                "invitations_grant_fkey" => {"s", true},
                "invitations_issued_by_grant_fkey" => {"f", false},
+               "retained_message_copies_engagement_fkey" => {"f", false},
                "room_messages_author_fkey" => {"f", false},
                "room_messages_shift_room_fkey" => {"s", true},
                "roster_entries_engagement_fkey" => {"f", false},
@@ -1287,12 +1305,20 @@ defmodule HospitalityComs.BoundaryTest do
       assert MapSet.subset?(MapSet.new(@profile_tables), database_tables())
       assert Enum.sort(database_views()) == Enum.sort(Zones.employer_views())
 
+      # Wrapped in U10's layer, and that is not tidiness: U10's
+      # `retained_message_copies` holds a composite key into
+      # `engagements (id, person_id)`, and the unique index that makes it
+      # referenceable is created by `create_profiles` and dropped by its `down`.
+      # Without the wrapper this rollback raises `dependent_objects_still_exist`,
+      # which is `RESTRICT` doing its job one unit later.
       rolled_back =
-        rolled_back_profile_zone(fn ->
-          %{
-            tables: MapSet.intersection(MapSet.new(@profile_tables), database_tables()),
-            views: database_views()
-          }
+        rolled_back_retention_zone(fn ->
+          rolled_back_profile_zone(fn ->
+            %{
+              tables: MapSet.intersection(MapSet.new(@profile_tables), database_tables()),
+              views: database_views()
+            }
+          end)
         end)
 
       assert MapSet.to_list(rolled_back.tables) == []
@@ -1302,6 +1328,98 @@ defmodule HospitalityComs.BoundaryTest do
       assert Enum.sort(database_views()) == Enum.sort(Zones.employer_views())
       assert Zones.privileges(Repo, @profile_person_tables) == []
       assert "correction_requests_engagement_fkey" in foreign_keys("correction_requests")
+    end
+  end
+
+  describe "the retention tables" do
+    test "are person zone, and the employer role holds nothing on either" do
+      # `retained_message_copies` is a worker's own copy of their own words, so
+      # it classifies without argument. `retention_runs` is the interesting one:
+      # it holds no personal data at all — an instant, four counts and an
+      # outcome — and is person zone anyway, because a zone answers *which
+      # privileges may `employer_role` hold* rather than *whose data is this*,
+      # and the sweep it logs runs across every venue in the installation.
+      #
+      # The alternative was the infrastructure exclusion list `oban_jobs` and
+      # `oban_peers` are on. That list is for relations with no Ecto schema
+      # behind them; a table with a schema that is exempted from the
+      # classification is a table nobody decided about.
+      Enum.each(@retention_tables, fn table ->
+        assert table in Zones.person_zone_tables()
+      end)
+
+      assert Zones.privileges(Repo, @retention_tables) == []
+    end
+
+    test "and the sweep would notice if that stopped being true" do
+      # The control, in the shape the sweep exists to also catch: a column grant
+      # is invisible to `has_table_privilege`.
+      Repo.query!("GRANT SELECT (body) ON retained_message_copies TO employer_role")
+
+      assert {"retained_message_copies", "SELECT"} in Zones.employer_privileges(Repo)
+    end
+
+    test "add no crossing: the archive is keyed on the bridge and names no person directly" do
+      # `retained_message_copies.person_id` is half a composite key into
+      # `engagements (id, person_id)` — the discipline U9 established — and not a
+      # foreign key to `people`. So "engagements is the only table outside the
+      # person zone referencing `people`" survives, and so does the reason it
+      # can: this table is inside it.
+      referencing = tables_referencing_people()
+
+      assert "retained_message_copies" not in referencing
+      assert "retention_runs" not in referencing
+
+      crossings = MapSet.difference(referencing, MapSet.new(Zones.person_zone_tables()))
+      assert MapSet.to_list(crossings) == ["engagements"]
+    end
+
+    test "hold no foreign key into the employer zone, which is the copy's whole point" do
+      # `source_message_id` is the idempotence key and deliberately not a
+      # reference. `ON DELETE RESTRICT` would make the shift-history sweep fail
+      # the instant a copy outlived its original; `ON DELETE CASCADE` would
+      # delete the worker's archive on the venue's clock — which is the
+      # "shorter deadline silently wins" failure KTD16 rejects, and the reason
+      # the copy is a separate row at all.
+      assert referenced_tables("retained_message_copies") == ["engagements"]
+      assert referenced_tables("retention_runs") == []
+    end
+
+    test "key the archive on the bridge with a MATCH FULL composite foreign key" do
+      key =
+        Enum.find(
+          composite_foreign_keys(),
+          &(&1.name == "retained_message_copies_engagement_fkey")
+        )
+
+      assert key.match_type == "f"
+      refute key.nullable?
+    end
+
+    test "are removed by their own migrations' downs and restored by their ups" do
+      assert MapSet.subset?(MapSet.new(@retention_tables), database_tables())
+      assert "delete_after" in columns("room_messages")
+      assert "delete_after" in columns("roster_entries")
+      assert "closed_at" in columns("venues")
+
+      rolled_back =
+        rolled_back_retention_zone(fn ->
+          %{
+            tables: MapSet.intersection(MapSet.new(@retention_tables), database_tables()),
+            message_columns: columns("room_messages"),
+            venue_columns: columns("venues")
+          }
+        end)
+
+      assert MapSet.to_list(rolled_back.tables) == []
+      assert "delete_after" not in rolled_back.message_columns
+      assert "closed_at" not in rolled_back.venue_columns
+
+      assert MapSet.subset?(MapSet.new(@retention_tables), database_tables())
+      assert "delete_after" in columns("room_messages")
+      assert "delete_after" in columns("roster_entries")
+      assert "closed_at" in columns("venues")
+      assert Zones.privileges(Repo, @retention_tables) == []
     end
   end
 
@@ -2320,6 +2438,33 @@ defmodule HospitalityComs.BoundaryTest do
     result
   end
 
+  # U10's two, and they are the **outermost** layer rather than merely a later
+  # one. Two independent dependencies force it, and each on its own is enough:
+  #
+  #   * `retained_message_copies`'s composite key references
+  #     `engagements (id, person_id)`, and the unique index that makes that
+  #     referenceable is created by `create_profiles` and dropped by its `down`.
+  #     So this comes off before U9's, not after.
+  #   * `roster_entries.delete_after` is `NOT NULL` and is added here, by a
+  #     migration later than `create_roster_entries`. Rolling U6's tables down
+  #     and back up underneath this one would silently drop the column and leave
+  #     every later assertion running against a schema
+  #     `HospitalityComs.Rosters.RosterEntry` no longer matches.
+  @retention_migrations [
+    {@retention_tables_migration, AddRetentionColumns},
+    {@retention_zone_migration, GrantRetentionZone}
+  ]
+
+  defp rolled_back_retention_zone(between) do
+    @retention_migrations |> Enum.reverse() |> Enum.each(&migrate_engagement_zone(&1, :down))
+
+    result = between.()
+
+    capture_log(fn -> Enum.each(@retention_migrations, &migrate_engagement_zone(&1, :up)) end)
+
+    result
+  end
+
   # Partial unique indexes on a table, by name. A partial index is what makes
   # "at most one row per pair *in this state*" expressible at all, and the name
   # is what lets a changeset turn its violation into an error tuple.
@@ -2390,8 +2535,9 @@ defmodule HospitalityComs.BoundaryTest do
   defp rolled_back_engagement_zone(between) do
     engagement_step = fn -> engagement_zone_down(between) end
     room_step = fn -> rolled_back_room_zone(engagement_step) end
+    profile_step = fn -> rolled_back_profile_zone(room_step) end
 
-    rolled_back_profile_zone(room_step)
+    rolled_back_retention_zone(profile_step)
   end
 
   defp engagement_zone_down(between) do
@@ -2441,6 +2587,25 @@ defmodule HospitalityComs.BoundaryTest do
         """
         SELECT c.conname
         FROM pg_constraint c
+        WHERE c.contype = 'f' AND c.conrelid = to_regclass($1)
+        ORDER BY 1
+        """,
+        [table]
+      )
+
+    Enum.map(rows, &hd/1)
+  end
+
+  # Which tables a table's foreign keys point *at*, distinct and sorted. The
+  # question `foreign_keys/1` cannot answer, and the one U10 needs: the archive
+  # must reference the bridge and nothing in the employer zone.
+  defp referenced_tables(table) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT DISTINCT t.relname
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.confrelid
         WHERE c.contype = 'f' AND c.conrelid = to_regclass($1)
         ORDER BY 1
         """,
@@ -2581,7 +2746,8 @@ defmodule HospitalityComs.BoundaryTest do
       GrantEmployerZone.granted_tables() ++
         GrantEngagementZone.granted_tables() ++
         GrantRoomZone.granted_tables() ++
-        GrantPeerZone.granted_tables() ++ GrantProfileZone.granted_tables()
+        GrantPeerZone.granted_tables() ++
+        GrantProfileZone.granted_tables() ++ GrantRetentionZone.granted_tables()
 
     Enum.sort(
       Enum.map(tables, &"table #{&1}") ++
@@ -2591,6 +2757,7 @@ defmodule HospitalityComs.BoundaryTest do
 
   # Every grant migration rolled off, in the order Ecto uses.
   defp revoke_zone_grants do
+    migrate_engagement_zone({@retention_zone_migration, GrantRetentionZone}, :down)
     migrate_engagement_zone({@profile_zone_migration, GrantProfileZone}, :down)
     migrate_engagement_zone({@room_zone_migration, GrantRoomZone}, :down)
     migrate_engagement_zone({@engagement_zone_migration, GrantEngagementZone}, :down)
@@ -2602,6 +2769,7 @@ defmodule HospitalityComs.BoundaryTest do
     migrate_engagement_zone({@engagement_zone_migration, GrantEngagementZone}, :up)
     migrate_engagement_zone({@room_zone_migration, GrantRoomZone}, :up)
     migrate_engagement_zone({@profile_zone_migration, GrantProfileZone}, :up)
+    migrate_engagement_zone({@retention_zone_migration, GrantRetentionZone}, :up)
   end
 
   # The same sweep the person zone is audited with, pointed at the employer

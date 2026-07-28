@@ -168,6 +168,28 @@ defmodule HospitalityComs.Zones do
   of an employer disclosure *is* a venue, and the alternative placement hands
   each venue the answer to "which of my workers is concealing something".
 
+  ## U10 puts the deleter's own two tables in the person zone
+
+  `retained_message_copies` classifies without argument: it is a worker's own
+  copy of their own words, keyed on `(engagement_id, person_id)` into the
+  bridge, and it carries no employer key of any kind. The one thing worth
+  writing down is what it *deliberately lacks* — `source_message_id` is a plain
+  `binary_id` with no foreign key into `room_messages`, because a person-zone
+  key into the employer zone would be a second crossing, and because either
+  `ON DELETE` behaviour would defeat the reason the copy exists (see
+  `*_add_retention_columns.exs`).
+
+  `retention_runs` is the interesting one, because it holds no personal data at
+  all: an instant, four counts and an outcome. It is person zone anyway, and the
+  reason is that the zones answer *which privileges may `employer_role` hold*
+  rather than *whose data is this*. The answer here is none — the sweep runs
+  across every venue in the installation, and a log of what the application
+  deleted everywhere is a report on other venues' activity. The alternative was
+  the infrastructure exclusion list `HospitalityComs.BoundaryTest` keeps for
+  `oban_jobs` and `oban_peers`; that list is for relations with no Ecto schema
+  behind them, and a table with a schema that is exempted from the
+  classification is a table nobody decided about.
+
   ## What the sweep is for
 
   `employer_privileges/1` is the audit, and it exists as a function rather than
@@ -198,6 +220,8 @@ defmodule HospitalityComs.Zones do
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Engagements.Invitation
+  alias HospitalityComs.Lifecycle.RetainedMessageCopy
+  alias HospitalityComs.Lifecycle.RetentionRun
   alias HospitalityComs.Peers.Connection
   alias HospitalityComs.Peers.ConnectionRequest
   alias HospitalityComs.Peers.PeerMessage
@@ -227,7 +251,9 @@ defmodule HospitalityComs.Zones do
     Connection,
     PeerMessage,
     DeclaredEntry,
-    Disclosure
+    Disclosure,
+    RetainedMessageCopy,
+    RetentionRun
   ]
   @employer_zone [
     Venue,

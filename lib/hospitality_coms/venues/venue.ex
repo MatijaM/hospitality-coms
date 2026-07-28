@@ -66,6 +66,14 @@ defmodule HospitalityComs.Venues.Venue do
     field :name, :string
     field :timezone, :string
 
+    # Null while the venue trades. Set by `HospitalityComs.Lifecycle.close_venue/2`,
+    # which is the trigger KTD16 gives venue-room history: there is no deletion
+    # clock on it at all until this instant exists. It is not castable and there
+    # is no employer-session path to it — closing a venue destroys, on a clock,
+    # the conversation history of everybody who ever worked there, which KTD21
+    # confines to the lifecycle context.
+    field :closed_at, :utc_datetime
+
     timestamps(type: :utc_datetime)
   end
 
@@ -74,6 +82,7 @@ defmodule HospitalityComs.Venues.Venue do
           id: Ecto.UUID.t() | nil,
           name: String.t() | nil,
           timezone: String.t() | nil,
+          closed_at: DateTime.t() | nil,
           inserted_at: DateTime.t() | nil,
           updated_at: DateTime.t() | nil
         }

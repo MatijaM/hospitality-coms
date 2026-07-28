@@ -85,6 +85,7 @@ defmodule HospitalityComs.Workers.ExpireEngagement do
   alias HospitalityComs.Clock
   alias HospitalityComs.Engagements
   alias HospitalityComs.Engagements.Engagement
+  alias HospitalityComs.Lifecycle
 
   @doc """
   The job that announces `engagement`'s expiry, scheduled at its upper bound.
@@ -116,6 +117,36 @@ defmodule HospitalityComs.Workers.ExpireEngagement do
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: {:ok, Engagements.expiry()}
   def perform(%Oban.Job{args: %{"engagement_id" => engagement_id}}) do
-    {:ok, Engagements.revoke_if_expired(engagement_id, Clock.now())}
+    instant = Clock.now()
+
+    engagement_id
+    |> Engagements.revoke_if_expired(instant)
+    |> retain(engagement_id, instant)
   end
+
+  # **The one write on this path, and it is not to `engagements`.** KTD16 asks
+  # for the worker's own copy of their messages to be written "inside the
+  # engagement-end transaction", and that is not available: `end_engagement/2`
+  # runs inside `EmployerRepo.scoped_transaction/2` and `employer_role` holds no
+  # privilege on any person-zone table, so the transaction that closes the term
+  # structurally cannot write the archive. An after-commit write through `Repo`
+  # would be a second connection's transaction with no backstop.
+  #
+  # This is the one event in the system that means "the term has closed", and it
+  # already has a scheduled trigger, a periodic backstop, and idempotence. It
+  # covers explicit ending too, because `end_engagement/2` rewrites `ends_at` to
+  # the closing instant and `EngagementSweeper`'s window then finds it.
+  #
+  # It runs only on `:revoked`. `:still_active` is a renewal that happened first
+  # and there is nothing to archive; `:gone` is an engagement that no longer
+  # exists. `HospitalityComs.Lifecycle.retain_own_messages/2` is idempotent, so a
+  # retry after a failure here writes no second copy.
+  @spec retain(Engagements.expiry(), Ecto.UUID.t(), DateTime.t()) ::
+          {:ok, Engagements.expiry()}
+  defp retain(:revoked, engagement_id, instant) do
+    {:ok, _written} = Lifecycle.retain_own_messages(engagement_id, instant)
+    {:ok, :revoked}
+  end
+
+  defp retain(expiry, _engagement_id, _instant), do: {:ok, expiry}
 end

@@ -53,11 +53,31 @@ config :hospitality_coms,
 # sweep looks back over. Seven days against one is the margin.
 config :hospitality_coms, Oban,
   repo: HospitalityComs.Repo,
-  queues: [engagements: 5],
+  queues: [engagements: 5, lifecycle: 1],
   plugins: [
-    {Oban.Plugins.Cron, crontab: [{"*/5 * * * *", HospitalityComs.Workers.EngagementSweeper}]},
+    {Oban.Plugins.Cron,
+     crontab: [
+       {"*/5 * * * *", HospitalityComs.Workers.EngagementSweeper},
+       # Hourly, and a concurrency of one on its own queue. Retention deletion
+       # is irreversible and bounded per run, so the cost of running it less
+       # often is that a deadline is honoured up to an hour late — which is
+       # nothing, since `delete_after` is stamped and does not move — while the
+       # cost of running several at once is two passes taking the same batch.
+       {"0 * * * *", HospitalityComs.Workers.RetentionSweeper}
+     ]},
     {Oban.Plugins.Pruner, max_age: 7 * 24 * 60 * 60}
   ]
+
+# The retention sweeper's two bounds, and they are a pair rather than two
+# settings. `batch_size` caps each of the four triggers; `ceiling` is the total
+# above which a run rolls **every** trigger back and records itself as refused.
+#
+# Four times 500 is 2000, so an ordinary run cannot reach 5000. That is
+# deliberate: the ceiling is the guard that fires when a batch bound is missing
+# or a later trigger is added without one, not a throttle. A ceiling an ordinary
+# run could hit would refuse the same rows on every tick and the sweep would
+# never make progress again.
+config :hospitality_coms, HospitalityComs.Lifecycle, batch_size: 500, ceiling: 5_000
 
 # The employer zone acts as a Postgres role that will hold no privilege on
 # person-zone tables. The role is assumed on connection rather than logged in

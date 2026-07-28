@@ -53,5 +53,20 @@
   # it came from; sending a message takes the conversation under `FOR SHARE` and
   # then inserts. Each is a decision and a write that must not be able to
   # half-happen, which is exactly the shape AGENTS.md requires `Ecto.Multi` for.
-  {"lib/hospitality_coms/peers.ex", :call_without_opaque}
+  {"lib/hospitality_coms/peers.ex", :call_without_opaque},
+
+  # The fifth instance of the same `Ecto.Multi` / `MapSet.t()` false positive,
+  # reported twice in this file — once for erasure's multi and once for venue
+  # closure's. Confirmed to be the same one rather than assumed: both warnings
+  # name `%Ecto.Multi{:names => %MapSet{...}} (with opaque subterms)` in the
+  # first argument of `Multi.run/3`, which is the struct's own field and not
+  # anything this module constructs or reads.
+  #
+  # Neither call can go away, and this is the file where a half-happened write
+  # would matter most. Erasure ends every engagement, pseudonymises the person,
+  # deletes their tokens and disconnects their conversations; closing a venue
+  # stamps a deletion deadline on its whole room history. Each is irreversible
+  # and each has to be all-or-nothing, which is exactly the shape AGENTS.md
+  # requires `Ecto.Multi` for.
+  {"lib/hospitality_coms/lifecycle.ex", :call_without_opaque}
 ]

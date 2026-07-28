@@ -42,6 +42,8 @@ defmodule HospitalityComs.EngagementsFixtures do
   alias HospitalityComs.Engagements
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Engagements.Invitation
+  alias HospitalityComs.Lifecycle.RetainedMessageCopy
+  alias HospitalityComs.Lifecycle.RetentionRun
   alias HospitalityComs.Peers.Connection, as: PeerConnection
   alias HospitalityComs.Peers.ConnectionRequest
   alias HospitalityComs.Peers.PeerMessage
@@ -227,6 +229,7 @@ defmodule HospitalityComs.EngagementsFixtures do
 
     purge_peer_graph()
     purge_profiles(venue_ids)
+    purge_retention(venue_ids)
 
     Repo.delete_all(from entry in AttestedEntry, where: entry.venue_id in ^venue_ids)
     Repo.delete_all(from engagement in Engagement, where: engagement.venue_id in ^venue_ids)
@@ -245,17 +248,34 @@ defmodule HospitalityComs.EngagementsFixtures do
     Repo.delete_all(from grant in EmployerGrant, where: grant.venue_id in ^venue_ids)
     Repo.delete_all(from venue in Venue, where: venue.id in ^venue_ids)
 
-    people = from person in Person, where: like(person.email, ^"#{@person_prefix}%")
-
     Repo.query!(
       "DELETE FROM people_tokens WHERE person_id IN (SELECT id FROM people WHERE email LIKE $1)",
       ["#{@person_prefix}%"]
     )
 
-    Repo.delete_all(people)
+    Repo.delete_all(prefixed_people())
 
     :purged
   end
+
+  # **An erased person has no email**, so a purge keyed on the address alone
+  # cannot see one. U2 made `people.email` nullable and partial-unique on
+  # `erased_at IS NULL` precisely so erasure could null it, and U10 is the first
+  # thing that does — which turns every prefix-based lookup in this file into
+  # one that silently skips the rows a lifecycle test made.
+  #
+  # Nothing else in the tree erases anybody, so "erased" is as good a marker of
+  # this file's residue as the prefix is. The `or` is the fix rather than a
+  # widening: the two halves are the two states the check constraints hold in
+  # opposition.
+  @spec prefixed_people() :: Ecto.Query.t()
+  defp prefixed_people do
+    from person in Person,
+      where: like(person.email, ^"#{@person_prefix}%") or not is_nil(person.erased_at)
+  end
+
+  @spec prefixed_person_ids() :: [Ecto.UUID.t()]
+  defp prefixed_person_ids, do: Repo.all(from person in prefixed_people(), select: person.id)
 
   # U8's three, and they are reached from the *person* rather than from the
   # venue: a peer connection records no venue and no engagement, which is the
@@ -267,8 +287,7 @@ defmodule HospitalityComs.EngagementsFixtures do
   # requests connections hang off.
   @spec purge_peer_graph() :: :ok
   defp purge_peer_graph do
-    people = from person in Person, where: like(person.email, ^"#{@person_prefix}%")
-    person_ids = Repo.all(from person in people, select: person.id)
+    person_ids = prefixed_person_ids()
 
     Repo.delete_all(from message in PeerMessage, where: message.author_id in ^person_ids)
 
@@ -299,8 +318,7 @@ defmodule HospitalityComs.EngagementsFixtures do
   # is an ordinary thing for a test to set up.
   @spec purge_profiles([Ecto.UUID.t()]) :: :ok
   defp purge_profiles(venue_ids) do
-    people = from person in Person, where: like(person.email, ^"#{@person_prefix}%")
-    person_ids = Repo.all(from person in people, select: person.id)
+    person_ids = prefixed_person_ids()
 
     Repo.delete_all(from request in CorrectionRequest, where: request.venue_id in ^venue_ids)
 
@@ -319,6 +337,28 @@ defmodule HospitalityComs.EngagementsFixtures do
     )
 
     Repo.delete_all(from entry in DeclaredEntry, where: entry.person_id in ^person_ids)
+
+    :ok
+  end
+
+  # U10's two. The archive references `engagements` with `ON DELETE RESTRICT`,
+  # so it comes off ahead of the bridge, and it is reached through the bridge
+  # rather than by `venue_id` — it carries none, being person zone.
+  #
+  # `retention_runs` is deleted whole rather than by a key, and that is the
+  # honest option rather than a shortcut: the table holds an instant, four
+  # counts and an outcome, so there is no column this file could scope a delete
+  # to. Nothing outside the retention tests writes one.
+  @spec purge_retention([Ecto.UUID.t()]) :: :ok
+  defp purge_retention(venue_ids) do
+    Repo.delete_all(
+      from copy in RetainedMessageCopy,
+        join: engagement in Engagement,
+        on: engagement.id == copy.engagement_id,
+        where: engagement.venue_id in ^venue_ids
+    )
+
+    Repo.delete_all(RetentionRun)
 
     :ok
   end

@@ -171,9 +171,11 @@
           # a unit of work and may therefore capture the instant; everything
           # else takes it from the scope. `PersonAuth` is the HTTP boundary: it
           # reads the clock once per request in `fetch_person_scope/2` and puts
-          # the result on the scope. The two workers are the job boundary — one
-          # attempt is one unit of work (KTD5), and a retry is a new one that
-          # correctly reads the clock again. `ChannelAuth` is U7's: a channel's
+          # the result on the scope. The three workers are the job boundary —
+          # one attempt is one unit of work (KTD5), and a retry is a new one
+          # that correctly reads the clock again, which for `RetentionSweeper`
+          # is what makes a deadline that passed in the meantime get swept.
+          # `ChannelAuth` is U7's: a channel's
           # unit of work is one inbound event, not the connection and not the
           # join, so it reads the clock on every `join/3` and every
           # `handle_in/3`.
@@ -190,7 +192,8 @@
              HospitalityComsWeb.PersonAuth,
              HospitalityComsWeb.ChannelAuth,
              HospitalityComs.Workers.EngagementSweeper,
-             HospitalityComs.Workers.ExpireEngagement
+             HospitalityComs.Workers.ExpireEngagement,
+             HospitalityComs.Workers.RetentionSweeper
            ]}
         ],
         disabled: [

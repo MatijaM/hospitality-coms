@@ -54,6 +54,7 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
 
   import ExUnit.CaptureLog
 
+  alias HospitalityComs.Repo.Migrations.AddRetentionColumns
   alias HospitalityComs.Repo.Migrations.CreateEmployerVisibleView
   alias HospitalityComs.Repo.Migrations.CreateEngagements
   alias HospitalityComs.Repo.Migrations.CreatePeerGraph
@@ -67,6 +68,7 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
   alias HospitalityComs.Repo.Migrations.GrantPeerZone
   alias HospitalityComs.Repo.Migrations.GrantProfileZone
+  alias HospitalityComs.Repo.Migrations.GrantRetentionZone
   alias HospitalityComs.Repo.Migrations.GrantRoomZone
 
   @migration_name "create_people_auth_tables"
@@ -86,7 +88,9 @@ defmodule HospitalityComs.PeopleAuthTablesTest do
     {"create_profiles", CreateProfiles},
     {"enable_profile_row_level_security", EnableProfileRowLevelSecurity},
     {"create_employer_visible_view", CreateEmployerVisibleView},
-    {"grant_profile_zone", GrantProfileZone}
+    {"grant_profile_zone", GrantProfileZone},
+    {"add_retention_columns", AddRetentionColumns},
+    {"grant_retention_zone", GrantRetentionZone}
   ]
 
   # Migration files are not compiled into the application, so the modules have

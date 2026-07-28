@@ -45,6 +45,10 @@ defmodule HospitalityComs.PeersTest do
 
   @now ~U[2026-03-01 12:00:00.000000Z]
 
+  # The foreign key that makes `block_counterpart/4`'s invariant true. Named
+  # here because one test takes it away and puts it back.
+  @request_fkey "peer_connections_request_id_fkey"
+
   # A month-long term, which is what `co_rostered/2` gives both people by
   # default.
   @term_ends DateTime.add(@now, 30, :day)
@@ -856,6 +860,37 @@ defmodule HospitalityComs.PeersTest do
       assert {:error, :disconnected} = Peers.send_message(second, connection.id, "again")
     end
 
+    test "answers :request_gone rather than crashing when the block's row is missing" do
+      # **The invariant, made to fail on purpose.** `block_counterpart/4` writes
+      # KTD19's block onto the request the connection came out of, and it used
+      # to assert `{1, _} = repo.update_all(…)`. That match is safe only because
+      # `peer_connections.request_id` is `NOT NULL` with `ON DELETE RESTRICT`,
+      # and U10's erasure keeps `connection_requests` rows deliberately for
+      # exactly that reason — the row *is* the block, and deleting it would
+      # destroy the counterpart's protection.
+      #
+      # An invariant held by a schema decision is worth an enumerated refusal
+      # rather than a `MatchError` that crashes a transaction, and the only way
+      # to see the difference is to take the constraint away for one call. The
+      # restore is idempotent and runs whether or not this test passes.
+      %{first: first, second: second} = co_rostered(@now)
+      connection = connection_fixture(first, second)
+
+      on_exit(&restore_request_key/0)
+
+      Repo.query!("ALTER TABLE peer_connections DROP CONSTRAINT #{@request_fkey}")
+
+      Repo.query!("DELETE FROM connection_requests WHERE id = $1", [
+        Ecto.UUID.dump!(connection.request_id)
+      ])
+
+      assert {:error, :block, :request_gone, _changes} = Peers.disconnect(first, connection.id)
+
+      # And the refusal is a refusal: the conditional close rolled back with it,
+      # so the conversation is still open and `second` has lost nothing.
+      assert [%Conversation{open?: true}] = Peers.list_conversations(second)
+    end
+
     test "closes it identically when the other party is the one who ends it" do
       # Unilateral in both directions. Without this the assertion above is
       # satisfied by a rule that only lets the requester disconnect.
@@ -1229,6 +1264,36 @@ defmodule HospitalityComs.PeersTest do
       Regex.replace(~r"%{(\w+)}", message, fn _whole, key ->
         opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
       end)
+    end)
+  end
+
+  # Puts the foreign key back, and clears whatever made it unsatisfiable first.
+  # Idempotent and self-healing, so an aborted run leaves the schema intact —
+  # this file is not sandboxed and a missing constraint would follow it into
+  # every later run of every other non-sandboxed file.
+  defp restore_request_key do
+    HospitalityComs.EngagementsFixtures.with_connections(fn ->
+      Repo.query!("""
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = '#{@request_fkey}'
+        ) THEN
+          DELETE FROM peer_messages WHERE connection_id IN (
+            SELECT id FROM peer_connections
+            WHERE request_id NOT IN (SELECT id FROM connection_requests)
+          );
+
+          DELETE FROM peer_connections
+          WHERE request_id NOT IN (SELECT id FROM connection_requests);
+
+          ALTER TABLE peer_connections
+            ADD CONSTRAINT #{@request_fkey}
+            FOREIGN KEY (request_id) REFERENCES connection_requests (id)
+            ON DELETE RESTRICT;
+        END IF;
+      END $$;
+      """)
     end)
   end
 end

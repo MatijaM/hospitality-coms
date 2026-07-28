@@ -77,6 +77,7 @@ defmodule HospitalityComs.RoomsConcurrencyTest do
 
   alias Ecto.Adapters.SQL.Sandbox
   alias HospitalityComs.EmployerRepo
+  alias HospitalityComs.Lifecycle
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms
   alias HospitalityComs.Rooms.VenueRoomSuspension
@@ -474,15 +475,20 @@ defmodule HospitalityComs.RoomsConcurrencyTest do
     Repo.query!(
       """
       INSERT INTO roster_entries
-        (id, venue_id, shift_room_id, engagement_id, joined_at, left_at, inserted_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, NULL, $5, $5)
+        (id, venue_id, shift_room_id, engagement_id, joined_at, left_at,
+         delete_after, inserted_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, NULL, $6, $5, $5)
       """,
       [
         uuid(Ecto.UUID.generate()),
         uuid(room.venue_id),
         uuid(room.id),
         uuid(engagement.id),
-        DateTime.truncate(@now, :second)
+        DateTime.truncate(@now, :second),
+        # U10's stamped retention deadline. `roster_entries.delete_after` is
+        # `NOT NULL`, so a raw insert has to carry what
+        # `RosterEntry.join_changeset/3` would have stamped.
+        Lifecycle.history_deadline(room.closes_at)
       ]
     )
   end
