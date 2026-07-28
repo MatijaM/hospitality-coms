@@ -119,9 +119,9 @@ A brief carries:
   a row that certifies nothing.
 - **Controls, listed explicitly** — for every assertion that could pass vacuously, the
   assertion beside it that fails when it does. This is not ceremony: the project has found
-  eleven tests that read as coverage and provided none, most of them controls that could not
-  control. See `docs/solutions/test-failures/tests-that-certify-nothing.md` for the shapes and
-  the detection method.
+  twenty-one tests that read as coverage and provided none, most of them controls that could not
+  control. See `docs/solutions/test-failures/tests-that-certify-nothing.md` for the shapes, the
+  per-pull-request tally, and the detection method.
 - **Implementation constraints** — the standards this unit is most likely to break.
 - **Quality scores**, self-assessed.
 
@@ -335,12 +335,38 @@ Spend the first pass of any feature searching, not writing:
 
 `docs/solutions/` is this project's learning store: one file per lesson that would change how
 somebody writes code, organised into category directories (`test-failures/`,
-`database-issues/`, `conventions/`, …) with YAML frontmatter — `title`, `module`, `date`,
-`problem_type`, `component`, `severity`, `tags`, and a one-line `summary`. Grep the frontmatter
-before starting work in an area, especially before writing a test, a migration, a concurrency
-race, or anything that reads the clock. Add to it with `/compound-engineering:ce-compound` when
-a unit teaches something a different project would also want to know; keep this project's own
-trivia in `CLAUDE.md` instead.
+`database-issues/`, `conventions/`, …) with YAML frontmatter. The canonical contract is the
+`ce-compound` plugin's `references/schema.yaml`; read it before adding a field. What it
+requires, what it merely permits, and what this project adds on top:
+
+- **Required of every file**: `module`, `date` (`YYYY-MM-DD`), `problem_type`, `component`,
+  `severity`. The last three are enums — take the value from `schema.yaml` rather than
+  inventing one, since nothing in the tooling will reject a value that is not on the list.
+- **Required by the bug track**: `problem_type` selects the track, and a defect
+  (`build_error`, `test_failure`, `runtime_error`, `performance_issue`, `database_issue`,
+  `security_issue`, `ui_bug`, `integration_issue`, `logic_error`) additionally requires
+  `symptoms`, `root_cause` and `resolution_type`. The knowledge track (`best_practice`,
+  `convention`, `architecture_pattern`, `workflow_issue`, `developer_experience`,
+  `documentation_gap`, `design_pattern`, `tooling_decision`) requires none of the three.
+  **The ten bug-track files here carry `root_cause` and `resolution_type` and not `symptoms`**
+  — a gap in the corpus, not a precedent to copy.
+- **Optional**: `tags` on both tracks; `applies_when`, plus `root_cause` and `resolution_type`,
+  on the knowledge track. All nineteen files here carry all four — including the bug-track ones,
+  where the schema enumerates `applies_when` for the other track and forbids it in neither.
+- **This project's own, in no schema**: `title` (the plugin's template asks for it, the schema
+  does not), a one-line `summary`, and `source` — the unit and the pull requests a lesson came
+  out of, so a claim in one of these files can be traced to the review that found it. All
+  nineteen files carry all three; a new file should too.
+
+The plugin ships `scripts/validate-frontmatter.py`, and it checks **parser safety only** — the
+`---` delimiters, and unquoted scalars containing ` #` or `: `, which YAML silently truncates or
+reframes. It does not look at the field list at all, so a file passing it is not a file
+satisfying the schema.
+
+Grep the frontmatter before starting work in an area, especially before writing a test, a
+migration, a concurrency race, or anything that reads the clock. Add to it with
+`/compound-engineering:ce-compound` when a unit teaches something a different project would also
+want to know; keep this project's own trivia in `CLAUDE.md` instead.
 
 
 ### Front-end component inventory
