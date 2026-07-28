@@ -719,14 +719,17 @@ defmodule HospitalityComs.Engagements do
   # grant by construction, which is what lets `orphans_venue?/3` decide on the
   # emptiness of the survivor list rather than re-testing each one.
   @spec locked_decision_set(EmployerScope.t(), Ecto.UUID.t()) :: [Engagement.t()]
-  defp locked_decision_set(%EmployerScope{venue_id: venue_id, now: now}, engagement_id) do
+  defp locked_decision_set(scope, engagement_id) do
+    scope |> decision_set(engagement_id) |> lock("FOR UPDATE") |> EmployerRepo.all()
+  end
+
+  @spec decision_set(EmployerScope.t(), Ecto.UUID.t()) :: Ecto.Query.t()
+  defp decision_set(%EmployerScope{venue_id: venue_id, now: now}, engagement_id) do
     Engagement
     |> Records.of_venue(venue_id)
     |> Records.not_ended_by(now)
     |> Records.decision_set(venue_id, now, engagement_id)
     |> Records.oldest_first()
-    |> lock("FOR UPDATE")
-    |> EmployerRepo.all()
   end
 
   @spec close_target({[Engagement.t()], [Engagement.t()]}, EmployerScope.t()) ::
@@ -809,6 +812,52 @@ defmodule HospitalityComs.Engagements do
   rescue
     Ecto.StaleEntryError -> {:error, :stale}
   end
+
+  @doc """
+  Whether closing `engagement_id` would leave its venue with no live authority.
+
+  The question `end_engagement/2` decides for itself, exported so that a caller
+  which has to decide *before* it starts asks it once rather than owning a
+  second copy of KTD17. The caller is
+  `HospitalityComs.Demo.end_all_engagements/1`: it ends a person's engagements
+  at several venues through several transactions, so it cannot roll the set back
+  and refuses the whole operation up front instead. `Venues.fetch_acting_grant/1`
+  was made public in U5 for the same reason, and the reason is the same one —
+  "live" must not come to mean two things.
+
+  **It is not the enforcement and must not be read as one.** It takes no lock,
+  so a grant can be revoked or issued between this answer and
+  `end_engagement/2`'s; that function re-decides under `FOR UPDATE` on the same
+  set and refuses regardless. The value here is that the ordinary case does not
+  start something it cannot finish, not that the race is closed.
+
+  An id naming nothing, an engagement at another venue and a term that has
+  already closed all answer `false` — there is nothing there to orphan a venue —
+  so this discloses no more about which engagements exist than
+  `end_engagement/2`'s `:not_found` already does.
+  """
+  @spec would_orphan_venue?(EmployerScope.t(), Ecto.UUID.t()) :: boolean()
+  def would_orphan_venue?(%EmployerScope{grant_id: grant_id} = scope, engagement_id)
+      when is_binary(grant_id) and is_binary(engagement_id) do
+    {:ok, orphaning} = EmployerRepo.scoped_transaction(scope, &orphaning(&1, engagement_id))
+    orphaning
+  end
+
+  @spec orphaning(EmployerScope.t(), Ecto.UUID.t()) :: {:ok, boolean()}
+  defp orphaning(scope, engagement_id) do
+    scope
+    |> decision_set(engagement_id)
+    |> EmployerRepo.all()
+    |> Enum.split_with(&(&1.id == engagement_id))
+    |> orphaning_answer(scope)
+  end
+
+  @spec orphaning_answer({[Engagement.t()], [Engagement.t()]}, EmployerScope.t()) ::
+          {:ok, boolean()}
+  defp orphaning_answer({[], _survivors}, _scope), do: {:ok, false}
+
+  defp orphaning_answer({[target], survivors}, scope),
+    do: {:ok, orphans_venue?(target, survivors, scope)}
 
   @spec active_engagements(EmployerScope.t()) :: Ecto.Query.t()
   defp active_engagements(%EmployerScope{venue_id: venue_id, now: now}) do

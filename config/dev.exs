@@ -66,6 +66,12 @@ config :hospitality_coms, HospitalityComsWeb.Endpoint,
 # during development now that no page renders one.
 config :hospitality_coms, dev_routes: true
 
+# U11's demo controls. `HospitalityComsWeb.DemoController` compiles from
+# `dev_support/`, so this key can only ever be true where the module exists;
+# setting it in a production config would gate a scope on a module that is not
+# there. See `HospitalityComs.Demo`.
+config :hospitality_coms, demo_routes: true
+
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"
 

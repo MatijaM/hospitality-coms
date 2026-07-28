@@ -24,6 +24,11 @@ config :hospitality_coms, HospitalityComs.EmployerRepo,
 # Tests assert on boundary instants rather than approximating them.
 config :hospitality_coms, clock: HospitalityComs.Clock.Offset
 
+# U11's demo controls, so `HospitalityComsWeb.DemoControllerTest` exercises the
+# routes rather than the controller functions. Same gate as `:dev`; see
+# `HospitalityComs.Demo`.
+config :hospitality_coms, demo_routes: true
+
 # No queue runs and no plugin ticks. `testing: :manual` makes Oban start with
 # `queues: []`, `plugins: []` and an isolated non-leader peer, so a job inserted
 # by a test stays in `oban_jobs` until that test runs it with

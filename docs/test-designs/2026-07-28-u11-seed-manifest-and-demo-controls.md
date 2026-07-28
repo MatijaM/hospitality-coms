@@ -419,3 +419,42 @@ Recorded rather than applied silently, per the convention this series establishe
   an existing unit.
 - **`Workers.EngagementSweeper` is not driven by the demo**, only its window arithmetic is reused.
   Decision 2 says why; row 15 keeps the two honest.
+
+### Recorded during implementation
+
+- **Decision 4 was wrong and is withdrawn.** The seeds do *not* need to walk the clock. Every
+  context in this tree takes its instant from the scope it is handed, so a past roster is written
+  by building a scope at the past instant — `Clock.Offset` is never touched during a seed run, and
+  `Clock.Offset.restore/1`, which decision 4 said it needed, was written and then deleted rather
+  than left as dead code. Row 38 goes with it. **Row 8 stays and matters more, not less**: it is now
+  the test that catches the mistake decision 4 was worried about, which does not look like a
+  failure — a roster stamped at seed time simply produces a period that misses its shift, and the
+  room comes back empty.
+- **`HospitalityComs.Engagements.would_orphan_venue?/2` is new and public.** Decision 3 promised
+  all-or-nothing without a second copy of KTD17, and a pre-flight is the only shape that delivers
+  both when each close is its own transaction. `Venues.fetch_acting_grant/1` was made public in U5
+  for the same reason and it is recorded the same way. Its moduledoc says, in as many words, that it
+  is not the enforcement.
+- **Ana's Harbour engagement was moved from `t0-90d` to `t0-180d`, ahead of the venue she manages.**
+  Measured: with the original order, `end_all_engagements/1` reached her *authority* first and
+  refused before touching anything, so removing the pre-flight entirely killed no test — row 28 was
+  passing for the wrong reason. The manifest's own ordering is what makes it load-bearing.
+- **`"Close"`'s grace is 120 minutes, not 240.** `ShiftType.max_grace_minutes/0` is 120, so the
+  manifest as designed was refused by the changeset.
+- **The "every module in `dev_support/` is absent from the production build" assertion was rewritten
+  mid-implementation.** Its first form compared `dev_support_modules()` against
+  `library_modules()`, which are disjoint *by construction* — the two are defined by the source
+  segment they are filtered on — so it was invariant under every possible change to `mix.exs` and
+  killed by no mutation. It now compares each module's compiled source against the paths
+  `elixirc_paths(:prod)` actually names, with `lib/` matching as the control. Tenth of this
+  project's controls-that-cannot-control, found by the mutation pass rather than by review.
+- **One production defect was found by the end-to-end walkthrough and not by the tests as first
+  written**: `Ecto.Changeset.apply_action!/2` leaves an Oban job's args atom-keyed, while
+  `ExpireEngagement.perform/1` matches `"engagement_id"` because `oban_jobs.args` is `jsonb`. The
+  JSON round trip is now in `Demo.job/1` with the reason beside it. The suite catches it — the run
+  that found it was simply the first after the change.
+- **`.github/workflows/ci.yml` gains a `MIX_ENV=prod mix compile --warnings-as-errors` step.** Not
+  in any earlier plan for this unit, and the reason is in decision 1: the structural test cannot see
+  a compile-time struct expansion or an alias in a typespec, and CI never built `:prod` at all.
+- **`test/support/test_database_guard.ex`'s moduledoc** now says the premise is enforced rather than
+  observed, since `priv/repo/seeds.exs` has something to write for the first time.

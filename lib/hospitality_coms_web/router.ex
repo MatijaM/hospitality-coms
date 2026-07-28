@@ -36,4 +36,28 @@ defmodule HospitalityComsWeb.Router do
       forward "/mailbox", Plug.Swoosh.MailboxPreview
     end
   end
+
+  # U11's demo controls, and the gate is the same mechanism one block up rather
+  # than a similar one. `HospitalityComsWeb.DemoController` compiles from
+  # `dev_support/` alongside `HospitalityComs.Clock.Offset`, so under `:prod`
+  # the module does not exist — `Application.compile_env/2` answers `nil` there,
+  # this block's body never runs when the router's module body is evaluated, and
+  # no route is registered that could name it.
+  #
+  # That absence is KTD5b and not tidiness: these controls move a clock that
+  # reaches irreversible retention deletion and end engagements across venues,
+  # which is the one thing no employer session may do. They authenticate nobody
+  # on purpose; what makes them safe is that they are not compiled.
+  if Application.compile_env(:hospitality_coms, :demo_routes) do
+    scope "/api/demo", HospitalityComsWeb do
+      pipe_through :api
+
+      post "/seed", DemoController, :seed
+      get "/clock", DemoController, :show_clock
+      post "/clock", DemoController, :update_clock
+      delete "/clock", DemoController, :reset_clock
+      post "/run-due-work", DemoController, :run_due_work
+      post "/people/:person_id/end-engagements", DemoController, :end_engagements
+    end
+  end
 end

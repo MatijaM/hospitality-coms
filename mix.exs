@@ -38,15 +38,24 @@ defmodule HospitalityComs.MixProject do
     ]
   end
 
-  # Specifies which paths to compile per environment.
-  #
-  # `dev_support` holds modules that must not reach production: the offsettable
-  # clock, whose demo control could otherwise trigger irreversible retention
-  # deletion, and the project's own Credo checks, which depend on a dev-only
-  # package. Excluding the path is what makes their absence structural.
-  defp elixirc_paths(:test), do: ["lib", "dev_support", "test/support"]
-  defp elixirc_paths(:dev), do: ["lib", "dev_support"]
-  defp elixirc_paths(_), do: ["lib"]
+  @doc """
+  The paths compiled in `env`.
+
+  `dev_support` holds modules that must not reach production: the offsettable
+  clock, whose demo control could otherwise trigger irreversible retention
+  deletion; `HospitalityComs.Demo` and `HospitalityComsWeb.DemoController`,
+  which are that control; and the project's own Credo checks, which depend on a
+  dev-only package. Excluding the path is what makes their absence structural
+  rather than a flag somebody can flip (KTD5b).
+
+  Public because `HospitalityComs.DemoTest` asserts what `:prod` compiles, and
+  the only honest way to assert it is to read the function Mix itself calls
+  rather than a copy of the rule. Mix still reaches it through `project/0`.
+  """
+  @spec elixirc_paths(atom()) :: [String.t()]
+  def elixirc_paths(:test), do: ["lib", "dev_support", "test/support"]
+  def elixirc_paths(:dev), do: ["lib", "dev_support"]
+  def elixirc_paths(_env), do: ["lib"]
 
   # Specifies your project dependencies.
   #
