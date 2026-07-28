@@ -1,9 +1,11 @@
 # client
 
-The React client for hospitality-coms. This is the **foundation** of U12, not
-U12: the plan's own note says U12 "is the coarsest unit in the plan and will
-likely split during execution once the surface count is real", and this is that
-split. What is here is everything that does not depend on U7–U11.
+The React client for hospitality-coms. U12 is being built in slices — the plan's
+own note says it "is the coarsest unit in the plan and will likely split during
+execution once the surface count is real" — and two have landed: the
+**foundation** (toolchain, typed API client, log-in) and the **room surfaces**
+(U7's venue and shift rooms, the composer, the revocation). U8–U11's surfaces
+are still absent, and the table at the bottom says what each is waiting on.
 
 ## Why a separate directory and not the asset pipeline
 
@@ -38,14 +40,17 @@ are actually enforced. Revisit when typescript-eslint ships a 7-compatible major
 so the test seam is a parameter rather than an interceptor. Nothing needs MSW,
 nock, or a service worker.
 
-**No schema-validation library.** There are three response shapes. Hand-written
-decoders in `src/api/decode.ts` are shorter than the dependency and produce
+**No schema-validation library.** There are three HTTP response shapes and three
+channel payloads. Hand-written decoders in `src/api/decode.ts` and
+`src/features/rooms/decode.ts` are still shorter than the dependency and produce
 better failures. When U8–U11 land their surfaces this is the decision to
-revisit, not the file to extend indefinitely.
+revisit, not the files to extend indefinitely.
 
-**No state manager, no component library, no design system.** There is one form
-and one list. The unit that builds the rooms should choose these knowing what it
-is styling.
+**No state manager and no component library.** The room list, the open room and
+the composer are three `useState`s and a store behind an interface; a store
+library would be more code than the thing it manages. The rooms did not need a
+design system either, and the next unit to add a surface with real visual
+demands is the one that should choose one.
 
 ## Running it against Phoenix
 
@@ -69,10 +74,17 @@ takes the link or the bare token. If you set `MAGIC_LINK_BASE_URL` to
 `http://localhost:5173/log-in/` the link becomes clickable and lands on
 `/log-in/:linkToken`, which redeems it on arrival.
 
+To reach a room you need its id, because nothing serves a list of them — see
+"The rooms" below. `mix run` against the dev database is the way to get one:
+`Venues.create_venue/2` answers with the venue and its founding grant, and
+`Engagements.issue_invitation/2` then `claim_invitation/2` produce the
+engagement that makes the venue room joinable.
+
 ### CORS, and why there is none
 
 The Phoenix endpoint mounts no CORS plug — it never needed one. So the dev
-server **proxies** `/api` (and `/socket`, for when it exists) to `localhost:4000`
+server **proxies** `/api` and `/socket` (the prefix, which covers
+`/socket/person` and `/socket/employer`) to `localhost:4000`
 rather than making cross-origin requests: every request the browser sends is
 same-origin, and no backend change is required to develop against it. The proxy
 target is `VITE_DEV_API_PROXY` if you need another port.
@@ -100,19 +112,35 @@ npm run test:integration                                   # assumes :4000
 HOSPITALITY_COMS_API_URL=http://localhost:4001 npm run test:integration
 ```
 
-It is the only test here that checks this client's idea of the API against the
+It is one of two tests here that check this client's idea of the API against the
 API rather than against a stub this project also wrote, so run it whenever the
 API changes. Nothing runs it automatically — this repository has no CI — so it
 is on whoever changes `SessionController` or `ErrorEnvelope` to remember.
 
+The other is `npm run test:socket`, which does the same for the **transport**:
+the topic prefixes, the credential's route onto the connection, the shape of a
+refusal, and — the one thing no fake can settle — that a refused join is not
+retried, measured against `phoenix`'s own rejoin timers with a control that
+watches the loop happen when nothing leaves. It found the endpoint path the
+foundation had guessed wrong on its first run.
+
+It needs a server, and a server needs a database. `CLAUDE.md` is emphatic that
+migrating `hospitality_coms_dev` breaks `DROP ROLE employer_role` in
+`hospitality_coms_test` — grants are database-local while roles are
+cluster-global — so it runs against a **throwaway database that is dropped
+afterwards**. The full recipe, including how to mint a session token without
+`/dev/mailbox` (there is no dev mailbox outside dev), is in the file's own
+header.
+
 ## How the code is arranged
 
 ```
-src/api/          the four endpoints, their types, and every way they can fail
-src/session/      who is logged in, where the token lives, magic-link parsing
-src/socket/       the Phoenix socket connection — no topics, see below
-src/app/          routes and the surfaces they render
-src/test-support/ fakes shared by the tests above the API client
+src/api/            the four endpoints, their types, and every way they can fail
+src/session/        who is logged in, where the token lives, magic-link parsing
+src/socket/         the connection, the channel error envelope, the provider
+src/features/rooms/ venue and shift rooms: the list, a room, the composer
+src/app/            routes and the surfaces they render
+src/test-support/   fakes shared by the tests above the client and the socket
 ```
 
 ### The error envelope is a contract, so it is typed like one
@@ -156,9 +184,11 @@ a `catch`.
 ### The socket, and what it deliberately does not know
 
 `src/socket/session-socket.ts` opens a connection carrying the session token,
-joins a topic somebody else names, and leaves. It knows **no topic name, no
-event name and no payload shape**, because U7 was deciding all three while this
-was written.
+joins a topic somebody else names, reports what a push came back with, and
+leaves. It still knows **no topic name and no event name** — those live in
+`src/features/rooms/`, and nothing moved down here when U7 landed: a module that
+knew `"venue_room:"` would have to know `"peer"` and `"employer_venue:"` too,
+and the one property this file exists to hold is the same for all of them.
 
 The part worth having early is the refusal behaviour. KTD8 makes `join/3` the
 enforcement point and notes that the JS client auto-rejoins on `phx_error`, so
@@ -191,9 +221,22 @@ socket rather than a reconnect. `authToken` also accepts a function, which
 `phoenix` calls on every connect; widening `token` to `string | (() => string)`
 is the change if U7 wants a socket that outlives a token.
 
-**Nothing connects the socket.** There is no topic to join, so wiring it into
-the app would be a guess. One value is configuration with a conventional default
-for U7 to set: the endpoint path (`/socket`).
+**The endpoint is `/socket/person`, and `/socket` was a guess that was wrong.**
+The foundation recorded it as one — "the Phoenix default and what the Vite proxy
+assumes" — and U7 mounts two sockets instead, `socket "/socket/person",
+PersonSocket` and `socket "/socket/employer", EmployerSocket`, because KTD9
+splits them so an employer session cannot be routed to a peer conversation.
+There is nothing at `/socket` at all: the upgrade 404s and `phoenix` retries it
+on its backoff for ever, with nothing on the client to say why. Found by
+`src/socket/session-socket.integration.test.ts` on its first run against a real
+server, which is the entire reason that file exists. The Vite proxy entry is a
+prefix, so it already covered both.
+
+**`src/socket/socket-context.tsx` is what connects it**, and it is the first
+thing in this client to open a socket at all. One socket per session token,
+because `phoenix` closes over `authToken` at construction; built in a `useMemo`
+and connected in an effect, so StrictMode's double mount leaves exactly one
+live connection.
 
 ### Where the token lives
 
@@ -219,36 +262,94 @@ without ever producing a 401 leaves the retry button as the only control on
 screen. Clearing site data is the workaround. A "sign out anyway" action is the
 fix and is not built, because nothing yet distinguishes the two cases.
 
+## The rooms
+
+`src/features/rooms/` is the venue room and the shift room: a list, one open
+room, message rendering and a composer. Three behaviours are the point of it,
+and each has an assertion that fails when it regresses.
+
+### The list is local, because there is nothing to fetch
+
+**There is no endpoint that lists rooms**, and no channel event that enumerates
+them. `router.ex` still declares four API routes; U6 built
+`Rooms.list_venue_rooms/1` and `list_readable_shift_rooms/1` as context
+functions with no HTTP surface; and a room channel's join replies with the room
+and the engagement and nothing else.
+
+So the list is a bookmark file in this browser and a room is added by its id.
+It is an **input** to a join and never an authority: everything about a room —
+whether this session may read it, may write to it, or still has access at all —
+comes from the server on every join and every send, which is where KTD8 puts it.
+A room this session may not read is refused like any other.
+
+### A closed room is learned, not fetched
+
+A shift room past its `closes_at` still joins and still reads — U6 keeps
+readability and membership as separate questions, and KTD6b says no write
+withdraws access a period already earned. Only the send is refused, `gone`.
+Nothing on the wire carries `closes_at`, so the client finds out by being told
+once and **remembering**, and the composer stays disabled on the next render and
+after a reload. `forbidden` — off the roster — is the same shape and a different
+sentence.
+
+Remembering it is a guess about the future and it can be wrong in both
+directions: an employer can move a `closes_at`, and a manager can re-roster
+somebody. So the room offers a **"Check again"** that clears what was learned,
+rather than trapping the worker in a state this client inferred.
+
+### The revocation event leaves the topic
+
+`access_revoked` arrives, the topic is left, and _then_ the room is dropped from
+the list — in that order, so nothing is dropped while still subscribed.
+`access_suspended` leaves too but keeps the bookmark, because the person did
+that themselves and can undo it (KTD18).
+
+The leave is the part that matters and the reason is not the obvious one.
+Measured against a real server: a clean `{:stop, {:shutdown, :revoked}}` sends
+`phx_close` and `phoenix` does **not** rejoin, so that path never looped. What
+does loop is an abnormal channel exit — `Phoenix.Socket` sends `phx_error` for
+every exit reason — and a room left in the list that this surface re-joins on
+the next open or reconnect. A refused join left alone produced three refusals in
+six seconds against the live server; through `createSessionSocket` it produced
+one in four.
+
+### What the rooms deliberately do not have
+
+- **No history.** A joined room shows what arrives after the join. There is no
+  `"history"` event and no endpoint for `Rooms.list_venue_room_messages/2`.
+- **No presence.** `RoomChannel.joined/1` pushes `"presence_state"` and the
+  tracker pushes `"presence_diff"`; no handler is registered for either, so
+  `phoenix` drops them. Worth rendering, not one of the three things this
+  surface exists to get right.
+- **One room joined at a time.** `endpoint.ex` records that KTD10's argument for
+  `max_channels_per_transport` is wrong and that "clients must open shift rooms
+  on demand rather than joining the list". The cost is that a revocation is
+  noticed while the room is open, and on the next join otherwise — which is
+  where KTD8 puts the enforcement anyway.
+- **Attribution is the engagement id**, shortened, or "You" — never a person and
+  never a name (KTD15b). There is no name in the employer zone to render.
+
 ## Deliberately absent, and why
 
 Nothing below is stubbed. A placeholder for a shape nobody has chosen costs the
 next unit more to find and undo than it costs to write from nothing.
 
-| Surface                                            | Waiting on | What is missing                                      |
-| -------------------------------------------------- | ---------- | ---------------------------------------------------- |
-| Shift and venue rooms, composer, closed-room state | U7         | Channel topics, event names, payloads                |
-| Peer directory, requests, peer conversations       | U8         | Endpoints and the multiplexed person channel (KTD10) |
-| Profile, attested entries, disclosure controls     | U9         | Endpoints, and the per-employer view                 |
-| Archived engagements, erasure                      | U10        | Endpoints                                            |
-| Demo controls                                      | U11        | The control surface, which is not employer-scoped    |
+| Surface                                        | Waiting on | What is missing                                      |
+| ---------------------------------------------- | ---------- | ---------------------------------------------------- |
+| Peer directory, requests, peer conversations   | U8         | Endpoints and the multiplexed person channel (KTD10) |
+| Profile, attested entries, disclosure controls | U9         | Endpoints, and the per-employer view                 |
+| Archived engagements, erasure                  | U10        | Endpoints                                            |
+| Demo controls                                  | U11        | The control surface, which is not employer-scoped    |
 
-`lib/hospitality_coms_web/router.ex` declares four API routes plus the dev
+`lib/hospitality_coms_web/router.ex` still declares four API routes plus the dev
 mailbox preview, and those four are exactly what `src/api/` covers. U5 and U6
 built contexts, not endpoints: there is no HTTP surface for engagements, rooms,
-messages or rosters yet, so there is nothing here for them either.
+messages or rosters, which is why the room list is local.
 
 ### Things that were tempting to guess, and were not
 
 Recorded so the next unit knows they are open questions and not settled:
 
-- **The socket mount path.** `/socket` is the Phoenix default and is what the
-  Vite proxy assumes. `HospitalityComsWeb.Endpoint` currently declares no socket
-  at all; U7 adds `PersonSocket` and `EmployerSocket` (KTD9).
-- **How `connect/3` reads the token.** Not a guess any more, and not
-  configurable: it arrives as `connect_info[:auth_token]`, which needs
-  `socket "/socket", PersonSocket, websocket: [connect_info: [:auth_token]]` on
-  the endpoint side. The alternative — a socket param — is the query string, so
-  it is not an option this client offers.
 - **The magic link's landing origin.** `config/config.exs` defaults
   `MAGIC_LINK_BASE_URL` to `http://localhost:4000/log-in/`, which is Phoenix and
   not this client. `/log-in/:linkToken` matches that path shape so the link works
