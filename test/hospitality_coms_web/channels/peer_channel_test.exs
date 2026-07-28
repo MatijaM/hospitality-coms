@@ -152,12 +152,65 @@ defmodule HospitalityComsWeb.PeerChannelTest do
       assert Map.keys(entry) |> Enum.sort() == Map.keys(sent) |> Enum.sort()
 
       assert_push "peer_message", notice
+
+      # **The push's whole key set, not just its id.** Issue #31: the reply and
+      # the history said `sent_at` and the push said `at`, because the push went
+      # through the generic `stamped/1`. The test above this line was already
+      # named "in a reply, a history entry, and a push" and asserted one field
+      # of the push, so the half it was named for was the half it did not check.
+      assert Map.keys(notice) |> Enum.sort() == Map.keys(sent) |> Enum.sort()
       assert notice.message_id == sent.message_id
+      assert notice.sent_at == sent.sent_at
 
       # And exactly one push. The channel's topic *is* the topic
       # `HospitalityComs.Peers` announces on, so a second explicit subscription
       # would deliver every notice twice.
       refute_push "peer_message", _duplicate
+    end
+
+    test "stamp the four notices `at` and the message its own `sent_at`" do
+      # **The half that keeps `stamped/1` from being renamed instead.** `at`
+      # means "when this notice happened" and is right for a request, a decline,
+      # a connection and a disconnection — none of which was *sent*. Only the
+      # message carries a rendered entity whose instant is a column, so only the
+      # message says `sent_at`.
+      #
+      # Without this, renaming `stamped/1`'s key would satisfy every other
+      # assertion in this file: nothing else reads the instant of any of the
+      # five.
+      %{first: first, second: second, employer: employer} = PeersFixtures.co_rostered(@now)
+      third = person_scope_fixture(@now)
+      PeersFixtures.engage(employer, third, %{}, @now)
+
+      mine = joined(first)
+
+      {:ok, incoming} = Peers.request_connection(second, first.person.id)
+      assert_push "peer_request", requested
+      assert %{at: _} = requested
+      refute Map.has_key?(requested, :sent_at)
+
+      {:ok, connection} = Peers.accept_request(first, incoming.id)
+      assert_push "peer_connected", connected
+      assert %{at: _} = connected
+      refute Map.has_key?(connected, :sent_at)
+
+      {:ok, _message} = Peers.send_message(second, connection.id, "on my way")
+      assert_push "peer_message", message
+      assert %{sent_at: _} = message
+      refute Map.has_key?(message, :at)
+
+      {:ok, _closed} = Peers.disconnect(second, connection.id)
+      assert_push "peer_disconnected", disconnected
+      assert %{at: _} = disconnected
+      refute Map.has_key?(disconnected, :sent_at)
+
+      {:ok, outgoing} = Peers.request_connection(first, third.person.id)
+      {:ok, _declined} = Peers.decline_request(third, outgoing.id)
+      assert_push "peer_request_declined", refused
+      assert %{at: _} = refused
+      refute Map.has_key?(refused, :sent_at)
+
+      assert Process.alive?(mine.channel_pid)
     end
 
     test "carry the timestamp of the state a request reports" do

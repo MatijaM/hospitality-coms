@@ -213,13 +213,14 @@ defmodule HospitalityComs.DemoTest do
       # outside everything `seed/0` checked and everything the manifest named.
       tomo = person_scope(manifest, :tomo)
 
-      assert Enum.map(Profiles.list_declared_entries(tomo), & &1.id) ==
+      assert Enum.map(Profiles.list_declared_entries(tomo), & &1.declared_entry_id) ==
                [manifest.declared_entry_id]
 
       assert Enum.map(Profiles.list_correction_requests(tomo), & &1.correction_request_id) ==
                [manifest.correction_request_id]
 
-      assert Enum.map(Profiles.list_disclosures(tomo), & &1.id) == [manifest.disclosure_id]
+      assert Enum.map(Profiles.list_disclosures(tomo), & &1.disclosure_id) ==
+               [manifest.disclosure_id]
     end
   end
 

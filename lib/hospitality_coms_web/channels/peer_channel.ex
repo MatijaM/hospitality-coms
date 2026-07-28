@@ -337,6 +337,12 @@ defmodule HospitalityComsWeb.PeerChannel do
   topic — never on the channel topic, which is shared by every peer channel in
   the cluster (see the moduledoc).
 
+  Four of them stamp their instant `at`, through `stamped/1`, because they are
+  reports of events and the instant is the event's. The fifth carries a rendered
+  message, whose instant is a column, and goes through `sent/1` so that the push
+  says `sent_at` exactly as `rendered_message/1` does. See `sent/1` for why that
+  is not `stamped/1` renamed.
+
   The channel does not stop on a disconnect, and that is multiplexing being the
   point rather than an oversight: one conversation closing must leave the other
   conversations on this topic working. A room channel stops because the topic
@@ -369,14 +375,38 @@ defmodule HospitalityComsWeb.PeerChannel do
   end
 
   def handle_info({:peer_message, notice}, socket) do
-    push(socket, "peer_message", stamped(notice))
+    push(socket, "peer_message", sent(notice))
     {:noreply, socket}
   end
 
   def handle_info(_message, socket), do: RoomChannel.ignored(socket)
 
+  # `at` is "when this notice happened", and that is the right name for four of
+  # the five: a request, a decline, a connection and a disconnection are events,
+  # and the instant is the event's.
   @spec stamped(map()) :: map()
   defp stamped(%{at: %DateTime{} = at} = notice), do: %{notice | at: DateTime.to_iso8601(at)}
+
+  # The fifth is not an event report — it carries a **rendered message**, and a
+  # message's instant is a column of its own that `rendered_message/1` already
+  # puts on the wire as `sent_at`. Under `stamped/1` the reply to `"send"` and
+  # every `"history"` entry said `sent_at` while the live push of the same
+  # message said `at`, so one entity had two key names on one channel: the same
+  # defect `id`/`message_id` was, immediately beside the comment that fixed it.
+  #
+  # **The four are kept apart structurally rather than by convention.** This
+  # renames one key and delegates the conversion, so `stamped/1` is still the
+  # only place an instant becomes a string and is still what the other four go
+  # through — and a sixth notice added later gets `at` by default, which is what
+  # a notice should get. `Map.pop!/2` rather than a rebuild: a notice that had
+  # somehow lost its instant is a crash here rather than a push with a missing
+  # field.
+  @spec sent(map()) :: map()
+  defp sent(notice) do
+    {at, rest} = notice |> stamped() |> Map.pop!(:at)
+
+    Map.put(rest, :sent_at, at)
+  end
 
   # A connection announcement names both parties, because one broadcast serves
   # both of them. Which one is the *peer* depends on who is reading, so it is
@@ -445,6 +475,11 @@ defmodule HospitalityComsWeb.PeerChannel do
   # `<entity>_id` — `request_id`, `connection_id`, `person_id` — and the live
   # `peer_message` push has always said `message_id`, so a bare `id` on the
   # history and send replies made one entity two key names on one channel.
+  #
+  # `sent_at` is the same rule applied to the field beside it, which the fix
+  # above missed: the push said `at` because it went through the generic
+  # `stamped/1`. It goes through `sent/1` now and this shape's key set is what
+  # the push's key set is asserted against.
   @spec rendered_message(PeerMessage.t()) :: map()
   defp rendered_message(%PeerMessage{} = message) do
     %{

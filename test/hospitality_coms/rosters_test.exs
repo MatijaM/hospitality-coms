@@ -33,6 +33,7 @@ defmodule HospitalityComs.RostersTest do
   alias HospitalityComs.Accounts.EmployerScope
   alias HospitalityComs.Engagements
   alias HospitalityComs.Repo
+  alias HospitalityComs.Rooms
   alias HospitalityComs.Rosters
   alias HospitalityComs.Rosters.RosterEntry
 
@@ -43,6 +44,15 @@ defmodule HospitalityComs.RostersTest do
 
   @an_hour_on DateTime.add(@now, 1, :hour)
   @two_hours_on DateTime.add(@now, 2, :hour)
+
+  # Next week's hire and next week's shift. The term opens after the rostering
+  # and the room opens after that, which is the ordinary shape of a rota built
+  # in advance and the shape `add_to_roster/3` used to refuse.
+  @next_monday DateTime.add(@now, 7, :day)
+  @next_month DateTime.add(@now, 37, :day)
+
+  @future_shift_starts DateTime.add(@next_monday, 8, :hour)
+  @future_shift_ends DateTime.add(@next_monday, 16, :hour)
 
   # Two instants inside one second. Every other instant in this unit's tests is
   # a whole second, where truncation is the identity — which is exactly why a
@@ -176,6 +186,77 @@ defmodule HospitalityComs.RostersTest do
 
       assert {:error, :not_found} =
                Rosters.add_to_roster(employer_at(employer, @an_hour_on), room.id, engagement.id)
+    end
+
+    test "accepts an engagement whose term has not opened yet" do
+      # **Issue #24.** The check was "active at the scope's instant", which
+      # excluded the not-yet-open state as a side effect of excluding the closed
+      # one — so a hire whose term opens next Monday could not go on next
+      # Tuesday's shift today, and the operator got `:not_found`, which is what
+      # a bad id gets. The set is now "the term has not closed", which is
+      # `end_engagement/2`'s own target set and was widened for this same state.
+      %{employer: employer} = engaged()
+      room = future_shift_room(employer)
+      unstarted = engaged_from(employer, @next_monday, @next_month)
+
+      assert {:ok, %RosterEntry{} = entry} =
+               Rosters.add_to_roster(employer, room.id, unstarted.id)
+
+      assert entry.engagement_id == unstarted.id
+
+      # `joined_at` is the instant of the call, not the term's opening: the
+      # entry is `[today, ∞)` and the engagement opens on Monday, and membership
+      # is the intersection of the two.
+      assert entry.joined_at == @now
+      assert is_nil(entry.left_at)
+    end
+
+    test "puts a person on a rota whose entry confers nothing until their term opens" do
+      # **The property the widening rests on, asserted rather than argued.**
+      # `shift_room_members/2`, `shift_room_readers/2` and
+      # `readable_shift_rooms/2` all intersect the roster with an engagement
+      # active *at the instant asked about*, so the write-time check delivered
+      # no property the read path was not already delivering — it only cost the
+      # operator a rota they could not build.
+      #
+      # **The room is open at both instants, and that is what makes this
+      # isolating.** Written first against next week's room, every "before"
+      # assertion passed because the room was shut — measured: deleting
+      # `active_at/2` from `shift_room_members/2` altogether left that version
+      # green. Here the room opens an hour from now and the term opens two, so
+      # the only difference between the two reads is whether the engagement is
+      # active, and one write happens before either of them.
+      %{employer: employer} = engaged()
+      room = shift_room(employer)
+
+      %{engagement: unstarted, person: person} =
+        engaged_pair_from(employer, @two_hours_on, @next_month)
+
+      {:ok, _entry} = Rosters.add_to_roster(employer, room.id, unstarted.id)
+
+      shut_out = employer_at(employer, @an_hour_on)
+      waiting = person_at(person, @an_hour_on)
+
+      assert {:ok, []} = Rooms.list_shift_room_members(shut_out, room.id)
+      assert {:ok, []} = Rooms.list_shift_room_readers(shut_out, room.id)
+      assert Rooms.list_readable_shift_rooms(waiting) == []
+
+      refute Rooms.shift_room_member?(waiting, room.id)
+      refute Rooms.shift_room_readable?(waiting, room.id)
+
+      # The control: the same five reads an hour later, when the term has opened
+      # and nothing else has changed.
+      open = employer_at(employer, @two_hours_on)
+      working = person_at(person, @two_hours_on)
+
+      assert {:ok, [member]} = Rooms.list_shift_room_members(open, room.id)
+      assert member.id == unstarted.id
+      assert {:ok, [_reader]} = Rooms.list_shift_room_readers(open, room.id)
+      assert [readable] = Rooms.list_readable_shift_rooms(working)
+      assert readable.id == room.id
+
+      assert Rooms.shift_room_member?(working, room.id)
+      assert Rooms.shift_room_readable?(working, room.id)
     end
 
     test "refuses a shift room at another venue with the same answer as one that does not exist" do
@@ -371,9 +452,35 @@ defmodule HospitalityComs.RostersTest do
     %{employer: employer, person: person, engagement: engagement}
   end
 
+  # An engagement of this venue whose term opens later than the scope's instant,
+  # which is the state issue #24 is about: claimed, confirmed, and not yet open
+  # (KTD13).
+  defp engaged_from(employer, starts_at, ends_at) do
+    %{engagement: engagement} = engaged_pair_from(employer, starts_at, ends_at)
+    engagement
+  end
+
+  defp engaged_pair_from(employer, starts_at, ends_at) do
+    person = person_scope_fixture(@now)
+
+    engagement =
+      engagement_fixture(employer, person, %{
+        starts_at: starts_at,
+        ends_at: ends_at,
+        code_expires_at: DateTime.add(@now, 7, :day)
+      })
+
+    %{person: person, engagement: engagement}
+  end
+
   defp shift_room(employer) do
     shift_type = shift_type_fixture(employer, 30)
     shift_room_fixture(employer, shift_type, @shift_starts, @shift_ends)
+  end
+
+  defp future_shift_room(employer) do
+    shift_type = shift_type_fixture(employer, 30)
+    shift_room_fixture(employer, shift_type, @future_shift_starts, @future_shift_ends)
   end
 
   defp errors_on(changeset), do: HospitalityComs.DataCase.errors_on(changeset)

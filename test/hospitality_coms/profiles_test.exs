@@ -68,6 +68,37 @@ defmodule HospitalityComs.ProfilesTest do
     :attested_at
   ]
 
+  # The other three, on the same terms and for the same reason. Every one of
+  # them names its entity `<entity>_id`, and issue #36 is that the last three
+  # said `id` because they were the Ecto schemas themselves.
+  @visible_declaration_fields [
+    :declared_entry_id,
+    :role_label,
+    :organisation_name,
+    :starts_at,
+    :ends_at,
+    :declared_at
+  ]
+
+  @visible_disclosure_fields [
+    :disclosure_id,
+    :engagement_id,
+    :audience_kind,
+    :audience_id,
+    :disclosed,
+    :decided_at
+  ]
+
+  @visible_correction_fields [
+    :correction_request_id,
+    :entry_engagement_id,
+    :venue_id,
+    :body,
+    :requested_at,
+    :resolved_at,
+    :resolution
+  ]
+
   # Everything `HospitalityComs.Profiles` exports, written out. What makes "no
   # function here writes an attested entry" a claim about the module rather than
   # about the words somebody chose for a function name.
@@ -492,13 +523,21 @@ defmodule HospitalityComs.ProfilesTest do
       assert Profiles.list_visible_entries(forged, engagement.id) == {:error, :no_grant}
       assert Profiles.list_visible_corrections(forged, engagement.id) == {:error, :no_grant}
       assert Profiles.list_venue_corrections(forged) == {:error, :no_grant}
-      assert Profiles.resolve_correction(forged, request.id, :declined) == {:error, :no_grant}
+
+      assert Profiles.resolve_correction(forged, request.correction_request_id, :declined) ==
+               {:error, :no_grant}
 
       # The control: the same four calls under the venue's own grant answer.
       assert {:ok, [_entry]} = Profiles.list_visible_entries(place.employer, engagement.id)
       assert {:ok, [_seen]} = Profiles.list_visible_corrections(place.employer, engagement.id)
       assert {:ok, [_own]} = Profiles.list_venue_corrections(place.employer)
-      assert {:ok, _resolved} = Profiles.resolve_correction(place.employer, request.id, :declined)
+
+      assert {:ok, _resolved} =
+               Profiles.resolve_correction(
+                 place.employer,
+                 request.correction_request_id,
+                 :declined
+               )
     end
   end
 
@@ -590,7 +629,7 @@ defmodule HospitalityComs.ProfilesTest do
       assert {:ok, second} =
                Profiles.set_disclosure(worker, other.id, {:venue, here.venue.id}, false)
 
-      assert second.id == first.id
+      assert second.disclosure_id == first.disclosure_id
       refute second.disclosed
       assert [^second] = Profiles.list_disclosures(worker)
     end
@@ -753,7 +792,7 @@ defmodule HospitalityComs.ProfilesTest do
 
       assert {:ok, profile} = Profiles.fetch_peer_profile(first, second.person.id)
       assert [seen] = profile.correction_requests
-      assert seen.correction_request_id == request.id
+      assert seen.correction_request_id == request.correction_request_id
       assert seen.body == "The dates are wrong."
     end
 
@@ -1078,7 +1117,7 @@ defmodule HospitalityComs.ProfilesTest do
                Profiles.request_correction(worker, engagement.id, %{body: "Wrong role."})
 
       assert {:ok, [read]} = Profiles.list_venue_corrections(place.employer)
-      assert read.correction_request_id == request.id
+      assert read.correction_request_id == request.correction_request_id
       assert read.body == "Wrong role."
       assert is_nil(read.resolved_at)
       assert is_nil(read.resolution)
@@ -1096,7 +1135,7 @@ defmodule HospitalityComs.ProfilesTest do
       assert {:ok, [seen]} =
                Profiles.list_visible_corrections(employer_at(here, @now), viewer.id)
 
-      assert seen.correction_request_id == request.id
+      assert seen.correction_request_id == request.correction_request_id
       assert seen.body == "Wrong dates."
     end
 
@@ -1120,16 +1159,31 @@ defmodule HospitalityComs.ProfilesTest do
       {:ok, request} = Profiles.request_correction(worker, engagement.id, %{body: "Wrong role."})
 
       assert {:ok, declined} =
-               Profiles.resolve_correction(place.employer, request.id, :declined)
+               Profiles.resolve_correction(
+                 place.employer,
+                 request.correction_request_id,
+                 :declined
+               )
 
-      assert declined.resolution == "declined"
-      assert declined.resolved_by_grant_id == place.grant.id
+      # **`:declined`, and this line is the last one in the file that said
+      # `"declined"`.** U9 fixed the four readers and left the two writers, so
+      # the suite went on asserting the schema's string here and the render
+      # struct's atom four lines below — the same divergence the comment under
+      # it describes, on the other half of the same entity. Issue #36.
+      assert declined.resolution == :declined
+
+      # The acting grant is read off the row rather than off the reply.
+      # `VisibleCorrection` carries no `resolved_by_grant_id` and must not: it is
+      # also what a worker and their peers read, and which of a venue's grants
+      # answered a complaint is the venue's own business.
+      assert Repo.get!(CorrectionRequest, declined.correction_request_id).resolved_by_grant_id ==
+               place.grant.id
 
       assert [_entry] = visible(place, engagement)
 
-      # **One shape, four readers, and it is asserted as one.** These two lines
-      # used to assert `"declined"` and `:declined` two lines apart — the suite
-      # had locked in a divergence the render struct exists to prevent, because
+      # **One shape, six callers, and it is asserted as one.** These lines used
+      # to assert `"declined"` and `:declined` two lines apart — the suite had
+      # locked in a divergence the render struct exists to prevent, because
       # `venue_corrections/1` selected no field list and returned the schema.
       assert {:ok, [%{resolution: :declined}]} = Profiles.list_venue_corrections(place.employer)
       assert [%{resolution: :declined}] = Profiles.list_correction_requests(worker)
@@ -1143,8 +1197,14 @@ defmodule HospitalityComs.ProfilesTest do
       before = Repo.get_by!(AttestedEntry, engagement_id: engagement.id)
       {:ok, request} = Profiles.request_correction(worker, engagement.id, %{body: "Wrong role."})
 
-      assert {:ok, accepted} = Profiles.resolve_correction(place.employer, request.id, :accepted)
-      assert accepted.resolution == "accepted"
+      assert {:ok, accepted} =
+               Profiles.resolve_correction(
+                 place.employer,
+                 request.correction_request_id,
+                 :accepted
+               )
+
+      assert accepted.resolution == :accepted
       assert Repo.get_by!(AttestedEntry, engagement_id: engagement.id) == before
     end
 
@@ -1154,9 +1214,11 @@ defmodule HospitalityComs.ProfilesTest do
       engagement = engage(place, worker, @now, days(30))
 
       {:ok, request} = Profiles.request_correction(worker, engagement.id, %{body: "Wrong role."})
-      {:ok, _first} = Profiles.resolve_correction(place.employer, request.id, :declined)
 
-      assert Profiles.resolve_correction(place.employer, request.id, :accepted) ==
+      {:ok, _first} =
+        Profiles.resolve_correction(place.employer, request.correction_request_id, :declined)
+
+      assert Profiles.resolve_correction(place.employer, request.correction_request_id, :accepted) ==
                {:error, :already_resolved}
     end
 
@@ -1168,7 +1230,11 @@ defmodule HospitalityComs.ProfilesTest do
 
       {:ok, request} = Profiles.request_correction(worker, engagement.id, %{body: "Wrong role."})
 
-      assert Profiles.resolve_correction(elsewhere.employer, request.id, :declined) ==
+      assert Profiles.resolve_correction(
+               elsewhere.employer,
+               request.correction_request_id,
+               :declined
+             ) ==
                {:error, :not_found}
 
       assert Profiles.resolve_correction(place.employer, Ecto.UUID.generate(), :declined) ==
@@ -1194,14 +1260,18 @@ defmodule HospitalityComs.ProfilesTest do
       later = PeersFixtures.person_at(worker, days(5))
       {:ok, request} = Profiles.request_correction(later, engagement.id, %{body: "Wrong role."})
 
-      assert Profiles.resolve_correction(place.employer, request.id, :declined) ==
+      assert Profiles.resolve_correction(place.employer, request.correction_request_id, :declined) ==
                {:error, :not_found}
 
       # The control: the same call once the instant has caught up.
       assert {:ok, declined} =
-               Profiles.resolve_correction(employer_at(place, days(10)), request.id, :declined)
+               Profiles.resolve_correction(
+                 employer_at(place, days(10)),
+                 request.correction_request_id,
+                 :declined
+               )
 
-      assert declined.resolution == "declined"
+      assert declined.resolution == :declined
     end
 
     test "refuse an engagement that is not the caller's" do
@@ -1249,7 +1319,9 @@ defmodule HospitalityComs.ProfilesTest do
       assert [^entry] = Profiles.list_declared_entries(worker)
 
       assert {:ok, amended} =
-               Profiles.amend_declared_entry(worker, entry.id, %{role_label: "Bartender"})
+               Profiles.amend_declared_entry(worker, entry.declared_entry_id, %{
+                 role_label: "Bartender"
+               })
 
       assert amended.role_label == "Bartender"
       assert DateTime.compare(amended.declared_at, entry.declared_at) == :eq
@@ -1281,7 +1353,9 @@ defmodule HospitalityComs.ProfilesTest do
       stranger = person()
       {:ok, entry} = Profiles.declare_entry(worker, declared())
 
-      assert Profiles.amend_declared_entry(stranger, entry.id, %{role_label: "Manager"}) ==
+      assert Profiles.amend_declared_entry(stranger, entry.declared_entry_id, %{
+               role_label: "Manager"
+             }) ==
                {:error, :not_found}
 
       assert Profiles.amend_declared_entry(worker, Ecto.UUID.generate(), %{role_label: "M"}) ==
@@ -1308,7 +1382,108 @@ defmodule HospitalityComs.ProfilesTest do
 
       assert {:ok, profile} = Profiles.fetch_peer_profile(first, second.person.id)
       assert [seen] = profile.declared_entries
-      assert seen.id == declared.id
+      assert seen.declared_entry_id == declared.declared_entry_id
+    end
+  end
+
+  describe "the shapes a caller renders" do
+    test "name every entity `<entity>_id`, and no shape says `id`" do
+      # **Issue #36.** `VisibleEntry` and `VisibleCorrection` named their
+      # entities `attested_entry_id` and `correction_request_id`; a declared
+      # entry, a disclosure decision and a correction request came back as Ecto
+      # schemas saying `id`. So the three lists of one profile carried two
+      # conventions, and whoever put them on a transport would have shipped
+      # both. U12's decoders refuse `id` already — they were written against the
+      # convention rather than against what the context happened to answer —
+      # which is why this is a server change with no client change beside it.
+      #
+      # The four field lists are literals in this file rather than derived from
+      # the structs. Deriving them is what made this file's oracle control
+      # vacuous once already: `Map.keys/1` of two structs of one type is equal
+      # by construction, so the assertion held under every difference it was
+      # written to catch.
+      place = venue()
+      worker = person()
+      stranger = person()
+      engagement = engage(place, worker, @now, days(30))
+
+      {:ok, declaration} = Profiles.declare_entry(worker, declared())
+      {:ok, correction} = Profiles.request_correction(worker, engagement.id, %{body: "Wrong."})
+
+      {:ok, disclosure} =
+        Profiles.set_disclosure(worker, engagement.id, {:venue, place.venue.id}, false)
+
+      assert [entry] = Profiles.list_attested_entries(worker)
+
+      shapes = [
+        {entry, @visible_entry_fields},
+        {declaration, @visible_declaration_fields},
+        {disclosure, @visible_disclosure_fields},
+        {correction, @visible_correction_fields}
+      ]
+
+      for {rendered, expected} <- shapes do
+        assert Enum.sort(fields(rendered)) == Enum.sort(expected)
+        refute :id in fields(rendered)
+      end
+
+      # The audience is a kind and an id rather than the table's two nullable
+      # columns, and both kinds are exercised — a mapping with one clause tested
+      # is a mapping half of whose rows have never been rendered.
+      assert disclosure.audience_kind == :venue
+      assert disclosure.audience_id == place.venue.id
+
+      assert {:ok, per_peer} =
+               Profiles.set_disclosure(worker, engagement.id, {:person, stranger.person.id}, true)
+
+      assert per_peer.audience_kind == :person
+      assert per_peer.audience_id == stranger.person.id
+    end
+
+    test "answer one correction request shape whether it was raised, answered, or read" do
+      # **The two callers `VisibleCorrection`'s "four readers, one shape" never
+      # counted.** Both writers answered the schema, so the same entity was
+      # `id` carrying `resolution: "declined"` on the way out of a write and
+      # `correction_request_id` carrying `resolution: :declined` on the way out
+      # of a read — including out of the two reads standing either side of the
+      # write in this test.
+      #
+      # Asserted as struct equality rather than field by field: a shape that
+      # drifted in any field, or a reply that came back as a different struct,
+      # fails here without this test having to enumerate what changed.
+      place = venue()
+      worker = person()
+      engagement = engage(place, worker, @now, days(30))
+
+      assert {:ok, raised} =
+               Profiles.request_correction(worker, engagement.id, %{body: "Wrong role."})
+
+      assert [^raised] = Profiles.list_correction_requests(worker)
+      assert {:ok, [^raised]} = Profiles.list_venue_corrections(place.employer)
+
+      assert {:ok, answered} =
+               Profiles.resolve_correction(
+                 place.employer,
+                 raised.correction_request_id,
+                 :declined
+               )
+
+      assert {:ok, [^answered]} = Profiles.list_venue_corrections(place.employer)
+      assert [^answered] = Profiles.list_correction_requests(worker)
+    end
+
+    test "answer one declared entry shape whether it was written, amended, or read" do
+      worker = person()
+
+      assert {:ok, written} = Profiles.declare_entry(worker, declared())
+      assert [^written] = Profiles.list_declared_entries(worker)
+
+      assert {:ok, amended} =
+               Profiles.amend_declared_entry(worker, written.declared_entry_id, %{
+                 role_label: "Bartender"
+               })
+
+      assert [^amended] = Profiles.list_declared_entries(worker)
     end
   end
 
@@ -1359,7 +1534,7 @@ defmodule HospitalityComs.ProfilesTest do
       {:ok, _other} = Profiles.request_correction(stranger, theirs.id, %{body: "Theirs."})
 
       assert [seen] = Profiles.list_correction_requests(worker)
-      assert seen.correction_request_id == request.id
+      assert seen.correction_request_id == request.correction_request_id
       assert seen.body == "Mine."
     end
 
