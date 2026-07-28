@@ -121,6 +121,44 @@ defmodule HospitalityComs.Zones do
   `HospitalityComs.EmployerRepo`, and the classification therefore cannot
   drift apart — there is one list and it is a list of schemas.
 
+  ## U9 adds a kind of relation the zones had never had: a view
+
+  `employer_visible_attested_entries` and `employer_visible_correction_requests`
+  are how the employer reads a worker's record at all (KTD3), and neither is a
+  table. That difference is not cosmetic and it is why `employer_views/0` is a
+  list of names rather than another list of schemas:
+
+    * **Neither totality check reaches a view.** `HospitalityComs.ZonesTest`
+      quantifies over Ecto schemas, and there is no schema here — a view-backed
+      one would be classified as though it stored rows.
+      `HospitalityComs.BoundaryTest`'s sweep over the database asks for
+      `relkind IN ('r', 'p', 'm')`, which excludes plain views deliberately,
+      because they hold nothing. So a view is classified by a check of its own,
+      which that file adds.
+    * **The employer zone's structural rules are about storage and do not
+      apply.** Every employer-zone table carries `venue_id` and a unique
+      `(id, venue_id)`; a view can have neither, and demanding them would mean
+      either weakening the rule for tables or inventing an exemption. The
+      questions that *do* apply — which privileges may the employer role hold,
+      who owns it, does it filter on the transaction-local scope — are asked of
+      the views directly.
+
+  What the classification means here is the same thing it means for a table:
+  `employer_role` may hold privilege on exactly these relations and nothing
+  else. `HospitalityComs.BoundaryTest` pins the privilege to `SELECT`, the owner
+  to the role that owns the base tables, and the absence of `security_invoker` —
+  the one option that would invert KTD3's mechanism by resolving the view as its
+  caller.
+
+  U9's three tables classify without argument on the ordinary test.
+  `correction_requests` carries `venue_id`, names no person, and is keyed on
+  `engagements (id, venue_id)`, so it is employer zone. `declared_entries` and
+  `attested_entry_disclosures` name people and are person zone — and the second
+  is the first person-zone table in the tree to carry an employer key, which
+  `*_create_profiles.exs` argues for at length. The short version: the audience
+  of an employer disclosure *is* a venue, and the alternative placement hands
+  each venue the answer to "which of my workers is concealing something".
+
   ## What the sweep is for
 
   `employer_privileges/1` is the audit, and it exists as a function rather than
@@ -155,6 +193,9 @@ defmodule HospitalityComs.Zones do
   alias HospitalityComs.Peers.ConnectionRequest
   alias HospitalityComs.Peers.PeerMessage
   alias HospitalityComs.Profiles.AttestedEntry
+  alias HospitalityComs.Profiles.CorrectionRequest
+  alias HospitalityComs.Profiles.DeclaredEntry
+  alias HospitalityComs.Profiles.Disclosure
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComs.Rooms.ShiftRoom
   alias HospitalityComs.Rooms.VenueRoomSuspension
@@ -175,7 +216,9 @@ defmodule HospitalityComs.Zones do
     VenueRoomSuspension,
     ConnectionRequest,
     Connection,
-    PeerMessage
+    PeerMessage,
+    DeclaredEntry,
+    Disclosure
   ]
   @employer_zone [
     Venue,
@@ -185,9 +228,15 @@ defmodule HospitalityComs.Zones do
     AttestedEntry,
     ShiftRoom,
     RosterEntry,
-    RoomMessage
+    RoomMessage,
+    CorrectionRequest
   ]
   @shared [Engagement]
+
+  # Relations the employer role may hold privilege on that are not tables. See
+  # the moduledoc: a view is classified by name because there is no schema
+  # behind it and the zones' structural rules are about storage.
+  @employer_views ~w(employer_visible_attested_entries employer_visible_correction_requests)
 
   @employer_role "employer_role"
 
@@ -229,6 +278,18 @@ defmodule HospitalityComs.Zones do
   """
   @spec shared() :: [module()]
   def shared, do: @shared
+
+  @doc """
+  Views the employer role reads through, by name.
+
+  Names rather than schemas, because a view has no rows and therefore no zone in
+  the storage sense — see the moduledoc. What the list means is the same thing
+  the zones mean: `employer_role` may hold privilege on exactly these relations,
+  and `HospitalityComs.BoundaryTest` fails on a view that is in the database and
+  not here.
+  """
+  @spec employer_views() :: [String.t()]
+  def employer_views, do: @employer_views
 
   @doc """
   Every schema that has been classified, in every zone.

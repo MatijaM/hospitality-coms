@@ -46,6 +46,9 @@ defmodule HospitalityComs.EngagementsFixtures do
   alias HospitalityComs.Peers.ConnectionRequest
   alias HospitalityComs.Peers.PeerMessage
   alias HospitalityComs.Profiles.AttestedEntry
+  alias HospitalityComs.Profiles.CorrectionRequest
+  alias HospitalityComs.Profiles.DeclaredEntry
+  alias HospitalityComs.Profiles.Disclosure
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComs.Rooms.ShiftRoom
@@ -153,6 +156,7 @@ defmodule HospitalityComs.EngagementsFixtures do
     Repo.delete_all(from room in ShiftRoom, where: room.venue_id in ^venue_ids)
 
     purge_peer_graph()
+    purge_profiles(venue_ids)
 
     Repo.delete_all(from entry in AttestedEntry, where: entry.venue_id in ^venue_ids)
     Repo.delete_all(from engagement in Engagement, where: engagement.venue_id in ^venue_ids)
@@ -211,6 +215,40 @@ defmodule HospitalityComs.EngagementsFixtures do
           request.requester_id in ^person_ids or
             request.addressee_id in ^person_ids
     )
+
+    :ok
+  end
+
+  # U9's three, and they come off ahead of the bridge and ahead of `people` for
+  # the reason U6's four and U8's three do: every one of them references
+  # `engagements`, `venues` or `people` with `ON DELETE RESTRICT`.
+  #
+  # The disclosure ledger is reached three ways, because it can name a venue
+  # this purge is removing *as an audience* without its subject engagement being
+  # at one — a worker hiding an entry from a fixture venue they never worked at
+  # is an ordinary thing for a test to set up.
+  @spec purge_profiles([Ecto.UUID.t()]) :: :ok
+  defp purge_profiles(venue_ids) do
+    people = from person in Person, where: like(person.email, ^"#{@person_prefix}%")
+    person_ids = Repo.all(from person in people, select: person.id)
+
+    Repo.delete_all(from request in CorrectionRequest, where: request.venue_id in ^venue_ids)
+
+    Repo.delete_all(
+      from disclosure in Disclosure,
+        join: engagement in Engagement,
+        on: engagement.id == disclosure.engagement_id,
+        where: engagement.venue_id in ^venue_ids
+    )
+
+    Repo.delete_all(
+      from disclosure in Disclosure,
+        where:
+          disclosure.audience_venue_id in ^venue_ids or
+            disclosure.audience_person_id in ^person_ids
+    )
+
+    Repo.delete_all(from entry in DeclaredEntry, where: entry.person_id in ^person_ids)
 
     :ok
   end

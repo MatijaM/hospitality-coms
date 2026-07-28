@@ -28,6 +28,13 @@ defmodule HospitalityComs.PostgresRolesTest do
   grant migration" and a list with a judgement call in it is a list somebody
   gets wrong later.
 
+  U9's `grant_profile_zone` does grant, on three objects — and two of them are
+  **views**, which is the first time the employer role has depended on anything
+  that is not a table. `pg_shdepend` does not care about the distinction and
+  neither does `DROP ROLE`, so the entry below is the whole of what this file
+  needs; `HospitalityComs.BoundaryTest` is where the difference shows, because
+  `pg_describe_object` says `view x` rather than `table x`.
+
   Rolling U1 back *without* rolling the grants back is not a scenario that has
   to work. What has to work is that U1's `down` removes the roles once nothing
   depends on them, and `rolled_back_grants/0` is what puts the database in that
@@ -52,6 +59,7 @@ defmodule HospitalityComs.PostgresRolesTest do
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
   alias HospitalityComs.Repo.Migrations.GrantPeerZone
+  alias HospitalityComs.Repo.Migrations.GrantProfileZone
   alias HospitalityComs.Repo.Migrations.GrantRoomZone
 
   @roles_migration "create_postgres_roles"
@@ -59,6 +67,7 @@ defmodule HospitalityComs.PostgresRolesTest do
   @engagement_grants_migration "grant_engagement_zone"
   @room_grants_migration "grant_room_zone"
   @peer_grants_migration "grant_peer_zone"
+  @profile_grants_migration "grant_profile_zone"
 
   # In the order Ecto applies them, which is the reverse of the order
   # `rolled_back_grants/0` unwinds them in. Every unit that grants adds an
@@ -69,7 +78,8 @@ defmodule HospitalityComs.PostgresRolesTest do
     {@employer_grants_migration, GrantEmployerZone},
     {@engagement_grants_migration, GrantEngagementZone},
     {@room_grants_migration, GrantRoomZone},
-    {@peer_grants_migration, GrantPeerZone}
+    {@peer_grants_migration, GrantPeerZone},
+    {@profile_grants_migration, GrantProfileZone}
   ]
 
   @migrations [{@roles_migration, CreatePostgresRoles} | @grant_migrations]

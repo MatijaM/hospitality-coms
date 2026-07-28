@@ -298,10 +298,22 @@ defmodule HospitalityComsWeb.SessionControllerTest do
 
   # Table names come from the catalogue, not from input, so interpolating them
   # is the only way to ask the question and carries nothing to inject.
+  #
+  # `table_type = 'BASE TABLE'` restricts this to relations that *hold* rows,
+  # which is what the assertion has always been about. It is not a narrowing:
+  # `information_schema.tables` lists views too, and U9's two are the first in
+  # the tree — one of them calls `app_current_instant()`, so selecting from it
+  # on a connection outside `EmployerRepo.scoped_transaction/2` raises rather
+  # than answering, which is precisely the guarantee U3 built that function to
+  # give. The set of relations checked here is unchanged.
   defp populated_tables do
     %{rows: rows} =
       Repo.query!(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+        """,
         []
       )
 
