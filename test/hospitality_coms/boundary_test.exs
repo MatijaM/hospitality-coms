@@ -66,6 +66,8 @@ defmodule HospitalityComs.BoundaryTest do
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreateRosterEntries}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantRoomZone}
   @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.EnableRoomRowLevelSecurity}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.CreatePeerGraph}
+  @compile {:no_warn_undefined, HospitalityComs.Repo.Migrations.GrantPeerZone}
 
   import Ecto.Query
   import ExUnit.CaptureLog
@@ -78,8 +80,11 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComs.EmployerRepo
   alias HospitalityComs.Engagements.Engagement
+  alias HospitalityComs.Peers.Connection, as: PeerConnection
+  alias HospitalityComs.Peers.ConnectionRequest
   alias HospitalityComs.Repo
   alias HospitalityComs.Repo.Migrations.CreateEngagements
+  alias HospitalityComs.Repo.Migrations.CreatePeerGraph
   alias HospitalityComs.Repo.Migrations.CreateRooms
   alias HospitalityComs.Repo.Migrations.CreateRosterEntries
   alias HospitalityComs.Repo.Migrations.CreateVenues
@@ -89,6 +94,7 @@ defmodule HospitalityComs.BoundaryTest do
   alias HospitalityComs.Repo.Migrations.EnableRoomRowLevelSecurity
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
   alias HospitalityComs.Repo.Migrations.GrantEngagementZone
+  alias HospitalityComs.Repo.Migrations.GrantPeerZone
   alias HospitalityComs.Repo.Migrations.GrantRoomZone
   alias HospitalityComs.Repo.Migrations.GrantZones
   alias HospitalityComs.Rooms.VenueRoomSuspension
@@ -114,6 +120,8 @@ defmodule HospitalityComs.BoundaryTest do
   @roster_tables_migration "create_roster_entries"
   @room_zone_migration "grant_room_zone"
   @room_row_security_migration "enable_room_row_level_security"
+  @peer_tables_migration "create_peer_graph"
+  @peer_zone_migration "grant_peer_zone"
 
   # The employer-zone table U5 added that `employer_role` deliberately holds no
   # privilege on. KTD3: hidden attested entries are a per-row rule, which grants
@@ -139,6 +147,10 @@ defmodule HospitalityComs.BoundaryTest do
   # about where a human may be named does not stop at the schemas this
   # application owns.
   @queue_tables ~w(oban_jobs oban_peers)
+
+  # U8's three. Written out here rather than derived, because this file's job is
+  # to disagree with the classification when the classification is wrong.
+  @peer_tables ~w(connection_requests peer_connections peer_messages)
 
   @now ~U[2026-03-01 12:00:00.000000Z]
 
@@ -174,6 +186,8 @@ defmodule HospitalityComs.BoundaryTest do
     load_migration(@roster_tables_migration, Code.ensure_loaded?(CreateRosterEntries))
     load_migration(@room_zone_migration, Code.ensure_loaded?(GrantRoomZone))
     load_migration(@room_row_security_migration, Code.ensure_loaded?(EnableRoomRowLevelSecurity))
+    load_migration(@peer_tables_migration, Code.ensure_loaded?(CreatePeerGraph))
+    load_migration(@peer_zone_migration, Code.ensure_loaded?(GrantPeerZone))
 
     :ok
   end
@@ -337,7 +351,9 @@ defmodule HospitalityComs.BoundaryTest do
       # that revoked, which is the same shape "grant on every table the
       # classification places outside the person zone" already has. A
       # person-zone table covered by no migration still fails here.
-      revoked = GrantZones.person_zone_tables() ++ GrantRoomZone.person_zone_tables()
+      revoked =
+        GrantZones.person_zone_tables() ++
+          GrantRoomZone.person_zone_tables() ++ GrantPeerZone.person_zone_tables()
 
       assert Enum.sort(revoked) == Enum.sort(Zones.person_zone_tables())
     end
@@ -539,7 +555,8 @@ defmodule HospitalityComs.BoundaryTest do
       # `permission denied`.
       granted =
         GrantEmployerZone.granted_tables() ++
-          GrantEngagementZone.granted_tables() ++ GrantRoomZone.granted_tables()
+          GrantEngagementZone.granted_tables() ++
+          GrantRoomZone.granted_tables() ++ GrantPeerZone.granted_tables()
 
       assert Enum.sort(granted ++ @ungranted_tables) ==
                Enum.sort(Zones.employer_zone_tables() ++ Zones.shared_tables())
@@ -996,6 +1013,127 @@ defmodule HospitalityComs.BoundaryTest do
       u6 = MapSet.new(~w(shift_rooms roster_entries room_messages venue_room_suspensions))
 
       assert MapSet.to_list(MapSet.intersection(tables_referencing_people(), u6)) == []
+    end
+  end
+
+  describe "the peer graph" do
+    test "is entirely in the person zone, where the employer role holds nothing" do
+      # KTD2 permits exactly one crossing and `engagements` is it, so a peer
+      # table anywhere but the person zone would be a second one. There is no
+      # judgement here: the classification is the only one that passes "is
+      # engagements, and it is the only crossing that exists" below.
+      #
+      # The sweep asks about every table privilege and about column grants, so a
+      # `GRANT SELECT (body)` would be caught alongside a table-level one.
+      Enum.each(@peer_tables, fn table -> assert table in Zones.person_zone_tables() end)
+
+      assert Zones.privileges(Repo, @peer_tables) == []
+    end
+
+    test "and the sweep would notice if that stopped being true" do
+      # The control. Postgres default-denies on a table owned by another role,
+      # so the assertion above passes on a database where nothing ever revoked
+      # anything. A column grant is chosen deliberately: it is invisible to
+      # `has_table_privilege` and is the shape the sweep exists to also catch.
+      Repo.query!("GRANT SELECT (body) ON peer_messages TO employer_role")
+
+      assert {"peer_messages", "SELECT"} in Zones.employer_privileges(Repo)
+    end
+
+    test "carries no venue key and no engagement key on any of its three tables" do
+      # The person zone's own rule. A peer connection is between two people and
+      # records nothing about where they met — which is also why there is no
+      # filter an employer session could add that would make a query over these
+      # tables mean anything.
+      Enum.each(@peer_tables, fn table ->
+        columns = columns(table)
+
+        refute "venue_id" in columns
+        refute "engagement_id" in columns
+      end)
+    end
+
+    test "names people directly, and stays inside the person zone doing it" do
+      # The positive half: these tables *do* hold foreign keys to `people`, and
+      # `tables_referencing_people/0` finding them is what makes the assertion
+      # above about their classification rather than about an absence.
+      referencing = tables_referencing_people()
+
+      Enum.each(@peer_tables, fn table -> assert table in referencing end)
+
+      assert MapSet.to_list(
+               MapSet.difference(referencing, MapSet.new(Zones.person_zone_tables()))
+             ) == ["engagements"]
+    end
+
+    test "keeps one current request per pair and one live connection per pair" do
+      # The two partial unique indexes the state machine rests on, looked for
+      # under the exact names the changesets declare — a string written twice
+      # would let a violation raise through the transaction instead of arriving
+      # as a changeset error, and the enumerated-error convention would stop
+      # being true at the one place it is load bearing.
+      assert to_string(ConnectionRequest.current_constraint()) in partial_unique_indexes(
+               "connection_requests"
+             )
+
+      assert to_string(PeerConnection.live_constraint()) in partial_unique_indexes(
+               "peer_connections"
+             )
+    end
+
+    test "keeps the pair canonical, so those indexes have one spelling to be unique over" do
+      # `connection_requests` generates its pair columns; `peer_connections`
+      # takes a check constraint instead, because there the two columns are the
+      # row's identity rather than a projection of one. Without either, "at most
+      # one row for the pair {A, B}" is not expressible as an index at all.
+      assert "pair_low_id" in generated_columns("connection_requests")
+      assert "pair_high_id" in generated_columns("connection_requests")
+
+      assert "peer_connections_pair_ordered" in check_constraints("peer_connections")
+    end
+
+    test "keeps KTD19's block honest in the schema rather than only in the context" do
+      # The block may only name a party to the request, and a declined row may
+      # only block its requester. The disconnect half is decided on
+      # `peer_connections` and cannot be checked from there, which is why there
+      # are two constraints here and not three.
+      constraints = check_constraints("connection_requests")
+
+      assert "connection_requests_block_names_a_party" in constraints
+      assert "connection_requests_decline_blocks_requester" in constraints
+      assert "connection_requests_two_people" in constraints
+    end
+
+    test "is removed by its own migration's down and restored by its up" do
+      # The half of "reversible" only a rollback proves. `peer_messages`
+      # references `peer_connections` references `connection_requests`, all with
+      # `ON DELETE RESTRICT`, so the `down` has to drop them in an order it
+      # states rather than one Ecto infers.
+      assert MapSet.subset?(MapSet.new(@peer_tables), database_tables())
+
+      rolled_back =
+        round_trip_peer_graph(fn ->
+          MapSet.intersection(MapSet.new(@peer_tables), database_tables())
+        end)
+
+      assert MapSet.to_list(rolled_back) == []
+
+      assert MapSet.subset?(MapSet.new(@peer_tables), database_tables())
+      assert Zones.privileges(Repo, @peer_tables) == []
+
+      assert to_string(ConnectionRequest.current_constraint()) in partial_unique_indexes(
+               "connection_requests"
+             )
+    end
+
+    test "adds no composite foreign key, so U5's MATCH inventory is unchanged" do
+      # Every key U8 writes is one column, because there is no venue to carry
+      # alongside it — which is the same fact as "these tables are person zone",
+      # arrived at from the foreign keys rather than from the columns.
+      names = Enum.map(composite_foreign_keys(), & &1.name)
+
+      assert Enum.filter(names, &String.starts_with?(&1, ~w(connection_requests
+                        peer_connections peer_messages))) == []
     end
   end
 
@@ -1766,6 +1904,73 @@ defmodule HospitalityComs.BoundaryTest do
     apply(Ecto.Migrator, direction, [Repo, migration_version(name), module, @migrator_opts])
   end
 
+  # U8's two, in the order they were applied. Nothing else in this file has to
+  # roll them off: the peer tables reference `people` alone, which no rollback
+  # here touches, and they depend on no scoping function and no venue.
+  @peer_migrations [
+    {@peer_tables_migration, CreatePeerGraph},
+    {@peer_zone_migration, GrantPeerZone}
+  ]
+
+  defp round_trip_peer_graph(between) do
+    @peer_migrations |> Enum.reverse() |> Enum.each(&migrate_engagement_zone(&1, :down))
+
+    result = between.()
+
+    capture_log(fn -> Enum.each(@peer_migrations, &migrate_engagement_zone(&1, :up)) end)
+
+    result
+  end
+
+  # Partial unique indexes on a table, by name. A partial index is what makes
+  # "at most one row per pair *in this state*" expressible at all, and the name
+  # is what lets a changeset turn its violation into an error tuple.
+  defp partial_unique_indexes(table) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT c.relname
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE i.indrelid = to_regclass($1)
+          AND i.indisunique
+          AND i.indpred IS NOT NULL
+        ORDER BY 1
+        """,
+        [table]
+      )
+
+    Enum.map(rows, &hd/1)
+  end
+
+  defp generated_columns(table) do
+    %{rows: rows} =
+      Repo.query!(
+        """
+        SELECT a.attname
+        FROM pg_attribute a
+        WHERE a.attrelid = to_regclass($1)
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND a.attgenerated <> ''
+        ORDER BY 1
+        """,
+        [table]
+      )
+
+    Enum.map(rows, &hd/1)
+  end
+
+  defp check_constraints(table) do
+    %{rows: rows} =
+      Repo.query!(
+        "SELECT conname FROM pg_constraint WHERE contype = 'c' AND conrelid = to_regclass($1)",
+        [table]
+      )
+
+    Enum.map(rows, &hd/1)
+  end
+
   defp migrate_btree_gist(direction) do
     apply(Ecto.Migrator, direction, [
       Repo,
@@ -1963,7 +2168,8 @@ defmodule HospitalityComs.BoundaryTest do
   # employer-zone table it was granted nothing on.
   defp dependent_zone_tables do
     (GrantEmployerZone.granted_tables() ++
-       GrantEngagementZone.granted_tables() ++ GrantRoomZone.granted_tables())
+       GrantEngagementZone.granted_tables() ++
+       GrantRoomZone.granted_tables() ++ GrantPeerZone.granted_tables())
     |> Enum.map(&"table #{&1}")
     |> Enum.sort()
   end
