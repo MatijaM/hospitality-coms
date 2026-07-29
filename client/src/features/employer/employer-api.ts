@@ -1,5 +1,5 @@
 /**
- * The three employer routes, as paths and wire shapes.
+ * The nine employer routes, as paths and wire shapes.
  *
  * `api/client.ts` owns "an authenticated request that decodes or fails"; this
  * owns what is asked for and what comes back — the layering `features/rooms/`
@@ -8,9 +8,18 @@
  *
  * The routes, from `lib/hospitality_coms_web/router.ex`:
  *
- *     GET  /api/employer/venues                        {venues: [...]}
- *     GET  /api/employer/venues/:venue_id/engagements  {engagements: [...]}
- *     POST /api/employer/venues/:venue_id/invitations  {invitation: {...}, claim_code}
+ *     GET    /api/employer/venues                        {venues: [...]}
+ *     GET    .../venues/:venue_id/engagements            {engagements: [...]}
+ *     POST   .../venues/:venue_id/invitations            {invitation: {...}, claim_code}
+ *     GET    .../venues/:venue_id/shift-types            {shift_types: [...]}
+ *     POST   .../venues/:venue_id/shift-rooms            {shift_room: {...}}
+ *     GET    .../venues/:venue_id/shift-rooms[?extent]   {shift_rooms: [...], complete}
+ *     POST   .../shift-rooms/:id/roster                  {roster_entry: {...}}
+ *     GET    .../shift-rooms/:id/roster                  {roster: [...]}
+ *     DELETE .../shift-rooms/:id/roster/:engagement_id   204, no body
+ *
+ * The last is the only call in this client that succeeds with no body, and
+ * `write`'s optional decoder exists for it — see `removeFromRoster` below.
  *
  * ## The picker reads `/api/employer/venues`, and `/api/venue-rooms` would be wrong
  *
@@ -45,8 +54,26 @@
  */
 
 import type { ApiClient, ApiResult } from "../../api/client";
-import { decodeIssuedOffer, decodeManagedVenues, decodeVenueEngagements } from "./decode";
-import type { IssuedOffer, ManagedVenue, VenueEngagement } from "./employer";
+import type { ListExtent } from "../../api/types";
+import type { ShiftRoomListing } from "../../app/shift-room";
+import {
+  decodeCreatedRosterEntry,
+  decodeCreatedShiftRoom,
+  decodeIssuedOffer,
+  decodeManagedVenues,
+  decodeRoster,
+  decodeShiftRoomPage,
+  decodeShiftTypes,
+  decodeVenueEngagements,
+} from "./decode";
+import type {
+  IssuedOffer,
+  ManagedVenue,
+  RosterEntry,
+  ShiftRoomPage,
+  ShiftType,
+  VenueEngagement,
+} from "./employer";
 
 /** The venues this session may act for, suspensions not consulted. */
 export function fetchManagedVenues(
@@ -92,4 +119,141 @@ export function issueInvitation(
     sessionToken,
     decodeIssuedOffer,
   );
+}
+
+/** The kinds of shift this venue runs — the create form's picker. */
+export function fetchShiftTypes(
+  api: ApiClient,
+  sessionToken: string,
+  venueId: string,
+): Promise<ApiResult<readonly ShiftType[]>> {
+  return api.read(
+    `/api/employer/venues/${venueId}/shift-types`,
+    sessionToken,
+    decodeShiftTypes,
+  );
+}
+
+/**
+ * The venue's shift rooms, most recent first and bounded unless `extent` is
+ * `"all"`.
+ *
+ * **The extent is a word and there is no `limit` on this route.** The bound is
+ * `Rooms.recent_shift_room_limit/0` and lives in the context, because a route
+ * that took a number would leave the unbounded read one forgetful caller away —
+ * which is how both of `Rooms`' history functions came to be `Repo.all/1` over
+ * a room's entire life. This client does not know what `"recent"` amounts to.
+ */
+export function fetchShiftRooms(
+  api: ApiClient,
+  sessionToken: string,
+  venueId: string,
+  extent: ListExtent,
+): Promise<ApiResult<ShiftRoomPage>> {
+  return api.read(
+    `/api/employer/venues/${venueId}/shift-rooms?extent=${extent}`,
+    sessionToken,
+    decodeShiftRoomPage,
+  );
+}
+
+/**
+ * Creates tonight's shift: a room of the named type, over the named term.
+ *
+ * **Three fields and no more.** `venue_id` and `grace_period_minutes` come off
+ * the shift type `Rooms.create_shift_room/3` resolves inside its own
+ * transaction and are not castable — the controller's `Map.take/2` is what
+ * strips them, and a client sending either would be relying on that rather than
+ * on its own correctness. A `venue_id` in user attributes is a cross-tenant
+ * write waiting for somebody to forget.
+ */
+export function createShiftRoom(
+  api: ApiClient,
+  sessionToken: string,
+  venueId: string,
+  shift: {
+    readonly shiftTypeId: string;
+    readonly startsAt: string;
+    readonly endsAt: string;
+  },
+): Promise<ApiResult<ShiftRoomListing>> {
+  return api.write(
+    {
+      method: "POST",
+      path: `/api/employer/venues/${venueId}/shift-rooms`,
+      body: {
+        shift_type_id: shift.shiftTypeId,
+        starts_at: shift.startsAt,
+        ends_at: shift.endsAt,
+      },
+      status: 201,
+    },
+    sessionToken,
+    decodeCreatedShiftRoom,
+  );
+}
+
+/** Who is on a shift at the instant the server answers. */
+export function fetchRoster(
+  api: ApiClient,
+  sessionToken: string,
+  venueId: string,
+  shiftRoomId: string,
+): Promise<ApiResult<readonly RosterEntry[]>> {
+  return api.read(rosterPath(venueId, shiftRoomId), sessionToken, decodeRoster);
+}
+
+/** Puts an engagement on a shift's roster, from this request's instant. */
+export function addToRoster(
+  api: ApiClient,
+  sessionToken: string,
+  venueId: string,
+  shiftRoomId: string,
+  engagementId: string,
+): Promise<ApiResult<RosterEntry>> {
+  return api.write(
+    {
+      method: "POST",
+      path: rosterPath(venueId, shiftRoomId),
+      body: { engagement_id: engagementId },
+      status: 201,
+    },
+    sessionToken,
+    decodeCreatedRosterEntry,
+  );
+}
+
+/**
+ * Takes an engagement off a shift's roster.
+ *
+ * **No decoder, and that is the whole of why `write` has an optional one.** The
+ * route answers `204` with no body — `remove_from_roster/3` closes the period
+ * and keeps the row (KTD6b), so handing the closed entry back would give this
+ * client a row it must not render. Omitting the decoder is what stops the body
+ * being read at all; a `read`-shaped call here reports the removal as
+ * `malformed_response` *after it has succeeded*, and every retry then meets
+ * `:not_rostered`.
+ *
+ * The caller re-reads the roster rather than being told what changed.
+ */
+export function removeFromRoster(
+  api: ApiClient,
+  sessionToken: string,
+  venueId: string,
+  shiftRoomId: string,
+  engagementId: string,
+): Promise<ApiResult<null>> {
+  return api.write(
+    {
+      method: "DELETE",
+      path: `${rosterPath(venueId, shiftRoomId)}/${engagementId}`,
+      status: 204,
+    },
+    sessionToken,
+  );
+}
+
+/** One spelling of the roster's path, which two verbs and a read all name. */
+function rosterPath(venueId: string, shiftRoomId: string): string {
+  return `/api/employer/venues/${venueId}/shift-rooms/${shiftRoomId}/roster`;
 }

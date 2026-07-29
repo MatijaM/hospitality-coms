@@ -31,7 +31,10 @@
  * where KTD8 puts it. A browsed room and a pasted one take the same path.
  */
 
+import type { ListExtent } from "../../api/types";
 import { instantLabel, termLabel } from "../../app/instant";
+import type { ShiftRoomListing } from "../../app/shift-room";
+import { shiftRoomLabel } from "../../app/shift-room";
 import { isTopicId, normaliseTopicId } from "../../socket/topic-id";
 
 /**
@@ -50,6 +53,19 @@ import { isTopicId, normaliseTopicId } from "../../socket/topic-id";
  * the first place.
  */
 export { instantLabel, termLabel };
+
+/**
+ * The shift room itself, re-exported under the names this surface wrote it
+ * with.
+ *
+ * It moved to `src/app/shift-room.ts` when U5's employer shift panel became its
+ * second caller, for `instantLabel`'s reason one entity further in: the server
+ * renders a shift room through **one** public function for both halves of the
+ * API, and two decoders here would put the divergence back that
+ * `rendered_shift_room/1` was exported to prevent. Same shim rule as above.
+ */
+export type { ShiftRoomListing };
+export { shiftRoomLabel };
 
 /** The two topics `PersonSocket` routes for a room. */
 export type RoomKind = "venue" | "shift";
@@ -115,43 +131,19 @@ export type MessagePage = {
  * `HospitalityComs.Rooms.recent_message_limit/0` and lives in the context, so
  * that the unbounded read is not one forgetful caller away. This client does
  * not know what `"recent"` amounts to and must not try to.
+ *
+ * It is `src/api/types.ts`'s `ListExtent` under this surface's own name. The
+ * employer's shift-room list is bounded by the same vocabulary and a different
+ * number, and `HospitalityComsWeb.Extent` is one module for both callers on the
+ * server.
  */
-export type HistoryExtent = "recent" | "all";
+export type HistoryExtent = ListExtent;
 
 /** One venue room, as `GET /api/venue-rooms` renders it. */
 export type VenueRoomListing = {
   readonly venueId: string;
   /** The venue's own name. This is what stops the list being uuid prefixes. */
   readonly name: string;
-};
-
-/**
- * One shift room, as `GET /api/venues/:venue_id/shift-rooms` renders it.
- *
- * A shift room has **no display name of its own** — the server sends the shift
- * *type*'s name plus the term, and `shiftRoomLabel` is where the two become a
- * sentence. See that function for why the composing happens here.
- */
-export type ShiftRoomListing = {
-  readonly shiftRoomId: string;
-  readonly venueId: string;
-  readonly shiftTypeName: string;
-  readonly startsAt: string;
-  readonly endsAt: string;
-  /**
-   * When the room stops accepting messages: `ends_at` plus the type's grace.
-   *
-   * **Formatted, and never compared against a clock here** — the two are
-   * different things and only the second is forbidden.
-   * `HospitalityComs.Clock` is offsettable and the demo moves it, while this
-   * browser's clock is real, so a client-side open/closed badge would be wrong
-   * during exactly the demo the offset exists for. Whether a room accepts a
-   * message is the server's answer to a send, which is where `SendBar` already
-   * gets it. None of that is an argument for showing somebody
-   * `2026-03-09T21:30:00Z`, which is what this used to do:
-   * `instantLabel` renders it the way the term beside it is already rendered.
-   */
-  readonly closesAt: string;
 };
 
 /**
@@ -227,23 +219,6 @@ export function isRoomId(value: string): boolean {
  */
 export function normaliseRoomId(value: string): string | null {
   return normaliseTopicId(value);
-}
-
-/**
- * What a shift room is called on screen: the shift type, then the term.
- *
- * **The term is not decoration.** Two Tuesdays of one shift type are two rooms
- * with one name, so a label that were only `shiftTypeName` would be as
- * ambiguous as the uuid it replaced — differently, and less obviously.
- *
- * **And the formatting is here rather than on the server.** Rendering a shift
- * time means choosing a timezone. `venues` carries one and this device carries
- * another, and the worker reading the label is the one holding the device — so
- * the choice is made where the answer is known. It is also where every other
- * instant on this surface is already formatted.
- */
-export function shiftRoomLabel(room: ShiftRoomListing): string {
-  return `${room.shiftTypeName} · ${termLabel(room.startsAt, room.endsAt)}`;
 }
 
 /**

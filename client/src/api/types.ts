@@ -34,3 +34,21 @@ export type Session = {
   readonly token: string;
   readonly person: Person;
 };
+
+/**
+ * How much of a bounded list to ask for. The whole of this API's paging
+ * vocabulary.
+ *
+ * The server takes a **word**, never a number: both bounds —
+ * `HospitalityComs.Rooms.recent_message_limit/0` and
+ * `recent_shift_room_limit/0` — live in their context, so that the unbounded
+ * read is not one forgetful caller away. This client does not know what
+ * `"recent"` amounts to on either route and must not try to.
+ *
+ * It is one declaration rather than two because `HospitalityComsWeb.Extent` is
+ * one module for both callers on the server, and for issue #42's reason: two
+ * declarations of one two-member union is a pair held together by nothing.
+ * `features/rooms/room.ts` re-exports it as `HistoryExtent`, which is what the
+ * room surface calls it.
+ */
+export type ListExtent = "recent" | "all";

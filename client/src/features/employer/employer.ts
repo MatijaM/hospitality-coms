@@ -25,6 +25,7 @@
  */
 
 import { instantLabel, termLabel } from "../../app/instant";
+import type { ShiftRoomListing } from "../../app/shift-room";
 
 /** `%{venue_id:, name:}` — one venue this session may act for. */
 export type ManagedVenue = {
@@ -106,4 +107,108 @@ export function offerLabel(invitation: OfferedInvitation): string {
  */
 export function expiryLabel(invitation: OfferedInvitation): string {
   return instantLabel(invitation.codeExpiresAt);
+}
+
+/**
+ * `%{shift_type_id:, name:, grace_period_minutes:}` — one kind of shift this
+ * venue runs.
+ *
+ * `venue_id` is not on the wire because the caller named it in the path, and a
+ * shift type has no other field. The grace **is** on the wire, and
+ * `render_shift_type/1` says why: *"it is the only thing that distinguishes two
+ * types with similar names, and … it is what a manager is choosing between."*
+ */
+export type ShiftType = {
+  readonly shiftTypeId: string;
+  readonly name: string;
+  readonly gracePeriodMinutes: number;
+};
+
+/**
+ * `%{shift_rooms: [...], complete:}` — one page of the venue's shifts.
+ *
+ * **`complete` is the server's answer and cannot be derived here**, for
+ * `MessagePage`'s reason: a full page and a full history of the same length are
+ * the same list. It is what decides whether the "load every shift" control
+ * exists, so offering that control unconditionally would tell a manager with
+ * three shifts that there are more.
+ *
+ * The page's rooms are the venue's **most recent**, oldest first within the
+ * page. That ordering is `Records.most_recent_rooms/2`'s — a descending scan
+ * re-ordered ascending in SQL around it — and nothing here re-sorts: a limit
+ * applied to the rota's own order returns the venue's oldest rooms, satisfies
+ * every count assertion, and hides the shift the manager just created.
+ */
+export type ShiftRoomPage = {
+  readonly rooms: readonly ShiftRoomListing[];
+  readonly complete: boolean;
+};
+
+/**
+ * `%{engagement_id:, role_label:, joined_at:}` — one live entry on a shift's
+ * roster.
+ *
+ * **`roleLabel` comes off the server and could not be joined here.**
+ * `RosterEntry` carries no label, so U3 preloaded the engagement and
+ * `render_roster_entry/1` projects it (KTD-E10). The alternative was joining
+ * against the venue's people list, which has a hole that only shows in use:
+ * `add_to_roster/3` accepts an engagement whose term has **not opened** while
+ * `list_engagements/1` answers only with engagements active at the instant, so
+ * next Monday's starter on next Tuesday's rota would render as a bare uuid.
+ *
+ * There is no `personId` — the render is a field list off a struct that carries
+ * one — and no entry id, because no route takes one: a removal names the
+ * engagement.
+ */
+export type RosterEntry = {
+  readonly engagementId: string;
+  readonly roleLabel: string;
+  readonly joinedAt: string;
+};
+
+/** How a shift type reads in the picker: the name, then what tells two apart. */
+export function shiftTypeLabel(type: ShiftType): string {
+  return `${type.name} · ${type.gracePeriodMinutes} min grace`;
+}
+
+/** How one rostered person reads: the role, then when the entry opened. */
+export function rosterEntryLabel(entry: RosterEntry): string {
+  return `${entry.roleLabel} · on since ${instantLabel(entry.joinedAt)}`;
+}
+
+/**
+ * The instant a `datetime-local` value names, or `null` if it names none.
+ *
+ * ## This is the only place this client produces an instant, and it is not a clock
+ *
+ * Everything else here *renders* an instant and never computes with one, which
+ * is `src/app/instant.ts`'s rule and KTD5's. This is the exception and it is a
+ * narrow one: `POST …/shift-rooms` has **no server-side defaults** — the
+ * controller's `@term_fields` is `~w(starts_at ends_at)` with no `Map.put_new`,
+ * unlike the invitation's three — because a shift *is* a term somebody chose.
+ *
+ * `HospitalityComs.Clock.Offset` moves what the server thinks *now* is. It does
+ * not move the mapping from "18:00 on 9 March" to the instant that names, which
+ * is all this does. Nothing here reads `Date.now()` and nothing compares.
+ *
+ * **The reader's zone is the right one and the only available one.** A
+ * `datetime-local` value carries no offset, and `new Date` reads a date-*time*
+ * form without one as local — which is what the manager meant, since they are
+ * standing in the venue. `venues` carries a timezone the client never sees.
+ *
+ * **The `null` prevents a throw, not a bad request.**
+ * `new Date("tonight").toISOString()` raises `RangeError`, so without this a
+ * non-conforming input would take an exception out of a submit handler rather
+ * than leaving a form that will not submit.
+ *
+ * **Residue, on the record:** a manager creating "tonight's shift" while the
+ * demo holds the server's clock a month ahead creates a shift in the server's
+ * past. That is inherent to a form taking explicit instants; the alternative is
+ * this client computing a term from its own clock, which is the thing KTD-E5
+ * exists to forbid.
+ */
+export function instantFromLocal(value: string): string | null {
+  const instant = new Date(value);
+
+  return Number.isNaN(instant.getTime()) ? null : instant.toISOString();
 }
