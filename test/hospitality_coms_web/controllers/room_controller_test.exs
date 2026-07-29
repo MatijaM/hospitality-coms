@@ -238,6 +238,25 @@ defmodule HospitalityComsWeb.RoomControllerTest do
       assert %{"messages" => []} = json_get(conn, person, path)
     end
 
+    test "keeps the two mistakes apart when a caller makes both", %{conn: conn} do
+      # Both casts answer a bare `:error`, so which refusal a caller gets is
+      # decided by `refuse_cast/2` re-asking about the extent. That works, and
+      # nothing pinned it: a reordering of the `with` arms would change which
+      # mistake wins with no test going red.
+      #
+      # What must survive is not which one wins — it is that neither answer
+      # tells a caller their *id* was malformed rather than naming nothing.
+      # Both assertions below are that claim, one per extent.
+      %{person: person} = engaged()
+      malformed = "/api/venue-rooms/not-a-uuid/messages"
+      absent = "/api/venue-rooms/#{Ecto.UUID.generate()}/messages"
+
+      assert json_get(conn, person, malformed <> "?extent=sideways", 400) ==
+               json_get(conn, person, absent <> "?extent=sideways", 400)
+
+      assert json_get(conn, person, malformed, 404) == json_get(conn, person, absent, 404)
+    end
+
     test "refuses another person's venue and a malformed id identically", %{conn: conn} do
       %{employer: employer, person: person} = engaged()
       {stranger, _creation} = scoped_venue_fixture(@now)
