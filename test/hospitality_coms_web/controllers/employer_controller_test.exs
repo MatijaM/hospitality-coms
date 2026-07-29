@@ -644,13 +644,16 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
       # **KTD-E6 on the wire.** The count alone certifies nothing: this list is
       # displayed earliest first, and a limit applied to *that* returns the
       # venue's oldest rooms, satisfies the count, and hides the shift the
-      # manager just created — F2's payoff. So the rooms are named, and the
-      # fixture holds `bound + 1` because a bound asserted against a venue of
-      # twelve is a bound asserted against nothing.
+      # manager just created — F2's payoff. So the rooms are named.
+      #
+      # **The fixture is `bound + 2`.** At `bound + 1` the read's own probe
+      # selects every row the venue has, so the descending scan and an ascending
+      # one return the same set and the direction is unobservable — measured,
+      # and the reason is written out in `HospitalityComs.RoomsTest`.
       %{person: person, venue: venue, employer: employer} = manager()
       shift_type = shift_type_fixture(employer)
       limit = Rooms.recent_shift_room_limit()
-      ids = shift_rooms_fixture(employer, shift_type, limit + 1, @shift_starts)
+      ids = shift_rooms_fixture(employer, shift_type, limit + 2, @shift_starts)
 
       body = json_get(conn, person, "/api/employer/venues/#{venue.id}/shift-rooms")
 
@@ -683,7 +686,7 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
       %{person: person, venue: venue, employer: employer} = manager()
       shift_type = shift_type_fixture(employer)
       limit = Rooms.recent_shift_room_limit()
-      ids = shift_rooms_fixture(employer, shift_type, limit + 1, @shift_starts)
+      ids = shift_rooms_fixture(employer, shift_type, limit + 2, @shift_starts)
 
       assert %{"shift_rooms" => listed, "complete" => true} =
                json_get(conn, person, "/api/employer/venues/#{venue.id}/shift-rooms?extent=all")

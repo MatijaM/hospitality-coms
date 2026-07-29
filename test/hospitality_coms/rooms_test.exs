@@ -794,12 +794,20 @@ defmodule HospitalityComs.RoomsTest do
       # The count assertion alone certifies nothing: a bound that took the
       # **oldest** fifty returns fifty rows and satisfies it. So the bodies are
       # named — the first written must be absent and the last written present —
-      # and the fixture holds `limit + 1` rows, because a bound asserted against
-      # a room of twelve is a bound asserted against nothing.
+      # and the fixture holds more rows than the bound, because a bound asserted
+      # against a room of twelve is a bound asserted against nothing.
+      #
+      # **`limit + 2` rather than `limit + 1`, and the difference is measured.**
+      # `Records.most_recent/2` selects `limit + 1` rows as its probe, so
+      # against a room holding exactly `limit + 1` the descending scan and an
+      # ascending one select *the same set* — flipping the direction killed
+      # nothing in this file or in `room_controller_test.exs`. Two spare rows
+      # are what make the selection's direction observable at all. Found while
+      # writing the shift-room bound, which copied this shape.
       %{employer: employer, person: person, engagement: engagement} = engaged()
 
       limit = Rooms.recent_message_limit()
-      bodies = venue_room_messages_fixture(engagement, limit + 1, @now)
+      bodies = venue_room_messages_fixture(engagement, limit + 2, @now)
 
       assert {:ok, %MessagePage{messages: page, complete: false}} =
                Rooms.list_venue_room_messages(person, employer.venue_id)
@@ -818,7 +826,7 @@ defmodule HospitalityComs.RoomsTest do
       # every assertion in the test above passes.
       %{employer: employer, person: person, engagement: engagement} = engaged()
 
-      bodies = venue_room_messages_fixture(engagement, Rooms.recent_message_limit() + 1, @now)
+      bodies = venue_room_messages_fixture(engagement, Rooms.recent_message_limit() + 2, @now)
 
       assert {:ok, %MessagePage{messages: page}} =
                Rooms.list_venue_room_messages(person, employer.venue_id)
@@ -831,7 +839,7 @@ defmodule HospitalityComs.RoomsTest do
       # make "load the whole history" a lie.
       %{employer: employer, person: person, engagement: engagement} = engaged()
 
-      count = Rooms.recent_message_limit() + 1
+      count = Rooms.recent_message_limit() + 2
       bodies = venue_room_messages_fixture(engagement, count, @now)
 
       assert {:ok, %MessagePage{messages: whole, complete: true}} =
@@ -871,7 +879,7 @@ defmodule HospitalityComs.RoomsTest do
       roster_entry_fixture(employer, room, engagement.id)
 
       limit = Rooms.recent_message_limit()
-      bodies = shift_room_messages_fixture(engagement, room, limit + 1, @shift_starts)
+      bodies = shift_room_messages_fixture(engagement, room, limit + 2, @shift_starts)
 
       reader = person_at(person, DateTime.add(@grace_closes, 1, :hour))
 
@@ -1107,13 +1115,18 @@ defmodule HospitalityComs.RoomsTest do
       # is what this list is displayed in, and a `limit` in front of *that*
       # returns the venue's oldest rooms, satisfies the count, and hides the
       # shift the manager created a minute ago. So the rooms are named — the
-      # first created must be absent and the last present — and the fixture
-      # holds `limit + 1`, because a bound asserted against a venue of twelve is
-      # a bound asserted against nothing.
+      # first created must be absent and the last present.
+      #
+      # **The fixture is `limit + 2`, and `limit + 1` is not enough — measured.**
+      # The read selects `limit + 1` rows as its probe, so against a venue
+      # holding exactly `limit + 1` the descending scan and an ascending one
+      # select *the same set*, and flipping the direction kills nothing. Two
+      # spare rows are what make the direction observable. The same arithmetic
+      # applies to `HospitalityComs.Rooms.MessagePage` and its fixture below.
       %{employer: employer, shift_type: shift_type} = venue_with_types()
 
       limit = Rooms.recent_shift_room_limit()
-      ids = shift_rooms_fixture(employer, shift_type, limit + 1, @shift_starts)
+      ids = shift_rooms_fixture(employer, shift_type, limit + 2, @shift_starts)
 
       assert {:ok, %ShiftRoomPage{rooms: page, complete: false}} =
                Rooms.list_shift_rooms(employer)
@@ -1130,10 +1143,15 @@ defmodule HospitalityComs.RoomsTest do
       # Selecting the latest thirty means ordering descending somewhere. If that
       # ordering is the one the caller sees, the rota renders backwards — and
       # every assertion in the test above passes.
+      #
+      # The equality against the fixture's own tail is the strongest assertion
+      # in this block: it names *which* rooms and in what order, so both the
+      # selection's direction and the page's are pinned by one line. `limit + 2`
+      # for the reason above.
       %{employer: employer, shift_type: shift_type} = venue_with_types()
 
       limit = Rooms.recent_shift_room_limit()
-      ids = shift_rooms_fixture(employer, shift_type, limit + 1, @shift_starts)
+      ids = shift_rooms_fixture(employer, shift_type, limit + 2, @shift_starts)
 
       assert {:ok, %ShiftRoomPage{rooms: page}} = Rooms.list_shift_rooms(employer)
 
@@ -1145,7 +1163,7 @@ defmodule HospitalityComs.RoomsTest do
       # make "load them all" a lie.
       %{employer: employer, shift_type: shift_type} = venue_with_types()
 
-      count = Rooms.recent_shift_room_limit() + 1
+      count = Rooms.recent_shift_room_limit() + 2
       ids = shift_rooms_fixture(employer, shift_type, count, @shift_starts)
 
       assert {:ok, %ShiftRoomPage{rooms: whole, complete: true}} =
