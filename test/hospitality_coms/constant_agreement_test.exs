@@ -189,7 +189,12 @@ defmodule HospitalityComs.ConstantAgreementTest do
       # three places, so a fifth trigger would have invalidated the ceiling
       # argument silently. A trigger is a thing that gets its own count, so the
       # list is pinned to the columns the run record stores them in.
-      assert RetentionRun.triggers() == RetentionRun.__schema__(:fields) -- @non_count_fields
+      # Sorted on both sides: `__schema__(:fields)` returns declaration order,
+      # so a bare list equality also pins where a column sits in the schema.
+      # Reordering two fields would then fail this test for a reason it does
+      # not name, which is how a test stops being read as the claim it makes.
+      assert Enum.sort(RetentionRun.triggers()) ==
+               Enum.sort(RetentionRun.__schema__(:fields) -- @non_count_fields)
     end
 
     test "an ordinary run cannot reach the ceiling" do
