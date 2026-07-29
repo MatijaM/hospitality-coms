@@ -237,25 +237,45 @@ describe("creating a shift", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
-  it("does not send an instant it could not read", async () => {
-    // A distinct guard from the one above, on a distinct input:
-    // `new Date("tonight").toISOString()` throws `RangeError`, so this is the
-    // difference between a form that will not submit and an exception inside a
-    // submit handler. Reachable only through a non-conforming input, which is
-    // what this test is.
-    const write = writesTo({ [CREATE_SHIFT]: { body: { shift_room: NEWEST } } });
-    renderEmployer(bodies(), write);
+  it("stays closed until a type and both instants are named", async () => {
+    // **This is the assertion that makes the `disabled` attribute observable**,
+    // and it is here because the test above is not: the form's `onSubmit` guard
+    // refuses an empty type as well, so removing the attribute alone kills
+    // nothing. Measured — mutation 22a, zero kills, before this body existed.
+    //
+    // The pair is kept and neither half is the other's spare. The attribute is
+    // what a manager sees; `onSubmit`'s guard is what the handler promises,
+    // and it also covers a value the attribute cannot see — an input whose
+    // contents will not parse, where `toISOString()` throws rather than
+    // returning something wrong. That branch is **not reachable through this
+    // DOM**: `datetime-local` sanitises a non-date value to the empty string in
+    // jsdom exactly as a conforming browser does, so the field goes blank and
+    // the attribute catches it first. `employer.test.ts` covers it directly,
+    // which is where it can be reached at all.
+    renderEmployer(bodies());
 
     await chooseHarbour();
+
+    const submit = await screen.findByRole("button", { name: /create this shift/i });
+
+    expect(submit).toBeDisabled();
+
     await userEvent.selectOptions(
       await screen.findByLabelText(/shift type/i),
       screen.getByRole("option", { name: /close/i }),
     );
-    await userEvent.type(screen.getByLabelText(/^starts$/i), "tonight");
-    await userEvent.type(screen.getByLabelText(/^ends$/i), "later");
-    await userEvent.click(screen.getByRole("button", { name: /create this shift/i }));
 
-    expect(write).not.toHaveBeenCalled();
+    expect(submit).toBeDisabled();
+
+    await userEvent.type(screen.getByLabelText(/^starts$/i), "2026-03-09T21:00");
+
+    expect(submit).toBeDisabled();
+
+    await userEvent.type(screen.getByLabelText(/^ends$/i), "2026-03-10T05:00");
+
+    // The control: a form that closed the submit unconditionally would pass
+    // every assertion above.
+    expect(submit).toBeEnabled();
   });
 
   it("creates once however fast the button is clicked", async () => {
@@ -391,7 +411,9 @@ describe("the venue's shifts", () => {
     expect(
       await screen.findByText("no such room, or it is not one you can reach"),
     ).toBeVisible();
-    expect(screen.queryByText(/no shifts have been created here/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/no shifts have been created here/i),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -440,7 +462,9 @@ describe("a refused shift", () => {
     const alert = await screen.findByRole("alert");
 
     expect(alert).toHaveTextContent("no such shift type at this venue");
-    expect(alert).not.toHaveTextContent("no such venue, or it is not one you can act for");
+    expect(alert).not.toHaveTextContent(
+      "no such venue, or it is not one you can act for",
+    );
   });
 
   it("words the session's own failure itself, because that one is not this route's", async () => {

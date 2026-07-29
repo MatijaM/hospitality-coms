@@ -39,10 +39,15 @@
  */
 
 import { isRecord } from "../../api/decode";
+import type { ShiftRoomListing } from "../../app/shift-room";
+import { decodeShiftRoom } from "../../app/shift-room";
 import type {
   IssuedOffer,
   ManagedVenue,
   OfferedInvitation,
+  RosterEntry,
+  ShiftRoomPage,
+  ShiftType,
   VenueEngagement,
 } from "./employer";
 
@@ -152,4 +157,97 @@ export function decodeIssuedOffer(body: unknown): IssuedOffer | null {
   if (invitation === null) return null;
 
   return { invitation, claimCode: body.claim_code };
+}
+
+/**
+ * `%{shift_type_id:, name:, grace_period_minutes:}` — one of the venue's shift
+ * types.
+ *
+ * **The grace is checked with `typeof`, and `0` is a value rather than an
+ * absence.** A venue may run a type with no grace at all, and a falsiness guard
+ * refuses exactly that one while every fixture carrying thirty minutes passes —
+ * the shape `docs/solutions/test-failures/tests-that-certify-nothing.md` calls
+ * a fixture that makes the operation under test the identity.
+ */
+export function decodeShiftType(value: unknown): ShiftType | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.shift_type_id !== "string") return null;
+  if (typeof value.name !== "string") return null;
+  if (typeof value.grace_period_minutes !== "number") return null;
+
+  return {
+    shiftTypeId: value.shift_type_id,
+    name: value.name,
+    gracePeriodMinutes: value.grace_period_minutes,
+  };
+}
+
+/** `%{shift_types: [...]}` — the body of the create form's picker. */
+export function decodeShiftTypes(body: unknown): readonly ShiftType[] | null {
+  if (!isRecord(body)) return null;
+
+  return decodeEach(body.shift_types, decodeShiftType);
+}
+
+/**
+ * `%{shift_rooms: [...], complete:}` — the body of the venue's shift list.
+ *
+ * `complete` is **required and is not defaulted**, for
+ * `decodeMessagePage`'s reason: its absence would silently become "the whole
+ * list is here", which is the one reading that makes the server's bound
+ * invisible to whoever is looking at the screen.
+ *
+ * The rooms go through `src/app/shift-room.ts`'s decoder, which is the same one
+ * the person-side list uses, because `RoomController.rendered_shift_room/1` is
+ * one render function for both halves of this API.
+ */
+export function decodeShiftRoomPage(body: unknown): ShiftRoomPage | null {
+  if (!isRecord(body)) return null;
+  if (typeof body.complete !== "boolean") return null;
+
+  const rooms = decodeEach(body.shift_rooms, decodeShiftRoom);
+  if (rooms === null) return null;
+
+  return { rooms, complete: body.complete };
+}
+
+/** `%{shift_room: {...}}` — the `201` of a created shift. */
+export function decodeCreatedShiftRoom(body: unknown): ShiftRoomListing | null {
+  if (!isRecord(body)) return null;
+
+  return decodeShiftRoom(body.shift_room);
+}
+
+/**
+ * `%{engagement_id:, role_label:, joined_at:}` — one live roster entry.
+ *
+ * All three are required, `role_label` included: R13 says every entry names the
+ * engagement **and** the label, and an optional one renders a blank row for
+ * exactly the entry that cannot be labelled from anywhere else on this page.
+ */
+export function decodeRosterEntry(value: unknown): RosterEntry | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.engagement_id !== "string") return null;
+  if (typeof value.role_label !== "string") return null;
+  if (typeof value.joined_at !== "string") return null;
+
+  return {
+    engagementId: value.engagement_id,
+    roleLabel: value.role_label,
+    joinedAt: value.joined_at,
+  };
+}
+
+/** `%{roster: [...]}` — who is on a shift at the request's instant. */
+export function decodeRoster(body: unknown): readonly RosterEntry[] | null {
+  if (!isRecord(body)) return null;
+
+  return decodeEach(body.roster, decodeRosterEntry);
+}
+
+/** `%{roster_entry: {...}}` — the `201` of an engagement put on a roster. */
+export function decodeCreatedRosterEntry(body: unknown): RosterEntry | null {
+  if (!isRecord(body)) return null;
+
+  return decodeRosterEntry(body.roster_entry);
 }

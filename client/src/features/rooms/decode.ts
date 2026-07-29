@@ -20,13 +20,21 @@
  */
 
 import { isRecord } from "../../api/decode";
-import type {
-  MessagePage,
-  RoomClosure,
-  RoomMessage,
-  ShiftRoomListing,
-  VenueRoomListing,
-} from "./room";
+import type { ShiftRoomListing } from "../../app/shift-room";
+import { decodeShiftRoom } from "../../app/shift-room";
+import type { MessagePage, RoomClosure, RoomMessage, VenueRoomListing } from "./room";
+
+/**
+ * The shift-room decoder, re-exported under the name this surface wrote it
+ * with.
+ *
+ * It moved to `src/app/shift-room.ts` when U5's employer shift panel became its
+ * second caller — `RoomController.rendered_shift_room/1` is one render function
+ * for both halves of the API, so this is one decoder for both. See there for
+ * the argument; the re-export is a shim, and a new caller imports from the new
+ * home.
+ */
+export { decodeShiftRoom };
 
 /**
  * `%{id:, body:, sent_at:, author_engagement_id:}` — `RoomChannel.rendered/1`.
@@ -127,33 +135,7 @@ export function decodeVenueRooms(body: unknown): readonly VenueRoomListing[] | n
   return decodeEach(body.venue_rooms, decodeVenueRoom);
 }
 
-/**
- * One entry of `GET /api/venues/:venue_id/shift-rooms`.
- *
- * Every field is required, `shift_type_name` included: it is the only thing in
- * the payload a worker can read, and a room whose name failed to decode would
- * render as a term with no subject.
- */
-export function decodeShiftRoom(value: unknown): ShiftRoomListing | null {
-  if (!isRecord(value)) return null;
-  if (typeof value.shift_room_id !== "string") return null;
-  if (typeof value.venue_id !== "string") return null;
-  if (typeof value.shift_type_name !== "string") return null;
-  if (typeof value.starts_at !== "string") return null;
-  if (typeof value.ends_at !== "string") return null;
-  if (typeof value.closes_at !== "string") return null;
-
-  return {
-    shiftRoomId: value.shift_room_id,
-    venueId: value.venue_id,
-    shiftTypeName: value.shift_type_name,
-    startsAt: value.starts_at,
-    endsAt: value.ends_at,
-    closesAt: value.closes_at,
-  };
-}
-
-/** `%{shift_rooms: [...]}` — the body of the shift-room list. */
+/** `%{shift_rooms: [...]}` — the body of the person-side shift-room list. */
 export function decodeShiftRooms(body: unknown): readonly ShiftRoomListing[] | null {
   if (!isRecord(body)) return null;
 

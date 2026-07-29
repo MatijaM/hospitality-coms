@@ -22,7 +22,7 @@
  * assertion.
  */
 
-import { screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -105,9 +105,7 @@ function bodies(overrides: Readonly<Record<string, unknown>> = {}) {
 /** Opens tonight's shift and waits for its roster panel. */
 async function openTonight() {
   await chooseHarbour();
-  await userEvent.click(
-    await screen.findByRole("button", { name: labelOf(TONIGHTS) }),
-  );
+  await userEvent.click(await screen.findByRole("button", { name: labelOf(TONIGHTS) }));
 
   return screen.findByRole("region", { name: /roster/i });
 }
@@ -167,9 +165,11 @@ describe("a shift's roster", () => {
   });
 
   it("shows the opened shift's roster and not the one before it", async () => {
-    // The panel is keyed on the shift, so opening another remounts rather than
-    // re-renders — `VenueDesk`'s manoeuvre for the claim code, applied to a
-    // roster that would otherwise be shown under the wrong shift's heading.
+    // **This is `useFetched`'s doing rather than the panel's `key`**, and that
+    // is measured: removing the key kills nothing here, because the hook stamps
+    // each answer with the request it answers and reports `loading` until the
+    // new one arrives. The key earns its place one property over — see "forgets
+    // who was chosen" below.
     renderEmployer(
       bodies({
         [rosterPath(TONIGHT)]: { roster: [entry(RUNNER, "Runner")] },
@@ -189,13 +189,42 @@ describe("a shift's roster", () => {
 
     expect(await rosterList()).not.toHaveTextContent(/runner/i);
   });
+
+  it("forgets who was chosen when another shift is opened", async () => {
+    // **What the panel's `key` is actually for.** A selection made against one
+    // shift and carried to another is one click from putting somebody on a
+    // shift nobody meant — the mistake this demo can least afford, since the
+    // remedy is the removal control two panels down.
+    //
+    // The positive state is reached first: the picker is asserted to hold the
+    // choice before the switch, or "empty" and "never chosen" are the same DOM.
+    renderEmployer(bodies());
+
+    await openTonight();
+
+    const picker = await screen.findByLabelText(/add somebody/i);
+    await userEvent.selectOptions(
+      picker,
+      screen.getByRole("option", { name: /runner/i }),
+    );
+
+    expect(picker).toHaveValue(RUNNER);
+
+    await userEvent.click(screen.getByRole("button", { name: labelOf(TOMORROWS) }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/add somebody/i)).toHaveValue("");
+    });
+  });
 });
 
 describe("adding somebody to a shift", () => {
   it("sends the engagement and nothing else, and re-reads the roster", async () => {
     const answers: Record<string, unknown> = bodies();
     const write = writesTo({
-      [`POST ${rosterPath(TONIGHT)}`]: { body: { roster_entry: entry(RUNNER, "Runner") } },
+      [`POST ${rosterPath(TONIGHT)}`]: {
+        body: { roster_entry: entry(RUNNER, "Runner") },
+      },
     });
     renderEmployer(answers, write);
 
@@ -271,7 +300,11 @@ describe("adding somebody to a shift", () => {
   it("renders a different server sentence under the same code", async () => {
     const write = writesTo({
       [`POST ${rosterPath(TONIGHT)}`]: {
-        failure: refusal(404, "not_found", "no such venue, or it is not one you can act for"),
+        failure: refusal(
+          404,
+          "not_found",
+          "no such venue, or it is not one you can act for",
+        ),
       },
     });
     renderEmployer(bodies(), write);
@@ -302,7 +335,9 @@ describe("taking somebody off a shift", () => {
     const answers: Record<string, unknown> = bodies({
       [rosterPath(TONIGHT)]: { roster: [entry(RUNNER, "Runner")] },
     });
-    const write = writesTo({ [`DELETE ${removalPath(TONIGHT, RUNNER)}`]: { body: null } });
+    const write = writesTo({
+      [`DELETE ${removalPath(TONIGHT, RUNNER)}`]: { body: null },
+    });
     renderEmployer(answers, write);
 
     await openTonight();
@@ -332,7 +367,9 @@ describe("taking somebody off a shift", () => {
     const answers: Record<string, unknown> = bodies({
       [rosterPath(TONIGHT)]: { roster: [entry(RUNNER, "Runner")] },
     });
-    const write = writesTo({ [`DELETE ${removalPath(TONIGHT, RUNNER)}`]: { body: null } });
+    const write = writesTo({
+      [`DELETE ${removalPath(TONIGHT, RUNNER)}`]: { body: null },
+    });
     renderEmployer(answers, write);
 
     await openTonight();

@@ -290,10 +290,11 @@ describe("a page of the venue's shift rooms", () => {
   // shift-room list uses, because `RoomController.rendered_shift_room/1` is one
   // render function for both.
   it("fails the whole page when a room is missing its type's name", () => {
-    const { shift_type_name: _dropped, ...nameless } = shiftRoomBody(
+    const nameless: Record<string, unknown> = shiftRoomBody(
       "Close",
       "2026-03-09T21:00:00Z",
     );
+    delete nameless.shift_type_name;
 
     expect(decodeShiftRoomPage({ shift_rooms: [nameless], complete: true })).toBeNull();
   });
@@ -322,9 +323,7 @@ describe("a roster entry", () => {
       roleLabel: "Runner",
       joinedAt: "2026-03-09T18:00:00Z",
     });
-    expect(JSON.stringify(decoded)).not.toContain(
-      "99999999-9999-4999-8999-999999999999",
-    );
+    expect(JSON.stringify(decoded)).not.toContain("99999999-9999-4999-8999-999999999999");
   });
 
   // R13 says each entry names the engagement **and the role label**. An
@@ -332,7 +331,8 @@ describe("a roster entry", () => {
   // a starter whose term has not opened, who is absent from the people list and
   // therefore unnameable from anywhere else.
   it("refuses an entry with no role label", () => {
-    const { role_label: _dropped, ...unlabelled } = ROSTER_ENTRY;
+    const unlabelled: Record<string, unknown> = { ...ROSTER_ENTRY };
+    delete unlabelled.role_label;
 
     expect(decodeRosterEntry(unlabelled)).toBeNull();
   });

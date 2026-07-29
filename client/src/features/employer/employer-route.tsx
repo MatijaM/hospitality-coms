@@ -43,11 +43,25 @@
 import { useState } from "react";
 import { Link } from "react-router";
 
+import type { FieldErrors, RequestFailure } from "../../api/errors";
+import { instantLabel } from "../../app/instant";
 import { SessionBar } from "../../app/session-bar";
-import type { Loaded } from "../../app/use-fetched";
-import type { IssuedOffer, ManagedVenue } from "./employer";
-import { engagementLabel, expiryLabel, offerLabel } from "./employer";
+import type { ShiftRoomListing } from "../../app/shift-room";
+import { shiftRoomLabel } from "../../app/shift-room";
+import type { Fetched, Loaded } from "../../app/use-fetched";
+import type { IssuedOffer, ManagedVenue, ShiftType, VenueEngagement } from "./employer";
+import {
+  engagementLabel,
+  expiryLabel,
+  instantFromLocal,
+  offerLabel,
+  rosterEntryLabel,
+  shiftTypeLabel,
+} from "./employer";
 import { employerFailureMessage, fieldProblems } from "./refusal-message";
+import { useRoster } from "./use-employer-roster";
+import type { ShiftDesk, ShiftRooms } from "./use-employer-shifts";
+import { useShiftDesk, useShiftRooms, useShiftTypes } from "./use-employer-shifts";
 import type { OfferDesk } from "./use-employer-venue";
 import {
   useManagedVenues,
@@ -154,6 +168,336 @@ function VenueDesk({ venue }: { readonly venue: ManagedVenue }) {
 
       <h3>Offer a job</h3>
       <OfferForm desk={desk} />
+
+      <ShiftDeskSection venueId={venue.venueId} people={people.state} />
+    </section>
+  );
+}
+
+/**
+ * The venue's shifts: the types it runs, the form that creates one, the list,
+ * and the roster of whichever shift is open.
+ *
+ * ## The list is bounded and the bound is invisible here
+ *
+ * `Rooms.recent_shift_room_limit/0` is the number and it stays in the context.
+ * What arrives is a page plus `complete`, and `complete` is the only thing this
+ * side knows about the bound — a full page and a full history of the same
+ * length are the same list, so the "load every shift" control cannot be derived
+ * from a length and is not offered when the server says this is the lot.
+ *
+ * ## The roster panel is keyed on the shift
+ *
+ * `VenueDesk`'s manoeuvre for the claim code, one level in: opening another
+ * shift remounts rather than re-renders, so a roster fetched for one shift can
+ * never be on screen under another one's heading while the second read is in
+ * flight.
+ */
+function ShiftDeskSection({
+  venueId,
+  people,
+}: {
+  readonly venueId: string;
+  readonly people: Loaded<readonly VenueEngagement[]>;
+}) {
+  const types = useShiftTypes(venueId);
+  const rooms = useShiftRooms(venueId);
+  const desk = useShiftDesk(venueId, rooms.reload);
+  const [openId, setOpenId] = useState<string | null>(null);
+
+  const listed = rooms.state.status === "ready" ? rooms.state.value.rooms : [];
+  const open = listed.find((room) => room.shiftRoomId === openId) ?? null;
+
+  return (
+    <>
+      <h3>Shifts here</h3>
+      <p>
+        A shift room <em>is</em> the shift — there is no separate thing to book. It is a
+        kind of shift, a start and an end, and whoever is on the roster can read it while
+        it is open.
+      </p>
+
+      <h4>Create a shift</h4>
+      <ShiftForm types={types} desk={desk} />
+
+      <h4>Shifts at this venue</h4>
+      <ShiftList rooms={rooms} openId={openId} onOpen={setOpenId} />
+
+      {open !== null && (
+        <RosterPanel
+          key={open.shiftRoomId}
+          venueId={venueId}
+          room={open}
+          people={people}
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * A type, a start and an end.
+ *
+ * **The two instants are this client's only production of one, and it is not a
+ * clock read.** `POST …/shift-rooms` has no server-side defaults, unlike the
+ * invitation's three, because a shift is a term somebody chose. See
+ * `instantFromLocal` for why converting a wall clock the manager typed is not
+ * the second clock KTD-E5 forbids.
+ *
+ * The submit is closed while an answer is outstanding and while anything is
+ * blank. Those are two guards on two inputs: the attribute covers "nothing
+ * typed", and `onSubmit`'s `null` check covers a value that will not parse —
+ * `new Date("tonight").toISOString()` throws, so without it a non-conforming
+ * input takes an exception out of this handler.
+ */
+function ShiftForm({
+  types,
+  desk,
+}: {
+  readonly types: Fetched<readonly ShiftType[]>;
+  readonly desk: ShiftDesk;
+}) {
+  const [typeId, setTypeId] = useState("");
+  const [startsAt, setStartsAt] = useState("");
+  const [endsAt, setEndsAt] = useState("");
+
+  const problem = desk.problem;
+  const fields = problem === null ? null : fieldProblems(problem);
+  const offered = types.state.status === "ready" ? types.state.value : [];
+  const blank = typeId === "" || startsAt === "" || endsAt === "";
+
+  return (
+    <>
+      <Unlisted
+        state={types.state}
+        onRetry={types.reload}
+        empty="No shift types are configured at this venue, so no shift can be created here. Shift types are set up outside this page; a venue with none is a gap in the seed rather than in this form."
+      />
+
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+
+          const from = instantFromLocal(startsAt);
+          const to = instantFromLocal(endsAt);
+
+          if (typeId === "" || from === null || to === null) return;
+
+          void desk.create({ shiftTypeId: typeId, startsAt: from, endsAt: to });
+        }}
+      >
+        <label htmlFor="shift-type">Shift type</label>
+        <select
+          id="shift-type"
+          name="shift-type"
+          value={typeId}
+          onChange={(event) => {
+            setTypeId(event.target.value);
+          }}
+        >
+          <option value="">Choose a shift type</option>
+          {offered.map((type) => (
+            <option key={type.shiftTypeId} value={type.shiftTypeId}>
+              {shiftTypeLabel(type)}
+            </option>
+          ))}
+        </select>
+
+        <label htmlFor="shift-starts">Starts</label>
+        <input
+          id="shift-starts"
+          name="shift-starts"
+          type="datetime-local"
+          value={startsAt}
+          onChange={(event) => {
+            setStartsAt(event.target.value);
+          }}
+        />
+
+        <label htmlFor="shift-ends">Ends</label>
+        <input
+          id="shift-ends"
+          name="shift-ends"
+          type="datetime-local"
+          value={endsAt}
+          onChange={(event) => {
+            setEndsAt(event.target.value);
+          }}
+        />
+
+        <button type="submit" disabled={desk.creating || blank}>
+          Create this shift
+        </button>
+      </form>
+
+      {problem !== null && <Refusal failure={problem} fields={fields} />}
+    </>
+  );
+}
+
+/**
+ * The venue's shifts, in the order the server sent them.
+ *
+ * **Nothing is sorted here.** `Records.most_recent_rooms/2` selects descending
+ * and re-orders ascending in SQL around the scan, so the page is the venue's
+ * *latest* shifts read forwards. A sort on this side would satisfy every count
+ * assertion while hiding the shift the manager created a minute ago, which is
+ * the whole reason that query is written the way it is.
+ */
+function ShiftList({
+  rooms,
+  openId,
+  onOpen,
+}: {
+  readonly rooms: ShiftRooms;
+  readonly openId: string | null;
+  readonly onOpen: (id: string | null) => void;
+}) {
+  const page = rooms.state.status === "ready" ? rooms.state.value : null;
+
+  return (
+    <>
+      <Unready state={rooms.state} onRetry={rooms.reload} />
+
+      {page !== null && page.rooms.length === 0 && (
+        <p aria-live="polite">
+          No shifts have been created here yet. The form above is where the first one
+          comes from.
+        </p>
+      )}
+
+      {page !== null && page.rooms.length > 0 && (
+        <ul aria-label="Shifts at this venue">
+          {page.rooms.map((room) => (
+            <li key={room.shiftRoomId}>
+              <button
+                type="button"
+                aria-current={room.shiftRoomId === openId}
+                onClick={() => {
+                  onOpen(room.shiftRoomId === openId ? null : room.shiftRoomId);
+                }}
+              >
+                {shiftRoomLabel(room)}
+              </button>{" "}
+              <span>Stops taking messages {instantLabel(room.closesAt)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {page !== null && !page.complete && (
+        <div>
+          <p aria-live="polite">
+            These are the most recent shifts at this venue. There are more before them.
+          </p>
+          <button type="button" onClick={rooms.loadAll}>
+            Load every shift
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Who is on one shift, and the two controls that change it.
+ *
+ * **The add picker offers the venue's people list, and that has a limitation
+ * worth knowing.** `add_to_roster/3` accepts an engagement whose term has not
+ * opened, while `list_engagements/1` answers only with engagements active at
+ * the instant — so a starter who begins next Monday is rosterable by the API and
+ * cannot be chosen here. A free-text engagement-id box would fix it and would
+ * put a uuid paste box on a crude form for a case the demo does not reach; it is
+ * recorded rather than built.
+ *
+ * The *labels* have no such hole: `render_roster_entry/1` projects `role_label`
+ * off a preloaded engagement, so an entry this picker could not have produced is
+ * still named on the list.
+ */
+function RosterPanel({
+  venueId,
+  room,
+  people,
+}: {
+  readonly venueId: string;
+  readonly room: ShiftRoomListing;
+  readonly people: Loaded<readonly VenueEngagement[]>;
+}) {
+  const roster = useRoster(venueId, room.shiftRoomId);
+  const [chosen, setChosen] = useState("");
+
+  const entries = roster.state.status === "ready" ? roster.state.value : [];
+  const choosable = people.status === "ready" ? people.value : [];
+
+  return (
+    <section aria-label="Roster">
+      <h4>Roster · {shiftRoomLabel(room)}</h4>
+
+      <Unlisted
+        state={roster.state}
+        empty="Nobody is on this shift yet. Add somebody from the venue's people below."
+      />
+
+      {entries.length > 0 && (
+        <ul aria-label="On this shift">
+          {entries.map((entry) => (
+            <li key={entry.engagementId}>
+              {rosterEntryLabel(entry)}{" "}
+              <button
+                type="button"
+                disabled={roster.busy}
+                aria-label={`Take ${entry.roleLabel} off this shift`}
+                onClick={() => {
+                  void roster.remove(entry.engagementId);
+                }}
+              >
+                Take off this shift
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {choosable.length === 0 ? (
+        <p aria-live="polite">
+          Nobody is engaged here to put on a shift. An offer claimed in the other window
+          shows up once the people list above is refreshed.
+        </p>
+      ) : (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+
+            if (chosen === "") return;
+
+            void roster.add(chosen);
+          }}
+        >
+          <label htmlFor="roster-engagement">Add somebody</label>
+          <select
+            id="roster-engagement"
+            name="roster-engagement"
+            value={chosen}
+            onChange={(event) => {
+              setChosen(event.target.value);
+            }}
+          >
+            <option value="">Choose somebody engaged here</option>
+            {choosable.map((engagement) => (
+              <option key={engagement.engagementId} value={engagement.engagementId}>
+                {engagementLabel(engagement)}
+              </option>
+            ))}
+          </select>
+          <button type="submit" disabled={roster.busy || chosen === ""}>
+            Add to this shift
+          </button>
+        </form>
+      )}
+
+      {roster.problem !== null && (
+        <Refusal failure={roster.problem} fields={fieldProblems(roster.problem)} />
+      )}
     </section>
   );
 }
@@ -206,25 +550,48 @@ function OfferForm({ desk }: { readonly desk: OfferDesk }) {
         </button>
       </form>
 
-      {problem !== null && (
-        <div role="alert">
-          <p>{employerFailureMessage(problem)}</p>
-          {fields !== null && (
-            <ul>
-              {Object.entries(fields).map(([field, messages]) => (
-                <li key={field}>
-                  {field}: {messages.join(", ")}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
+      {problem !== null && <Refusal failure={problem} fields={fields} />}
 
       {desk.issued !== null && (
         <ClaimCode issued={desk.issued} onDismiss={desk.dismiss} />
       )}
     </>
+  );
+}
+
+/**
+ * A refused write, in the server's own words.
+ *
+ * `refusal-message.ts` carries the argument for why this surface renders
+ * `failure.message` rather than copy keyed on the code, and it is stronger for
+ * the shift and roster routes than it was for the offer:
+ * `EmployerController` answers `404` with three different sentences — no such
+ * venue, no such shift type, no such shift room or engagement — so a switch on
+ * the code can say one of them and must be wrong about the other two.
+ *
+ * The per-field messages are Ecto's and name an input the manager filled in,
+ * which is the one exception the standing rule already makes.
+ */
+function Refusal({
+  failure,
+  fields,
+}: {
+  readonly failure: RequestFailure;
+  readonly fields: FieldErrors | null;
+}) {
+  return (
+    <div role="alert">
+      <p>{employerFailureMessage(failure)}</p>
+      {fields !== null && (
+        <ul>
+          {Object.entries(fields).map(([field, messages]) => (
+            <li key={field}>
+              {field}: {messages.join(", ")}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -283,8 +650,31 @@ function Unlisted<T>({
   readonly empty: string;
   readonly onRetry?: () => void;
 }) {
+  if (state.status === "ready") {
+    return state.value.length === 0 ? <p aria-live="polite">{empty}</p> : null;
+  }
+
+  return <Unready state={state} onRetry={onRetry} />;
+}
+
+/**
+ * The same three non-answers for a fetch whose value is not a list.
+ *
+ * The shift-room read answers a *page* — rows plus `complete` — so "ready and
+ * empty" is the caller's question rather than this component's, and `Unlisted`
+ * above is this plus that one sentence. Splitting them was what U5 needed;
+ * neither changed behaviour.
+ */
+function Unready<T>({
+  state,
+  onRetry,
+}: {
+  readonly state: Loaded<T>;
+  readonly onRetry?: (() => void) | undefined;
+}) {
   switch (state.status) {
     case "idle":
+    case "ready":
       return null;
     case "loading":
       return <p aria-live="polite">Loading…</p>;
@@ -299,7 +689,5 @@ function Unlisted<T>({
           )}
         </div>
       );
-    case "ready":
-      return state.value.length === 0 ? <p aria-live="polite">{empty}</p> : null;
   }
 }

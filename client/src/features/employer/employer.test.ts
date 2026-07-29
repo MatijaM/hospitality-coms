@@ -74,9 +74,12 @@ describe("the instant a manager typed", () => {
     // under `TZ=Pacific/Kiritimati` — the two zones this suite is run in.
     const instant = instantFromLocal(TYPED);
 
-    expect(instant).not.toBeNull();
+    // The `throw` is the assertion and it is what narrows the type: this suite
+    // forbids both `!` and a cast, and `?? ""` would make the null case pass
+    // everything below.
+    if (instant === null) throw new Error("a valid wall clock answered nothing");
 
-    const back = new Date(instant as string);
+    const back = new Date(instant);
 
     expect(back.getFullYear()).toBe(2026);
     expect(back.getMonth()).toBe(2);
@@ -92,11 +95,13 @@ describe("the instant a manager typed", () => {
     // `:utc_datetime` refuses a value carrying no offset.
     const instant = instantFromLocal(TYPED);
 
+    if (instant === null) throw new Error("a valid wall clock answered nothing");
+
     expect(instant).not.toBe(TYPED);
     expect(instant).toMatch(/Z$/);
     // And it is the spelling this client already renders instants from, so the
     // form's own value and the list's labels cannot disagree about the term.
-    expect(termLabel(instant as string, instant as string)).not.toContain("Invalid");
+    expect(termLabel(instant, instant)).not.toContain("Invalid");
   });
 
   it("answers null for a value that is not a date-time, rather than throwing", () => {

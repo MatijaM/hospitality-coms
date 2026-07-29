@@ -487,3 +487,152 @@ stem with a `.ts`, and `npx tsc --noEmit --listFiles` is run to confirm rather t
 console and F3 step 4 asks for the claimant to read the shift room they were rostered onto. Both
 need `mix phx.server` and the Postgres cluster, which this unit does not touch. Everything above
 is jsdom against a fake transport.
+
+---
+
+## Revisions made during implementation
+
+Four. Each is a place this brief was wrong, kept above rather than corrected in place, because
+the gap between the brief and the tree is the only record that the gate found anything.
+
+### 1. Row 20's guard is not reachable through this DOM, and the pair it belongs to is redundant
+
+The brief's **Decision 8** claimed the create form's two guards were the interesting case: *"these
+guard different inputs, unlike U4's pair … so each is separately mutable and each is predicted to
+kill its own test. If that prediction is wrong the mutation record will say so."*
+
+**It is wrong.** Measured, before any test was changed:
+
+| Mutation | Killed |
+|---|---|
+| 22a — the submit loses its blank-field `disabled`, `onSubmit`'s guard left | **0** |
+| 22b — `onSubmit` loses `from === null \|\| to === null`, the attribute left | **0** |
+
+Two reasons, and only the first was foreseeable. `onSubmit` also refuses an unchosen *type*, so
+it catches the empty-form test on its own — the attribute is redundant for blankness exactly as
+U4's blank-role pair was. And **`datetime-local` sanitises a non-date value to the empty string**
+in jsdom, as a conforming browser does, so row 20's test typed `"tonight"` into a field that went
+blank and was caught by the attribute rather than by the parse guard: it asserted `write` was not
+called and could not have been, for a reason that was not the one it named.
+`docs/solutions/test-failures/tests-that-certify-nothing.md` calls this *"a setup that satisfied
+the assertion for a second reason"*.
+
+**What shipped instead.** The DOM-level unparseable test is gone; its claim is covered where it is
+reachable, in `employer.test.ts`, and mutation 6 kills that body. In its place is *"stays closed
+until a type and both instants are named"*, which asserts the attribute directly at each of the
+four steps with the enabled state as its own control — and mutation 22a now kills it. 22b still
+kills nothing and the guard is kept anyway, for U4's reason and one more: `instantFromLocal`'s
+contract admits `null` and `toISOString()` throws, so a handler that trusted it would take an
+exception rather than refuse.
+
+### 2. The roster panel's `key` does not carry the property the brief gave it
+
+Row 40 said the "opening a second shift shows that shift's roster" test *fails without* the
+`key={shiftRoomId}` remount. Measured: **mutation 25, zero kills.** `useRoster`'s `ask` memo
+depends on the shift id and `useFetched` stamps each answer with the request it answers, so a
+re-render already reports `loading` until the second roster arrives. The remount was never what
+made that true.
+
+The key does carry something, and it is worth more than the claim it replaced: the add picker's
+**chosen engagement**. Without the remount a selection made against one shift survives into
+another, and one click then puts somebody on a shift nobody meant — the mistake whose only remedy
+is the removal control two panels down. A new body, *"forgets who was chosen when another shift is
+opened"*, asserts it with the positive state reached first, and mutation 25 now kills exactly it.
+Row 40's own test keeps its assertion and its comment now says which mechanism carries it.
+
+### 3. `employer-route.test.tsx` did not pass unchanged
+
+The regression table said it would. It changed twice and neither change weakens it:
+
+- its render harness moved verbatim to `test-support/employer-harness.tsx`, now that three files
+  drive this page;
+- its *"says so when the list cannot be read"* test gained stubs for the two new panels. The venue
+  desk now carries three lists and `readsFrom` answers an unstubbed path with a `404`, so without
+  them that test's sentence appears three times and its exact `findByText` matches none uniquely.
+  Scoping the fixture is what keeps the assertion about the **people** list.
+
+`Unlisted` was also split: `Unready` is its three non-answers, and `Unlisted` is `Unready` plus
+the empty sentence. The shift-room read answers a *page* rather than a list, so "ready and empty"
+became the caller's question. Behaviour is unchanged and mutation 30 kills a body in each file.
+
+### 4. One more shared declaration than the brief planned
+
+Decision 2 named `ListExtent` as moving to `src/api/types.ts` and it did. What the brief did not
+say is that `Unready` above is a second thing this unit generalised, and that
+`test-support/employer-harness.tsx` is a third. Neither is a wire shape and neither is disclosed
+as a regression, because no production behaviour depends on either.
+
+## Mutation record
+
+**Thirty-two mutations**, each applied to the tree as shipped, run against
+`src/features/employer`, `src/app/shift-room.ts` and `src/features/rooms` together, and reverted.
+Baseline before and after: **489 passed / 15 skipped**.
+
+| # | Mutation | Killed |
+|---|----------|--------|
+| 1 | `decodeShiftType` checks `grace_period_minutes` for truthiness rather than type | **10** — see below |
+| 2 | `decodeShiftRoomPage` defaults a missing `complete` to `true` | 1 |
+| 3 | `decodeRosterEntry` defaults a missing `role_label` to the empty string | 1 |
+| 4 | `decodeRosterEntry` spreads the payload instead of naming its fields | 1 |
+| 5 | `instantFromLocal` hands the local string back unconverted | 3 |
+| 6 | `instantFromLocal` loses its `NaN` guard, so an unparseable value throws | 1 |
+| 7 | `shiftTypeLabel` drops the grace | 3 |
+| 8 | `rosterEntryLabel` renders the raw ISO instant | 2 |
+| 9 | `removeFromRoster` passes a decoder, making it `read`-shaped | 2 |
+| 10 | the removal names `200` as its success rather than `204` | 1 |
+| 11 | `fetchShiftRooms` drops the `?extent=` query | 1 |
+| 12 | the create body carries a `venue_id` this client computed | 1 |
+| 13 | `loadAll` does not move the extent | 1 |
+| 14 | a successful create does not reload the list | 1 |
+| 15 | `useShiftDesk` loses its in-flight guard, the attribute left in place | **0** |
+| 16 | a successful add does not reload the roster | 1 |
+| 17 | a successful removal does not reload the roster | 1 |
+| 18 | `useRoster.remove` loses its in-flight guard, the attribute left in place | **0** |
+| 19 | the shift list sorts the server's page descending | 3 |
+| 20 | the "load every shift" control is offered unconditionally | 1 |
+| 21 | it is never offered | 2 |
+| 22a | the create submit loses its blank-field `disabled`, `onSubmit`'s guard left | 1 (**0** before revision 1) |
+| 22b | `onSubmit` loses its unparseable-instant guard, the attribute left | **0** |
+| 23 | the create submit loses its in-flight `disabled` | 1 |
+| 24 | the removal button loses its in-flight `disabled` | 1 |
+| 25 | the roster panel is not keyed on the shift | 1 (**0** before revision 2) |
+| 26 | the roster's label is joined from the people list rather than the server's | 2 |
+| 27 | `employerFailureMessage` renders local copy instead of the envelope's sentence | **9** |
+| 28 | `shiftRoomLabel` drops the term | **8**, five of them in `features/rooms` |
+| 29 | the shared `decodeShiftRoom` drops its `shift_type_name` guard | 2, one in `features/rooms` |
+| 30 | a failed list renders a generic sentence rather than the failure | 2 |
+| 31 | `decodeShiftRoomPage` reads the rooms off the wrong envelope key | **22** |
+| 32 | the list renders `closes_at` raw instead of through `instantLabel` | 1 |
+
+**Mutation 1 is the one worth reading twice.** Ten kills for a falsiness check reads as a strong
+assertion and is mostly an artifact: `grace_period_minutes: 0` on one of the two fixture types
+fails the whole `shift_types` list all-or-nothing, so the create form's picker empties and every
+test that chooses a type goes with it. Only the two decoder bodies are *about* the guard. This is
+U4's mutation 10 in a different costume — a number stronger than the property it stands for — and
+mutation 31 (22 kills, for the same all-or-nothing reason) is the other.
+
+**Mutations 28 and 29 kill bodies inside `features/rooms`**, which is the disclosed regression's
+whole evidence: `room.test.ts`'s timezone matrix and `decode.test.ts`'s field requirements both
+run against the hoisted module through the re-export shim. So *"the rooms suite passes
+unchanged"* is not vacuous — those bodies are still reaching the code that moved.
+
+**The two zero-kills are the predicted ones**, and both are U4's shape: a hook's in-flight guard
+sitting behind the button's `disabled`. Neither is removed. The attribute is what a manager sees
+and the hook is what it promises a caller, and the cost of the races differ — two shift rooms at
+overlapping times, and a second `DELETE` that answers `404` so the manager is told the removal
+failed for the removal that worked. **22b is a third**, and revision 1 says why it is kept.
+
+## Runs
+
+| Check | Result |
+|---|---|
+| `npm run verify` (typecheck, lint, format, test, build) | **489 passed / 15 skipped** |
+| the same under `TZ=UTC` | 489 / 15 |
+| the same under `TZ=Pacific/Kiritimati` | 489 / 15 |
+| the same under `NODE_OPTIONS="--localstorage-file=$(mktemp)"` | 489 / 15 |
+| `TZ=Pacific/Kiritimati` **and** the localStorage file together | 489 / 15 |
+| `main` before this branch | 439 / 15 |
+| `npx tsc --noEmit --listFiles` | all five employer test files and `src/app/shift-room.ts` present |
+
+Fifty new bodies. No Elixir file, no migration, no route and no `config/` moved; `mix` was not
+run.
