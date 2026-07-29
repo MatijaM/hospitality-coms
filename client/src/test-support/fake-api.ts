@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 
-import type { ApiClient, ApiResult } from "../api/client";
+import type { ApiClient, ApiResult, WriteRequest } from "../api/client";
 import type { RequestFailure } from "../api/errors";
 import type { Person, Session } from "../api/types";
 
@@ -21,8 +21,76 @@ export function createFakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     // whatever `read` gave it must be tested against the failure path having
     // been reachable. A test that wants answers passes `readsFrom`.
     read: vi.fn(() => Promise.resolve(fails<never>(offline()))),
+    // **Fails by default too, and `fake-api.test.ts` asserts it directly.** A
+    // write is where this client can do irreversible damage on somebody's
+    // behalf, so a surface that never met a refused write in a test is a
+    // surface whose refusal path may not exist. A test that wants answers
+    // passes `writesTo`.
+    write: vi.fn(() => Promise.resolve(fails<never>(offline()))),
     ...overrides,
   };
+}
+
+/**
+ * What a faked `write` answers for one `"<METHOD> <path>"` key.
+ *
+ * Two members rather than one nullable body, because a refusal is the case
+ * these surfaces most need to be driven through and a fixture that could only
+ * express success would quietly make that untestable.
+ */
+export type WriteReply =
+  /** A `201`-shaped success. `null` for a `204`, where nothing is decoded. */
+  { readonly body: unknown } | { readonly failure: RequestFailure };
+
+/**
+ * A `write` that answers the requests a test names and 404s everything else.
+ *
+ * The keys are `"POST /api/claims"` — the method **and** the path, because two
+ * verbs on one path are two different operations and U5 adds a `DELETE` beside
+ * a `POST`. `readsFrom` needs no such prefix: every read is a `GET`.
+ *
+ * Bodies go through the real decoders, so a fixture that is not the shape the
+ * server sends fails as `malformed_response` here exactly as it would in a
+ * browser. A request with no decoder answers `null` without looking at the
+ * body, which is what the client does.
+ */
+export function writesTo(
+  replies: Readonly<Record<string, WriteReply>>,
+): ApiClient["write"] {
+  return vi.fn(
+    (request: WriteRequest, _token: string, decode?: (body: unknown) => unknown) => {
+      const reply = replies[`${request.method} ${request.path}`];
+
+      if (reply === undefined) {
+        return Promise.resolve(
+          fails<never>({
+            kind: "api_error",
+            status: 404,
+            code: "not_found",
+            rawCode: "not_found",
+            message: "no such venue, or it is not one you can act for",
+          }),
+        );
+      }
+
+      if ("failure" in reply) return Promise.resolve(fails<never>(reply.failure));
+      if (decode === undefined) return Promise.resolve(ok(null));
+
+      const value = decode(reply.body);
+
+      if (value === null) {
+        return Promise.resolve(
+          fails<never>({
+            kind: "malformed_response",
+            status: request.status,
+            message: `the ${request.status} response was not the expected shape`,
+          }),
+        );
+      }
+
+      return Promise.resolve({ ok: true as const, value });
+    },
+  ) as ApiClient["write"];
 }
 
 /**

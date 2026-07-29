@@ -297,8 +297,17 @@ export function instantLabel(value: string): string {
  *
  * Which day the *reader* is on is the question `CALENDAR_DAY` answers; see
  * there for why it cannot be asked in UTC.
+ *
+ * **Exported since the employer surface arrived**, which renders an
+ * engagement's term and an offer's, and reaches for this rather than spelling a
+ * second one — a term written two ways on two screens of one product is the
+ * defect this tree has fixed three times under other names. That makes it a
+ * cross-feature import, which nothing else in `src/features/` production code
+ * does yet: `instantLabel` and this belong in a shared module the way
+ * `src/socket/topic-id.ts` does, and the move belongs to whichever unit adds
+ * the caller after U4's two.
  */
-function termLabel(startsAt: string, endsAt: string): string {
+export function termLabel(startsAt: string, endsAt: string): string {
   const start = new Date(startsAt);
   const end = new Date(endsAt);
 
