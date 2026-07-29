@@ -51,6 +51,11 @@ defmodule HospitalityComsWeb.RoomController do
   sending a word this server does not know is a client bug, and swallowing it
   hides the bug at the only place that can see it.
 
+  The word itself is cast by `HospitalityComsWeb.Extent`, which is where it
+  moved when `HospitalityComsWeb.EmployerController` became its second caller —
+  `HospitalityComsWeb.EntityId`'s precedent, so that the refusal sentence exists
+  once rather than twice.
+
   ## Every refusal is `404`, and that is AE1 on the transport
 
   `Rooms` answers `:not_a_member` for an ended engagement, a suspension in force
@@ -93,10 +98,25 @@ defmodule HospitalityComsWeb.RoomController do
   alias HospitalityComs.Venues.ShiftType
   alias HospitalityComsWeb.EntityId
   alias HospitalityComsWeb.ErrorEnvelope
+  alias HospitalityComsWeb.Extent
   alias HospitalityComsWeb.RoomChannel
 
   @no_room "no such room, or it is not one you can reach"
-  @bad_extent ~s(extent must be "recent" or "all")
+
+  @typedoc """
+  What a rendered shift room looks like on the wire, on either side of the API.
+
+  No person id and no roster: a shift room is a term and a type name, and who is
+  on it is a different question with a different route.
+  """
+  @type rendered_shift_room() :: %{
+          shift_room_id: Ecto.UUID.t(),
+          venue_id: Ecto.UUID.t(),
+          shift_type_name: String.t(),
+          starts_at: String.t(),
+          ends_at: String.t(),
+          closes_at: String.t()
+        }
 
   @doc """
   The venue rooms this person is in at the request's instant.
@@ -116,13 +136,12 @@ defmodule HospitalityComsWeb.RoomController do
     %PersonScope{} = scope = conn.assigns.current_scope
 
     with {:ok, id} <- EntityId.cast(venue_id),
-         {:ok, extent} <- extent(params) do
+         {:ok, extent} <- Extent.cast(params) do
       scope
       |> Rooms.list_venue_room_messages(id, extent)
       |> respond_with_page(conn)
     else
-      :error -> not_found(conn)
-      {:error, :bad_extent} -> bad_extent(conn)
+      :error -> refuse_cast(conn, params)
     end
   end
 
@@ -140,7 +159,7 @@ defmodule HospitalityComsWeb.RoomController do
     case EntityId.cast(venue_id) do
       {:ok, id} ->
         rooms = Rooms.list_readable_shift_rooms(scope, id)
-        json(conn, %{shift_rooms: Enum.map(rooms, &render_shift_room/1)})
+        json(conn, %{shift_rooms: Enum.map(rooms, &rendered_shift_room/1)})
 
       :error ->
         not_found(conn)
@@ -155,13 +174,12 @@ defmodule HospitalityComsWeb.RoomController do
     %PersonScope{} = scope = conn.assigns.current_scope
 
     with {:ok, id} <- EntityId.cast(shift_room_id),
-         {:ok, extent} <- extent(params) do
+         {:ok, extent} <- Extent.cast(params) do
       scope
       |> Rooms.list_shift_room_messages(id, extent)
       |> respond_with_page(conn)
     else
-      :error -> not_found(conn)
-      {:error, :bad_extent} -> bad_extent(conn)
+      :error -> refuse_cast(conn, params)
     end
   end
 
@@ -179,42 +197,58 @@ defmodule HospitalityComsWeb.RoomController do
 
   defp respond_with_page({:error, _refusal}, conn), do: not_found(conn)
 
-  # Enumerated rather than defaulted, so an unknown word is a refusal and not a
-  # silently different answer.
-  @spec extent(map()) :: {:ok, MessagePage.extent()} | {:error, :bad_extent}
-  defp extent(%{"extent" => "all"}), do: {:ok, :all}
-  defp extent(%{"extent" => "recent"}), do: {:ok, :recent}
-  defp extent(%{"extent" => _other}), do: {:error, :bad_extent}
-  defp extent(_params), do: {:ok, :recent}
+  # Both casts answer `:error`, and the two mistakes are not the same mistake: a
+  # malformed id is `404` because a caller must not tell it from an id naming
+  # nothing, and an unknown extent is `400` because it is a client bug and no
+  # resource is being named. Re-casting the extent is what tells them apart —
+  # cheaper than threading two error atoms through a `with` for the sake of one
+  # clause, and it cannot answer the wrong one, because it asks the same
+  # function the `with` asked.
+  @spec refuse_cast(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  defp refuse_cast(conn, params), do: refuse_extent(conn, Extent.cast(params))
+
+  @spec refuse_extent(Plug.Conn.t(), {:ok, MessagePage.extent()} | :error) :: Plug.Conn.t()
+  defp refuse_extent(conn, :error), do: refuse(conn, :bad_request, Extent.refusal())
+  defp refuse_extent(conn, {:ok, _extent}), do: not_found(conn)
 
   @spec render_venue_room(VenueRoom.t()) :: %{venue_id: Ecto.UUID.t(), name: String.t()}
   defp render_venue_room(%VenueRoom{} = room) do
     %{venue_id: room.venue_id, name: room.name}
   end
 
-  # `shift_type_name` rather than `name`, because it is the type's and a `name`
-  # key on a shift room would claim the room has one. A shift room has no
-  # display name of its own — only two instants and a type — so the type's name
-  # and the term together are the label, and the term is not optional: two
-  # Tuesdays of one type are two rooms with one name.
-  #
-  # **The label is composed on the client**, not here. Formatting a shift time
-  # means choosing a timezone, `venues` carries one and the worker's device
-  # carries another, and the worker is the reader.
-  #
-  # `closes_at` ships as a fact and the client must not derive open/closed from
-  # it: `HospitalityComs.Clock` is offsettable and the demo moves it, while a
-  # browser's clock is real, so a client-side comparison answers wrongly during
-  # exactly the demo the offset exists for.
-  @spec render_shift_room(ShiftRoom.t()) :: %{
-          shift_room_id: Ecto.UUID.t(),
-          venue_id: Ecto.UUID.t(),
-          shift_type_name: String.t(),
-          starts_at: String.t(),
-          ends_at: String.t(),
-          closes_at: String.t()
-        }
-  defp render_shift_room(%ShiftRoom{shift_type: %ShiftType{} = shift_type} = room) do
+  @doc """
+  A shift room on the wire, for whichever side is asking.
+
+  `shift_type_name` rather than `name`, because it is the type's and a `name`
+  key on a shift room would claim the room has one. A shift room has no display
+  name of its own — only two instants and a type — so the type's name and the
+  term together are the label, and the term is not optional: two Tuesdays of one
+  type are two rooms with one name.
+
+  **The label is composed on the client**, not here. Formatting a shift time
+  means choosing a timezone, `venues` carries one and the reader's device
+  carries another, and the reader is the one reading it.
+
+  `closes_at` ships as a fact and the client must not derive open/closed from
+  it: `HospitalityComs.Clock` is offsettable and the demo moves it, while a
+  browser's clock is real, so a client-side comparison answers wrongly during
+  exactly the demo the offset exists for.
+
+  ## It is public because there are two sides and one entity
+
+  `HospitalityComsWeb.EmployerController` renders the same rooms from the
+  employer's side, and a second shape carrying `shift_type_id` where this one
+  carries `shift_type_name` would be one entity with two spellings on one API —
+  which is what `docs/solutions/conventions/one-entity-one-key-name-and-decoders-that-refuse-the-other.md`
+  is about. `HospitalityComsWeb.RoomChannel.rendered/1` is public for the same
+  reason and this module is its caller.
+
+  It requires the shift type to be loaded, and says so by matching on it: an
+  unloaded association is a `FunctionClauseError` here rather than a `nil` name
+  three layers away.
+  """
+  @spec rendered_shift_room(ShiftRoom.t()) :: rendered_shift_room()
+  def rendered_shift_room(%ShiftRoom{shift_type: %ShiftType{} = shift_type} = room) do
     %{
       shift_room_id: room.id,
       venue_id: room.venue_id,
@@ -232,9 +266,6 @@ defmodule HospitalityComsWeb.RoomController do
 
   @spec not_found(Plug.Conn.t()) :: Plug.Conn.t()
   defp not_found(conn), do: refuse(conn, :not_found, @no_room)
-
-  @spec bad_extent(Plug.Conn.t()) :: Plug.Conn.t()
-  defp bad_extent(conn), do: refuse(conn, :bad_request, @bad_extent)
 
   # The status atom is the envelope's code, so the two cannot drift apart —
   # `HospitalityComsWeb.SessionController`'s shape, for the same reason.

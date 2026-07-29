@@ -32,6 +32,7 @@ defmodule HospitalityComs.RostersTest do
 
   alias HospitalityComs.Accounts.EmployerScope
   alias HospitalityComs.Engagements
+  alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms
   alias HospitalityComs.Rosters
@@ -429,6 +430,57 @@ defmodule HospitalityComs.RostersTest do
       elsewhere = shift_room(other)
 
       assert {:error, :not_found} = Rosters.list_roster(employer, elsewhere.id)
+    end
+
+    test "carries the engagement each entry names, so a caller has a role label" do
+      # R13. A `RosterEntry` has an id and no label; the label is the
+      # engagement's, and this is where it is loaded.
+      %{employer: employer, engagement: engagement} = engaged()
+      room = shift_room(employer)
+      roster_entry_fixture(employer, room, engagement.id)
+
+      assert {:ok, [entry]} = Rosters.list_roster(employer, room.id)
+      assert %Engagement{} = entry.engagement
+      assert entry.engagement.id == engagement.id
+      assert entry.engagement.role_label == engagement.role_label
+    end
+
+    test "labels an entry whose engagement has not opened, which no client-side join could" do
+      # **KTD-E10's whole argument, and the second assertion is the control.**
+      #
+      # `add_to_roster/3` accepts an engagement whose term has not opened —
+      # next Monday's starter on next Tuesday's rota, built today — while
+      # `Engagements.list_engagements/1` answers only with engagements active at
+      # the instant. So a caller joining the roster against the venue's people
+      # list has no label for this row and renders a bare id.
+      #
+      # Without the second assertion, "the label came from the preload" and
+      # "the label could have come from the people list" are the same green.
+      %{employer: employer} = engaged()
+      starter = engaged_from(employer, @next_monday, @next_month)
+      room = future_shift_room(employer)
+
+      roster_entry_fixture(employer, room, starter.id)
+
+      assert {:ok, [entry]} = Rosters.list_roster(employer, room.id)
+      assert entry.engagement_id == starter.id
+      assert entry.engagement.role_label == starter.role_label
+
+      assert {:ok, active} = Engagements.list_engagements(employer)
+      refute starter.id in Enum.map(active, & &1.id)
+    end
+
+    test "hands the written entry back carrying its engagement too" do
+      # The create response renders the same shape the list does, and a render
+      # reaching an unloaded association raises rather than rendering nil.
+      %{employer: employer, engagement: engagement} = engaged()
+      room = shift_room(employer)
+
+      assert {:ok, %RosterEntry{engagement: %Engagement{} = loaded}} =
+               Rosters.add_to_roster(employer, room.id, engagement.id)
+
+      assert loaded.id == engagement.id
+      assert loaded.role_label == engagement.role_label
     end
   end
 

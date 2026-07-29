@@ -125,6 +125,7 @@ defmodule HospitalityComs.Rooms do
   alias HospitalityComs.Rooms.Records
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComs.Rooms.ShiftRoom
+  alias HospitalityComs.Rooms.ShiftRoomPage
   alias HospitalityComs.Rooms.VenueRoom
   alias HospitalityComs.Rooms.VenueRoomSuspension
   alias HospitalityComs.Venues
@@ -142,6 +143,7 @@ defmodule HospitalityComs.Rooms do
   @type refusal() :: :not_found | :not_a_member | :room_closed
 
   @recent_message_limit 50
+  @recent_shift_room_limit 30
 
   @doc """
   How many messages a default history read answers with.
@@ -159,6 +161,25 @@ defmodule HospitalityComs.Rooms do
   """
   @spec recent_message_limit() :: pos_integer()
   def recent_message_limit, do: @recent_message_limit
+
+  @doc """
+  How many shift rooms a default employer-side read answers with.
+
+  Roughly a month of daily shifts at one venue, which is the window a manager
+  has open while they are building next week's rota.
+
+  **It is not derived from `recent_message_limit/0` and no relationship between
+  the two is asserted anywhere.** Issue #42 is a live sweep of constant pairs
+  held together by prose, and two lists that happened to share a number would be
+  one more. The rule they *do* share is the one above: the number lives here and
+  no caller may pass one.
+
+  Exported for the same two reasons the message bound is — a caller has to be
+  able to say "and there is more" without restating it, and a bound asserted
+  against a fixture smaller than the bound certifies nothing.
+  """
+  @spec recent_shift_room_limit() :: pos_integer()
+  def recent_shift_room_limit, do: @recent_shift_room_limit
 
   ## Shift rooms, from the employer's side
 
@@ -194,8 +215,25 @@ defmodule HospitalityComs.Rooms do
       shift_type
       |> ShiftRoom.changeset(attrs, scope.now)
       |> EmployerRepo.insert()
+      |> loaded(shift_type)
     end
   end
+
+  # The room comes back carrying the type it was built from, so a caller
+  # rendering what it just created gets the same shape `list_shift_rooms/2`
+  # hands it — a shift room has no display name of its own and every render of
+  # one needs the type's.
+  #
+  # It is the struct already in hand rather than `EmployerRepo.preload/2`: the
+  # row was read inside this transaction a statement ago, and re-reading it
+  # would be a query issued to learn something the caller is holding.
+  @spec loaded({:ok, ShiftRoom.t()} | {:error, Ecto.Changeset.t(ShiftRoom.t())}, ShiftType.t()) ::
+          {:ok, ShiftRoom.t()} | {:error, Ecto.Changeset.t(ShiftRoom.t())}
+  defp loaded({:ok, %ShiftRoom{} = room}, %ShiftType{} = shift_type) do
+    {:ok, %{room | shift_type: shift_type}}
+  end
+
+  defp loaded({:error, %Ecto.Changeset{} = changeset}, _shift_type), do: {:error, changeset}
 
   @spec fetch_shift_type(EmployerScope.t(), Ecto.UUID.t()) ::
           {:ok, ShiftType.t()} | {:error, :not_found}
@@ -212,23 +250,67 @@ defmodule HospitalityComs.Rooms do
   defp found_shift_type(%ShiftType{} = shift_type), do: {:ok, shift_type}
 
   @doc """
-  The venue's shift rooms, earliest first.
+  The venue's most recent shift rooms, earliest first within the page.
+
+  A page rather than a list, and the bound is `recent_shift_room_limit/0`. See
+  `list_shift_rooms/2` for the extent a caller can ask for instead, and
+  `HospitalityComs.Rooms.ShiftRoomPage` for why the *selection* runs from the
+  other end of the order the page is displayed in.
+
+  The shift type is preloaded, because a `ShiftRoom` has two instants and a
+  `shift_type_id` and no display name at all — so every caller needs it, and
+  `list_readable_shift_rooms/2` already loads it for the person side. One
+  rendered shift room then serves both sides of this API.
   """
-  @spec list_shift_rooms(EmployerScope.t()) :: {:ok, [ShiftRoom.t()]} | {:error, :no_grant}
-  def list_shift_rooms(%EmployerScope{grant_id: grant_id} = scope) when is_binary(grant_id) do
-    EmployerRepo.scoped_transaction(scope, &read_shift_rooms/1)
+  @spec list_shift_rooms(EmployerScope.t()) :: {:ok, ShiftRoomPage.t()} | {:error, :no_grant}
+  def list_shift_rooms(%EmployerScope{} = scope), do: list_shift_rooms(scope, :recent)
+
+  @doc """
+  The same, at the extent asked for.
+
+  `:recent` is `recent_shift_room_limit/0` rooms and is what the one-arity form
+  answers; `:all` is every shift room the venue has ever had, which is what this
+  function used to do unconditionally.
+
+  The unbounded read stays reachable — a manager auditing a venue's history has
+  a real reason to want the lot — and what changed is that it is now reached
+  **because somebody asked for it**. A caller cannot pass a number: a route
+  passing `limit: 50` leaves the unbounded read one forgetful caller away from
+  production, which is how this function came to be `EmployerRepo.all/1` over a
+  venue's whole life.
+  """
+  @spec list_shift_rooms(EmployerScope.t(), MessagePage.extent()) ::
+          {:ok, ShiftRoomPage.t()} | {:error, :no_grant}
+  def list_shift_rooms(%EmployerScope{grant_id: grant_id} = scope, extent)
+      when is_binary(grant_id) and extent in [:recent, :all] do
+    EmployerRepo.scoped_transaction(scope, &read_shift_rooms(&1, extent))
   end
 
-  @spec read_shift_rooms(EmployerScope.t()) :: {:ok, [ShiftRoom.t()]} | {:error, :no_grant}
-  defp read_shift_rooms(scope) do
+  @spec read_shift_rooms(EmployerScope.t(), MessagePage.extent()) ::
+          {:ok, ShiftRoomPage.t()} | {:error, :no_grant}
+  defp read_shift_rooms(scope, extent) do
     with {:ok, _grant} <- Venues.fetch_acting_grant(scope) do
-      {:ok,
-       Records.rooms()
-       |> Records.of_venue(scope.venue_id)
-       |> Records.earliest_first()
-       |> EmployerRepo.all()}
+      {:ok, Records.rooms() |> Records.of_venue(scope.venue_id) |> shift_room_page(extent)}
     end
   end
+
+  @spec shift_room_page(Ecto.Query.t(), MessagePage.extent()) :: ShiftRoomPage.t()
+  defp shift_room_page(query, :all) do
+    query |> Records.earliest_first() |> read_rooms() |> ShiftRoomPage.whole()
+  end
+
+  defp shift_room_page(query, :recent) do
+    limit = recent_shift_room_limit()
+
+    query |> Records.most_recent_rooms(limit + 1) |> read_rooms() |> ShiftRoomPage.bounded(limit)
+  end
+
+  # The preload is after the read and in the context function, which is where
+  # `AGENTS.md` asks for one. It cannot be a `preload:` on the bounded query
+  # either: that query's `from` is a subquery, and Ecto has no association to
+  # follow off one.
+  @spec read_rooms(Ecto.Query.t()) :: [ShiftRoom.t()]
+  defp read_rooms(query), do: query |> EmployerRepo.all() |> EmployerRepo.preload(:shift_type)
 
   @doc """
   One of the venue's shift rooms, by id.

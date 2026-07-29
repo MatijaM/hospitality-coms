@@ -67,6 +67,7 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
   use ExUnit.Case, async: false
 
   import HospitalityComs.EngagementsFixtures
+  import HospitalityComs.RoomsFixtures, except: [fixed_instant: 0]
   import Phoenix.ConnTest
 
   alias HospitalityComs.Accounts
@@ -77,7 +78,10 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
   alias HospitalityComs.Engagements.Invitation
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms
+  alias HospitalityComs.Rooms.ShiftRoom
+  alias HospitalityComs.Rosters.RosterEntry
   alias HospitalityComs.Venues
+  alias HospitalityComs.Venues.ShiftType
   alias HospitalityComsWeb.EmployerAuth
   alias HospitalityComsWeb.PersonAuth
 
@@ -85,6 +89,13 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
 
   @now HospitalityComs.EngagementsFixtures.fixed_instant()
   @term_ends DateTime.add(@now, 90, :day)
+  @an_hour_on DateTime.add(@now, 1, :hour)
+
+  # A shift that opens an hour from `@now` and runs eight hours, which is the
+  # shape `rooms_test.exs` uses for the same reason: it is inside every term
+  # these fixtures build.
+  @shift_starts DateTime.add(@now, 1, :hour)
+  @shift_ends DateTime.add(@now, 9, :hour)
 
   # Every instant column in `invitations` is second-precision, so a response
   # compared against a *computed* value has to be compared against a truncated
@@ -99,6 +110,10 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
   @engagement_keys ~w(engagement_id role_label starts_at ends_at)
   @issued_keys ~w(invitation claim_code)
   @invitation_keys ~w(invitation_id role_label starts_at ends_at code_expires_at)
+  @shift_type_keys ~w(shift_type_id name grace_period_minutes)
+  @shift_room_keys ~w(shift_room_id venue_id shift_type_name starts_at ends_at closes_at)
+  @shift_room_page_keys ~w(shift_rooms complete)
+  @roster_entry_keys ~w(engagement_id role_label joined_at)
 
   # KTD-E5's three durations and the bound they sit inside, written out here
   # rather than read from `HospitalityComsWeb.EmployerController`'s attributes
@@ -479,6 +494,442 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
     end
   end
 
+  ## Shift types
+
+  describe "GET /api/employer/venues/:venue_id/shift-types" do
+    test "answers the venue's shift types oldest first, as a field list", %{conn: conn} do
+      # The two types are created an hour apart on purpose: `ShiftType.of_venue/1`
+      # breaks ties on `id`, which is random on a `binary_id` schema, so two
+      # types stamped in the same second would order by coin toss.
+      %{person: person, venue: venue, employer: employer} = manager()
+      early = shift_type_fixture(employer, 45)
+      late = shift_type_fixture(employer_at(employer, @an_hour_on), 0)
+
+      body = json_get(conn, person, "/api/employer/venues/#{venue.id}/shift-types")
+
+      assert %{"shift_types" => [first, second]} = body
+      assert Enum.map([first, second], & &1["shift_type_id"]) == [early.id, late.id]
+
+      assert first |> Map.keys() |> Enum.sort() == Enum.sort(@shift_type_keys)
+      assert first["name"] == early.name
+      assert first["grace_period_minutes"] == 45
+      assert second["grace_period_minutes"] == 0
+
+      # Control: the struct carries a field the render leaves out, so an empty
+      # render cannot pass for a projected one.
+      assert :venue_id in ShiftType.__schema__(:fields)
+    end
+
+    test "answers a venue with no shift types with an empty list, not a refusal", %{conn: conn} do
+      # Having configured nothing is not an error. It does mean no shift can be
+      # created there, which the seed's second venue is an example of.
+      %{person: person, venue: venue} = manager()
+
+      assert %{"shift_types" => []} =
+               json_get(conn, person, "/api/employer/venues/#{venue.id}/shift-types")
+    end
+  end
+
+  ## Creating a shift
+
+  describe "POST /api/employer/venues/:venue_id/shift-rooms" do
+    test "creates the shift and takes the grace off the type, not off the body", %{conn: conn} do
+      # **The control is inside the request**: the body asks for two hours of
+      # grace and the type allows forty-five minutes. Against a body echoing the
+      # type's own value the "not castable" claim would be untested.
+      #
+      # The `venue_id` in the body cannot be tested the same way — Phoenix
+      # merges path parameters over body ones, so the path's venue wins before
+      # the controller sees it. What is asserted instead is that the stored row
+      # carries the venue the *type* belongs to.
+      %{person: person, venue: venue, employer: employer} = manager()
+      shift_type = shift_type_fixture(employer, 45)
+
+      body =
+        create_shift(conn, person, venue, %{
+          "shift_type_id" => shift_type.id,
+          "starts_at" => iso(@shift_starts),
+          "ends_at" => iso(@shift_ends),
+          "grace_period_minutes" => 120,
+          "venue_id" => Ecto.UUID.generate()
+        })
+
+      assert body |> Map.keys() |> Enum.sort() == ["shift_room"]
+      assert %{"shift_room" => room} = body
+      assert room |> Map.keys() |> Enum.sort() == Enum.sort(@shift_room_keys)
+      assert room["shift_type_name"] == shift_type.name
+      assert room["venue_id"] == venue.id
+      assert room["starts_at"] == iso(@shift_starts)
+      assert room["closes_at"] == iso(DateTime.add(@shift_ends, 45, :minute))
+
+      stored = Repo.get!(ShiftRoom, room["shift_room_id"])
+      assert stored.grace_period_minutes == 45
+      assert stored.venue_id == venue.id
+
+      # Control: the struct carries two fields the render leaves out.
+      assert :grace_period_minutes in ShiftRoom.__schema__(:fields)
+      assert :shift_type_id in ShiftRoom.__schema__(:fields)
+    end
+
+    test "refuses a term whose end does not follow its start", %{conn: conn} do
+      %{person: person, venue: venue, employer: employer} = manager()
+      shift_type = shift_type_fixture(employer)
+
+      refused =
+        json_post(
+          conn,
+          person,
+          "/api/employer/venues/#{venue.id}/shift-rooms",
+          %{
+            "shift_type_id" => shift_type.id,
+            "starts_at" => iso(@shift_ends),
+            "ends_at" => iso(@shift_starts)
+          },
+          422
+        )
+
+      assert %{"error" => %{"code" => "unprocessable_entity", "fields" => fields}} = refused
+      assert "must be after the shift starts" in fields["ends_at"]
+    end
+
+    test "answers another venue's type, an unknown id and a malformed id identically",
+         %{conn: conn} do
+      # **AE7 on the create route**, asserted by equality rather than by three
+      # separate matches. The malformed one is what kills the mutation: handed
+      # to the context uncast it reaches Ecto's query builder and raises, so
+      # Phoenix answers `500` and a caller tells malformed from unknown by the
+      # status.
+      %{person: person, venue: venue, employer: employer} = manager()
+      {other_employer, _other} = scoped_venue_fixture(@now)
+      elsewhere = shift_type_fixture(other_employer)
+
+      theirs = refused_shift(conn, person, venue, elsewhere.id)
+      unknown = refused_shift(conn, person, venue, Ecto.UUID.generate())
+      malformed = refused_shift(conn, person, venue, "not-a-uuid")
+
+      assert theirs == unknown
+      assert theirs == malformed
+      assert %{"error" => %{"code" => "not_found"}} = theirs
+
+      # Control: a type this venue does run is accepted, so a route refusing
+      # everything cannot pass the three above.
+      mine = shift_type_fixture(employer)
+      assert %{"shift_room" => _created} = create_shift_of(conn, person, venue, mine)
+    end
+
+    test "answers a body naming no shift type with bad_request, not a refusal", %{conn: conn} do
+      # A client that did not name the thing is a client bug, and the answer
+      # says so. The inequality is the assertion: it is what proves the two
+      # causes are not one answer.
+      %{person: person, venue: venue} = manager()
+
+      missing =
+        json_post(
+          conn,
+          person,
+          "/api/employer/venues/#{venue.id}/shift-rooms",
+          %{"starts_at" => iso(@shift_starts), "ends_at" => iso(@shift_ends)},
+          400
+        )
+
+      assert %{"error" => %{"code" => "bad_request"}} = missing
+      refute missing == refused_shift(conn, person, venue, Ecto.UUID.generate())
+    end
+  end
+
+  ## The venue's shifts
+
+  describe "GET /api/employer/venues/:venue_id/shift-rooms" do
+    test "answers the most recent page, and the page is not the oldest shifts", %{conn: conn} do
+      # **KTD-E6 on the wire.** The count alone certifies nothing: this list is
+      # displayed earliest first, and a limit applied to *that* returns the
+      # venue's oldest rooms, satisfies the count, and hides the shift the
+      # manager just created — F2's payoff. So the rooms are named.
+      #
+      # **The fixture is `bound + 2`.** At `bound + 1` the read's own probe
+      # selects every row the venue has, so the descending scan and an ascending
+      # one return the same set and the direction is unobservable — measured,
+      # and the reason is written out in `HospitalityComs.RoomsTest`.
+      %{person: person, venue: venue, employer: employer} = manager()
+      shift_type = shift_type_fixture(employer)
+      limit = Rooms.recent_shift_room_limit()
+      ids = shift_rooms_fixture(employer, shift_type, limit + 2, @shift_starts)
+
+      body = json_get(conn, person, "/api/employer/venues/#{venue.id}/shift-rooms")
+
+      assert body |> Map.keys() |> Enum.sort() == Enum.sort(@shift_room_page_keys)
+      assert %{"shift_rooms" => listed, "complete" => false} = body
+      assert length(listed) == limit
+
+      read = Enum.map(listed, & &1["shift_room_id"])
+      refute List.first(ids) in read
+      assert List.last(ids) in read
+    end
+
+    test "renders each shift with its type's name and a pinned key set", %{conn: conn} do
+      %{person: person, venue: venue, employer: employer} = manager()
+      shift_type = shift_type_fixture(employer, 45)
+      shift_room_fixture(employer, shift_type, @shift_starts, @shift_ends)
+
+      assert %{"shift_rooms" => [listed]} =
+               json_get(conn, person, "/api/employer/venues/#{venue.id}/shift-rooms")
+
+      assert listed |> Map.keys() |> Enum.sort() == Enum.sort(@shift_room_keys)
+      assert listed["shift_type_name"] == shift_type.name
+      assert listed["starts_at"] == iso(@shift_starts)
+      assert listed["closes_at"] == iso(DateTime.add(@shift_ends, 45, :minute))
+    end
+
+    test "lifts the bound for extent=all, which is the control for it existing", %{conn: conn} do
+      # A limit applied to `all` too would satisfy every assertion above and
+      # make "load them all" a lie.
+      %{person: person, venue: venue, employer: employer} = manager()
+      shift_type = shift_type_fixture(employer)
+      limit = Rooms.recent_shift_room_limit()
+      ids = shift_rooms_fixture(employer, shift_type, limit + 2, @shift_starts)
+
+      assert %{"shift_rooms" => listed, "complete" => true} =
+               json_get(conn, person, "/api/employer/venues/#{venue.id}/shift-rooms?extent=all")
+
+      assert Enum.map(listed, & &1["shift_room_id"]) == ids
+    end
+
+    test "calls a short list complete, which is the other direction of the flag", %{conn: conn} do
+      # A `complete` hard-coded either way passes one of the two.
+      %{person: person, venue: venue, employer: employer} = manager()
+      shift_type = shift_type_fixture(employer)
+      count = Rooms.recent_shift_room_limit() - 1
+      shift_rooms_fixture(employer, shift_type, count, @shift_starts)
+
+      assert %{"shift_rooms" => listed, "complete" => true} =
+               json_get(conn, person, "/api/employer/venues/#{venue.id}/shift-rooms")
+
+      assert length(listed) == count
+    end
+
+    test "answers an extent it does not know with bad_request, not a refusal", %{conn: conn} do
+      # A silent fall back to `recent` would satisfy every other row in this
+      # block. The inequality is what proves the two answers are different.
+      %{person: person, venue: venue} = manager()
+      path = "/api/employer/venues/#{venue.id}/shift-rooms"
+
+      bad_extent = json_get(conn, person, path <> "?extent=nonsense", 400)
+      assert %{"error" => %{"code" => "bad_request"}} = bad_extent
+
+      unknown_venue =
+        json_get(conn, person, "/api/employer/venues/#{Ecto.UUID.generate()}/shift-rooms", 404)
+
+      refute bad_extent == unknown_venue
+    end
+  end
+
+  ## The roster
+
+  describe "the roster routes" do
+    test "puts an engagement on a shift and then lists it, with its role label", %{conn: conn} do
+      # R12 and R13. The list is asserted non-empty before anything is asserted
+      # about it, because the environment failure this file's setup avoids
+      # answers every employer list with `[]`.
+      %{person: person, venue: venue, employer: employer, worker_engagement: held} = manager()
+      room = shift_room(employer)
+
+      created = add_to_roster(conn, person, venue, room, held.id)
+
+      assert created |> Map.keys() |> Enum.sort() == ["roster_entry"]
+      assert %{"roster_entry" => entry} = created
+      assert entry |> Map.keys() |> Enum.sort() == Enum.sort(@roster_entry_keys)
+      assert entry["engagement_id"] == held.id
+      assert entry["role_label"] == held.role_label
+      assert entry["joined_at"] == DateTime.to_iso8601(@now)
+
+      assert %{"roster" => [listed]} = read_roster(conn, person, venue, room)
+      assert listed |> Map.keys() |> Enum.sort() == Enum.sort(@roster_entry_keys)
+      assert listed["engagement_id"] == held.id
+      assert listed["role_label"] == held.role_label
+
+      # Control: the engagement the label came off still carries the key this
+      # render withholds, so an empty render cannot pass for a projected one.
+      assert :person_id in Engagement.__schema__(:fields)
+    end
+
+    test "labels a starter whose term has not opened, which the people list cannot", %{conn: conn} do
+      # **KTD-E10 end to end, and the second half is the control.** A hire whose
+      # term opens tomorrow is rosterable today and is absent from the venue's
+      # people list at this instant — so a client joining the roster against
+      # that list would render this row as a bare id. The preload is what
+      # answers R13 for every row the roster can hold.
+      %{person: person, venue: venue, employer: employer} = manager()
+      opens = DateTime.add(@now, 1, :day)
+
+      starter =
+        engagement_fixture(employer, person_scope(person_fixture(@now)), %{
+          starts_at: opens,
+          ends_at: @term_ends
+        })
+
+      room = shift_room(employer)
+
+      assert %{"roster_entry" => entry} = add_to_roster(conn, person, venue, room, starter.id)
+      assert entry["role_label"] == starter.role_label
+
+      assert %{"roster" => [listed]} = read_roster(conn, person, venue, room)
+      assert listed["engagement_id"] == starter.id
+      assert listed["role_label"] == starter.role_label
+
+      assert %{"engagements" => people} =
+               json_get(conn, person, "/api/employer/venues/#{venue.id}/engagements")
+
+      assert people != []
+      refute starter.id in Enum.map(people, & &1["engagement_id"])
+    end
+
+    test "refuses a second rostering and leaves the roster holding one entry", %{conn: conn} do
+      # AE8. The count is the requirement; the status and its flatness are the
+      # test below.
+      %{person: person, venue: venue, employer: employer, worker_engagement: held} = manager()
+      room = shift_room(employer)
+
+      assert %{"roster_entry" => _first} = add_to_roster(conn, person, venue, room, held.id)
+      assert %{"error" => _refused} = add_to_roster(conn, person, venue, room, held.id, 404)
+
+      assert %{"roster" => [_one]} = read_roster(conn, person, venue, room)
+    end
+
+    test "answers all four of R15's refusals identically", %{conn: conn} do
+      # **R15 names four conditions and says the refusal does not disclose
+      # which**, so four bodies are compared for equality rather than matched
+      # separately. The plan's own scenario compares three and leaves
+      # `:already_rostered` out; the requirement does not.
+      %{person: person, venue: venue, employer: employer, worker_engagement: held} = manager()
+      {other_employer, _other} = scoped_venue_fixture(@now)
+      elsewhere = shift_room(other_employer)
+      their_engagement = engagement_fixture(other_employer, person_scope(person_fixture(@now)))
+
+      room = shift_room(employer)
+      assert %{"roster_entry" => _first} = add_to_roster(conn, person, venue, room, held.id)
+
+      already = add_to_roster(conn, person, venue, room, held.id, 404)
+      their_room = add_to_roster(conn, person, venue, elsewhere, held.id, 404)
+      their_worker = add_to_roster(conn, person, venue, room, their_engagement.id, 404)
+      nobody = add_to_roster(conn, person, venue, room, Ecto.UUID.generate(), 404)
+      malformed = add_to_roster(conn, person, venue, room, "not-a-uuid", 404)
+
+      assert already == their_room
+      assert already == their_worker
+      assert already == nobody
+      assert already == malformed
+      assert %{"error" => %{"code" => "not_found"}} = already
+
+      # Control: a rostering this session may make is accepted, so a route that
+      # refused everything cannot pass the four above.
+      %{engagement: mine} = manager_engagement(employer)
+      assert %{"roster_entry" => _second} = add_to_roster(conn, person, venue, room, mine.id)
+    end
+
+    test "answers a body naming no engagement with bad_request, not a refusal", %{conn: conn} do
+      %{person: person, venue: venue, employer: employer} = manager()
+      room = shift_room(employer)
+      path = "/api/employer/venues/#{venue.id}/shift-rooms/#{room.id}/roster"
+
+      missing = json_post(conn, person, path, %{}, 400)
+
+      assert %{"error" => %{"code" => "bad_request"}} = missing
+      refute missing == add_to_roster(conn, person, venue, room, Ecto.UUID.generate(), 404)
+    end
+
+    test "removes an entry, and the row stays with an upper bound on it", %{conn: conn} do
+      # **AE9, and the row assertion is the control on the status.** A route
+      # that actually deleted answers `204` and empties the roster too; only the
+      # surviving row with `left_at` set distinguishes closed from deleted,
+      # which is the whole of KTD6b.
+      %{person: person, venue: venue, employer: employer, worker_engagement: held} = manager()
+      room = shift_room(employer)
+
+      assert %{"roster_entry" => _entry} = add_to_roster(conn, person, venue, room, held.id)
+      assert %{"roster" => [_one]} = read_roster(conn, person, venue, room)
+
+      assert "" ==
+               conn
+               |> with_session(person)
+               |> delete(roster_path(venue, room, held.id))
+               |> response(204)
+
+      assert %{"roster" => []} = read_roster(conn, person, venue, room)
+
+      stored = Repo.get_by!(RosterEntry, shift_room_id: room.id, engagement_id: held.id)
+      assert %DateTime{} = stored.left_at
+    end
+
+    test "answers an unrostered engagement and an unknown shift room identically", %{conn: conn} do
+      # `remove_from_roster/3` answers `:not_rostered` for both, and the
+      # transport keeps them one answer.
+      %{person: person, venue: venue, employer: employer, worker_engagement: held} = manager()
+      room = shift_room(employer)
+
+      never = remove_from_roster(conn, person, venue, room.id, held.id, 404)
+      no_room = remove_from_roster(conn, person, venue, Ecto.UUID.generate(), held.id, 404)
+      malformed = remove_from_roster(conn, person, venue, room.id, "not-a-uuid", 404)
+
+      assert never == no_room
+      assert never == malformed
+      assert %{"error" => %{"code" => "not_found"}} = never
+
+      # Control: an entry that is there is removed, so a route refusing
+      # everything cannot pass the two above.
+      assert %{"roster_entry" => _entry} = add_to_roster(conn, person, venue, room, held.id)
+      assert "" == remove_from_roster(conn, person, venue, room.id, held.id, 204)
+    end
+
+    test "refuses a roster read for a shift room at another venue", %{conn: conn} do
+      %{person: person, venue: venue} = manager()
+      {other_employer, _other} = scoped_venue_fixture(@now)
+      elsewhere = shift_room(other_employer)
+
+      assert %{"error" => %{"code" => "not_found"}} =
+               read_roster(conn, person, venue, elsewhere, 404)
+    end
+  end
+
+  ## Every route, twice over
+
+  describe "the six shift and roster routes" do
+    test "refuse without a bearer token, and answer with one", %{conn: conn} do
+      # The second half is the control: a pipeline that refused everything would
+      # satisfy the first alone.
+      manager = manager()
+
+      for {method, path, params, status} <- shift_and_roster_calls(manager) do
+        assert %{"error" => %{"code" => "unauthorized"}} =
+                 conn |> call(method, path, params) |> json_response(401)
+
+        assert conn
+               |> with_session(manager.person)
+               |> call(method, path, params)
+               |> response(status)
+      end
+    end
+
+    test "refuse a session engaged at the venue but holding no grant there", %{conn: conn} do
+      # R17 on all six. The control is the last line: the *same session*, at the
+      # venue it does manage, is answered — so the refusal is about the grant
+      # rather than about the session or the route.
+      manager = manager()
+
+      for {method, path, params, _status} <- shift_and_roster_calls(manager) do
+        assert %{"error" => %{"code" => "not_found"}} =
+                 conn
+                 |> with_session(manager.worker)
+                 |> call(method, path, params)
+                 |> json_response(404)
+      end
+
+      elsewhere = manager_for(manager.worker)
+
+      assert %{"shift_types" => []} =
+               json_get(conn, manager.worker, "/api/employer/venues/#{elsewhere.id}/shift-types")
+    end
+  end
+
   ## The resolver itself
 
   describe "the acting grant is resolved on every call" do
@@ -549,6 +1000,94 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
 
   ## Helpers
 
+  defp iso(%DateTime{} = instant), do: DateTime.to_iso8601(DateTime.truncate(instant, :second))
+
+  defp shift_room(employer) do
+    shift_type = shift_type_fixture(employer, 30)
+    shift_room_fixture(employer, shift_type, @shift_starts, @shift_ends)
+  end
+
+  defp create_shift(conn, person, venue, params, status \\ 201) do
+    json_post(conn, person, "/api/employer/venues/#{venue.id}/shift-rooms", params, status)
+  end
+
+  defp create_shift_of(conn, person, venue, shift_type) do
+    create_shift(conn, person, venue, %{
+      "shift_type_id" => shift_type.id,
+      "starts_at" => iso(@shift_starts),
+      "ends_at" => iso(@shift_ends)
+    })
+  end
+
+  defp refused_shift(conn, person, venue, shift_type_id) do
+    create_shift(
+      conn,
+      person,
+      venue,
+      %{
+        "shift_type_id" => shift_type_id,
+        "starts_at" => iso(@shift_starts),
+        "ends_at" => iso(@shift_ends)
+      },
+      404
+    )
+  end
+
+  defp roster_path(venue, room, engagement_id) do
+    "#{roster_path(venue, room)}/#{engagement_id}"
+  end
+
+  defp roster_path(venue, room) do
+    "/api/employer/venues/#{venue.id}/shift-rooms/#{room.id}/roster"
+  end
+
+  defp add_to_roster(conn, person, venue, room, engagement_id, status \\ 201) do
+    json_post(conn, person, roster_path(venue, room), %{"engagement_id" => engagement_id}, status)
+  end
+
+  defp read_roster(conn, person, venue, room, status \\ 200) do
+    json_get(conn, person, roster_path(venue, room), status)
+  end
+
+  defp remove_from_roster(conn, person, venue, room_id, engagement_id, status) do
+    conn
+    |> with_session(person)
+    |> delete("/api/employer/venues/#{venue.id}/shift-rooms/#{room_id}/roster/#{engagement_id}")
+    |> response(status)
+    |> decoded()
+  end
+
+  defp decoded(""), do: ""
+  defp decoded(body), do: Jason.decode!(body)
+
+  # One call per route, each carrying whatever it needs to reach its action
+  # rather than its guard clause, and each with the status a manager gets.
+  # Written out rather than derived from the router: a table read from the
+  # thing under test asserts only that it equals itself.
+  defp shift_and_roster_calls(%{venue: venue, employer: employer, worker_engagement: held}) do
+    room = shift_room(employer)
+    shift_type = shift_type_fixture(employer)
+    base = "/api/employer/venues/#{venue.id}"
+
+    [
+      {:get, "#{base}/shift-types", nil, 200},
+      {:get, "#{base}/shift-rooms", nil, 200},
+      {:post, "#{base}/shift-rooms",
+       %{
+         "shift_type_id" => shift_type.id,
+         "starts_at" => iso(@shift_starts),
+         "ends_at" => iso(@shift_ends)
+       }, 201},
+      {:get, "#{base}/shift-rooms/#{room.id}/roster", nil, 200},
+      {:post, "#{base}/shift-rooms/#{room.id}/roster", %{"engagement_id" => held.id}, 201},
+      {:delete, "#{base}/shift-rooms/#{room.id}/roster/#{held.id}", nil, 204}
+    ]
+  end
+
+  defp call(conn, :get, path, _params), do: get(conn, path)
+  defp call(conn, :delete, path, _params), do: delete(conn, path)
+  defp call(conn, :post, path, params), do: post(conn, path, params)
+
   defp json_get(conn, person, path, status \\ 200) do
     conn |> with_session(person) |> get(path) |> json_response(status)
   end
@@ -617,6 +1156,18 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
       worker: worker,
       engagement: engagement,
       worker_engagement: worker_engagement
+    }
+  end
+
+  # A second engagement at this venue, for a test that needs one the roster does
+  # not already hold.
+  defp manager_engagement(employer) do
+    %{
+      engagement:
+        engagement_fixture(employer, person_scope(person_fixture(@now)), %{
+          starts_at: @now,
+          ends_at: @term_ends
+        })
     }
   end
 

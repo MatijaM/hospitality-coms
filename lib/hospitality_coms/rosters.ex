@@ -173,8 +173,25 @@ defmodule HospitalityComs.Rosters do
       room
       |> RosterEntry.join_changeset(engagement, scope.now)
       |> EmployerRepo.insert()
+      |> loaded(engagement)
     end
   end
+
+  # The entry comes back carrying the engagement it names, so a caller
+  # rendering what it just wrote gets the same shape `list_roster/2` hands it —
+  # and the role label R13 asks for is on the engagement, not on the entry.
+  #
+  # It is the struct already in hand rather than `EmployerRepo.preload/2`: the
+  # row was resolved inside this transaction a statement ago.
+  @spec loaded(
+          {:ok, RosterEntry.t()} | {:error, Ecto.Changeset.t(RosterEntry.t())},
+          Engagement.t()
+        ) :: {:ok, RosterEntry.t()} | {:error, Ecto.Changeset.t(RosterEntry.t())}
+  defp loaded({:ok, %RosterEntry{} = entry}, %Engagement{} = engagement) do
+    {:ok, %{entry | engagement: engagement}}
+  end
+
+  defp loaded({:error, %Ecto.Changeset{} = changeset}, _engagement), do: {:error, changeset}
 
   # The friendly half of the race. The exclusion constraint is the safe half:
   # two managers rostering the same person at once both pass this and the second
@@ -275,12 +292,28 @@ defmodule HospitalityComs.Rosters do
   defp closed_or_lost({0, _rows}), do: {:error, :not_rostered}
 
   @doc """
-  The shift room's roster at the scope's instant, earliest joined first.
+  The shift room's roster at the scope's instant, earliest joined first, each
+  entry carrying the engagement it names.
 
   Entries whose period contains the instant — the roster as it stands, which is
   not the same set as the room's membership (an entry can be live before the
   room opens) and not the same set as its readers (a closed entry that overlapped
   is still one). `HospitalityComs.Rooms` owns those two.
+
+  ## The engagement is preloaded, and a client-side join could not replace it
+
+  A `RosterEntry` carries `engagement_id` and no role label, so a caller
+  rendering a roster has an id and nothing to call anybody. The obvious fix is
+  to join against the venue's people list — `HospitalityComs.Engagements
+  .list_engagements/1` — and it has a hole that only shows up in use:
+  `add_to_roster/3` accepts an engagement whose term has **not opened**, while
+  that list returns only engagements *active at the instant*. So next Monday's
+  starter, legitimately on next Tuesday's rota today, would render as a bare
+  UUID and the operator could not learn why.
+
+  One query, not one per row, and `list_engagement_periods/3` deliberately does
+  **not** preload: a different caller with a different association set gets a
+  different function, which is what `AGENTS.md` asks for.
   """
   @spec list_roster(EmployerScope.t(), Ecto.UUID.t()) ::
           {:ok, [RosterEntry.t()]} | {:error, :no_grant | :not_found}
@@ -299,7 +332,8 @@ defmodule HospitalityComs.Rosters do
        |> Records.of_room(shift_room_id)
        |> Records.rostered_at(scope.now)
        |> Records.entries()
-       |> EmployerRepo.all()}
+       |> EmployerRepo.all()
+       |> EmployerRepo.preload(:engagement)}
     end
   end
 

@@ -188,6 +188,44 @@ defmodule HospitalityComs.Rooms.Records do
   end
 
   @doc """
+  The latest `limit` shift rooms a query reaches, **returned earliest first**.
+
+  A descending scan with a limit, re-ordered ascending around it — the shape
+  `most_recent/2` has for messages, on the columns `earliest_first/1` orders by.
+
+  **This exists because `earliest_first/1` and a bound disagree about which end
+  matters.** A `limit` in front of the rota's own order returns the venue's
+  oldest rooms, which satisfies every count assertion and hides the shift the
+  manager created a minute ago. That is R11, and it is the failure it names.
+
+  **The key is `starts_at`, not `inserted_at`, and they are different lists.** A
+  manager who builds next month's rota before tonight's shift gets next month's
+  rooms in the page and tonight's outside it. The reason to key on `starts_at`
+  anyway is that a page must be a *contiguous suffix* of the order it is
+  displayed in: selecting on one column and displaying on another produces a
+  scattered subset, in which "there is more" says nothing about where the more
+  is. `HospitalityComs.Rooms.ShiftRoomPage`'s `complete` is a statement a client
+  acts on, and that is what makes it one.
+
+  **The caller asks for one more than it means to keep**, so `complete` costs a
+  row rather than a `count(*)`. Because the page comes back ascending, the probe
+  is the *earliest* room of the batch, which is why `ShiftRoomPage.bounded/2`
+  takes from the end.
+
+  **No new index.** `*_create_rooms.exs` already carries
+  `(venue_id, starts_at, id)`, and a btree is scanned in either direction.
+  """
+  @spec most_recent_rooms(Ecto.Queryable.t(), pos_integer()) :: Ecto.Query.t()
+  def most_recent_rooms(queryable, limit) when is_integer(limit) and limit > 0 do
+    latest =
+      from [room: room] in queryable,
+        order_by: [desc: room.starts_at, desc: room.id],
+        limit: ^limit
+
+    from room in subquery(latest), order_by: [asc: room.starts_at, asc: room.id]
+  end
+
+  @doc """
   The rooms a query reaches, once each.
 
   `DISTINCT` is needed because one person can hold several roster periods on one

@@ -75,6 +75,7 @@ defmodule HospitalityComs.RoomsTest do
   alias HospitalityComs.Rooms.Records
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComs.Rooms.ShiftRoom
+  alias HospitalityComs.Rooms.ShiftRoomPage
   alias HospitalityComs.Rooms.VenueRoom
   alias HospitalityComs.Rosters
   alias HospitalityComs.Venues
@@ -793,12 +794,20 @@ defmodule HospitalityComs.RoomsTest do
       # The count assertion alone certifies nothing: a bound that took the
       # **oldest** fifty returns fifty rows and satisfies it. So the bodies are
       # named — the first written must be absent and the last written present —
-      # and the fixture holds `limit + 1` rows, because a bound asserted against
-      # a room of twelve is a bound asserted against nothing.
+      # and the fixture holds more rows than the bound, because a bound asserted
+      # against a room of twelve is a bound asserted against nothing.
+      #
+      # **`limit + 2` rather than `limit + 1`, and the difference is measured.**
+      # `Records.most_recent/2` selects `limit + 1` rows as its probe, so
+      # against a room holding exactly `limit + 1` the descending scan and an
+      # ascending one select *the same set* — flipping the direction killed
+      # nothing in this file or in `room_controller_test.exs`. Two spare rows
+      # are what make the selection's direction observable at all. Found while
+      # writing the shift-room bound, which copied this shape.
       %{employer: employer, person: person, engagement: engagement} = engaged()
 
       limit = Rooms.recent_message_limit()
-      bodies = venue_room_messages_fixture(engagement, limit + 1, @now)
+      bodies = venue_room_messages_fixture(engagement, limit + 2, @now)
 
       assert {:ok, %MessagePage{messages: page, complete: false}} =
                Rooms.list_venue_room_messages(person, employer.venue_id)
@@ -817,7 +826,7 @@ defmodule HospitalityComs.RoomsTest do
       # every assertion in the test above passes.
       %{employer: employer, person: person, engagement: engagement} = engaged()
 
-      bodies = venue_room_messages_fixture(engagement, Rooms.recent_message_limit() + 1, @now)
+      bodies = venue_room_messages_fixture(engagement, Rooms.recent_message_limit() + 2, @now)
 
       assert {:ok, %MessagePage{messages: page}} =
                Rooms.list_venue_room_messages(person, employer.venue_id)
@@ -830,7 +839,7 @@ defmodule HospitalityComs.RoomsTest do
       # make "load the whole history" a lie.
       %{employer: employer, person: person, engagement: engagement} = engaged()
 
-      count = Rooms.recent_message_limit() + 1
+      count = Rooms.recent_message_limit() + 2
       bodies = venue_room_messages_fixture(engagement, count, @now)
 
       assert {:ok, %MessagePage{messages: whole, complete: true}} =
@@ -870,7 +879,7 @@ defmodule HospitalityComs.RoomsTest do
       roster_entry_fixture(employer, room, engagement.id)
 
       limit = Rooms.recent_message_limit()
-      bodies = shift_room_messages_fixture(engagement, room, limit + 1, @shift_starts)
+      bodies = shift_room_messages_fixture(engagement, room, limit + 2, @shift_starts)
 
       reader = person_at(person, DateTime.add(@grace_closes, 1, :hour))
 
@@ -1072,11 +1081,143 @@ defmodule HospitalityComs.RoomsTest do
 
       early = shift_room_fixture(employer, shift_type, @shift_starts, @shift_ends)
 
-      assert {:ok, rooms} = Rooms.list_shift_rooms(employer)
+      assert {:ok, %ShiftRoomPage{rooms: rooms, complete: true}} =
+               Rooms.list_shift_rooms(employer)
+
       assert Enum.map(rooms, & &1.id) == [early.id, late.id]
 
-      assert {:ok, []} = Rooms.list_shift_rooms(other)
+      assert {:ok, %ShiftRoomPage{rooms: [], complete: true}} = Rooms.list_shift_rooms(other)
       assert {:error, :not_found} = Rooms.fetch_shift_room(other, early.id)
+    end
+
+    test "hands the created room back carrying the type it was built from" do
+      # A caller rendering what it just created needs the same shape the list
+      # gives it, and a shift room has no display name of its own. Without this
+      # the render raises on an unloaded association.
+      {employer, _creation} = scoped_venue_fixture(@now)
+      shift_type = shift_type_fixture(employer)
+
+      room = shift_room_fixture(employer, shift_type, @shift_starts, @shift_ends)
+
+      assert %ShiftRoom{shift_type: %ShiftType{} = loaded} = room
+      assert loaded.id == shift_type.id
+      assert loaded.name == shift_type.name
+    end
+  end
+
+  ## The bound on the venue's shift rooms
+
+  describe "the shift-room bound" do
+    test "answers the venue's most recent rooms, and the page is not the oldest ones" do
+      # KTD-E6's central claim, and its own control in one body.
+      #
+      # The count assertion alone certifies nothing: `Records.earliest_first/1`
+      # is what this list is displayed in, and a `limit` in front of *that*
+      # returns the venue's oldest rooms, satisfies the count, and hides the
+      # shift the manager created a minute ago. So the rooms are named — the
+      # first created must be absent and the last present.
+      #
+      # **The fixture is `limit + 2`, and `limit + 1` is not enough — measured.**
+      # The read selects `limit + 1` rows as its probe, so against a venue
+      # holding exactly `limit + 1` the descending scan and an ascending one
+      # select *the same set*, and flipping the direction kills nothing. Two
+      # spare rows are what make the direction observable. The same arithmetic
+      # applies to `HospitalityComs.Rooms.MessagePage` and its fixture below.
+      %{employer: employer, shift_type: shift_type} = venue_with_types()
+
+      limit = Rooms.recent_shift_room_limit()
+      ids = shift_rooms_fixture(employer, shift_type, limit + 2, @shift_starts)
+
+      assert {:ok, %ShiftRoomPage{rooms: page, complete: false}} =
+               Rooms.list_shift_rooms(employer)
+
+      assert length(page) == limit
+
+      read = Enum.map(page, & &1.id)
+
+      refute List.first(ids) in read
+      assert List.last(ids) in read
+    end
+
+    test "orders the page earliest first, so a rota reads forwards" do
+      # Selecting the latest thirty means ordering descending somewhere. If that
+      # ordering is the one the caller sees, the rota renders backwards — and
+      # every assertion in the test above passes.
+      #
+      # The equality against the fixture's own tail is the strongest assertion
+      # in this block: it names *which* rooms and in what order, so both the
+      # selection's direction and the page's are pinned by one line. `limit + 2`
+      # for the reason above.
+      %{employer: employer, shift_type: shift_type} = venue_with_types()
+
+      limit = Rooms.recent_shift_room_limit()
+      ids = shift_rooms_fixture(employer, shift_type, limit + 2, @shift_starts)
+
+      assert {:ok, %ShiftRoomPage{rooms: page}} = Rooms.list_shift_rooms(employer)
+
+      assert Enum.map(page, & &1.id) == Enum.take(ids, -limit)
+    end
+
+    test "lifts the bound for :all, which is the control for the bound existing at all" do
+      # A limit applied to `:all` too would satisfy every assertion above and
+      # make "load them all" a lie.
+      %{employer: employer, shift_type: shift_type} = venue_with_types()
+
+      count = Rooms.recent_shift_room_limit() + 2
+      ids = shift_rooms_fixture(employer, shift_type, count, @shift_starts)
+
+      assert {:ok, %ShiftRoomPage{rooms: whole, complete: true}} =
+               Rooms.list_shift_rooms(employer, :all)
+
+      assert Enum.map(whole, & &1.id) == ids
+    end
+
+    test "calls the venue complete at exactly the limit" do
+      # The `limit + 1` probe's own boundary, and the control for `complete`
+      # being derived rather than hardcoded false.
+      %{employer: employer, shift_type: shift_type} = venue_with_types()
+
+      limit = Rooms.recent_shift_room_limit()
+      shift_rooms_fixture(employer, shift_type, limit, @shift_starts)
+
+      assert {:ok, %ShiftRoomPage{rooms: page, complete: true}} =
+               Rooms.list_shift_rooms(employer)
+
+      assert length(page) == limit
+    end
+
+    test "answers a venue with no shifts with an empty page that is complete" do
+      # The other end of `complete`. A flag derived from a non-empty list gets
+      # this one wrong.
+      {employer, _creation} = scoped_venue_fixture(@now)
+
+      assert {:ok, %ShiftRoomPage{rooms: [], complete: true}} = Rooms.list_shift_rooms(employer)
+    end
+
+    test "loads every page room's shift type, at both extents" do
+      # The name is the only label a shift room has, and a render that reaches
+      # for an unloaded association raises rather than rendering nil.
+      %{employer: employer, shift_type: shift_type} = venue_with_types()
+
+      shift_rooms_fixture(employer, shift_type, 2, @shift_starts)
+
+      for extent <- [:recent, :all] do
+        assert {:ok, %ShiftRoomPage{rooms: rooms}} = Rooms.list_shift_rooms(employer, extent)
+        assert length(rooms) == 2
+        assert Enum.all?(rooms, &match?(%ShiftType{}, &1.shift_type))
+      end
+    end
+
+    test "refuses a scope with no grant by function clause, at both arities" do
+      grantless = EmployerScope.for_employer(Ecto.UUID.generate(), @now)
+
+      assert_raise FunctionClauseError, fn ->
+        Rooms.list_shift_rooms(scope_of(:grantless, grantless))
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        Rooms.list_shift_rooms(scope_of(:grantless, grantless), :all)
+      end
     end
   end
 
@@ -1217,6 +1358,11 @@ defmodule HospitalityComs.RoomsTest do
   defp shift_room(employer) do
     shift_type = shift_type_fixture(employer, @grace_minutes)
     shift_room_fixture(employer, shift_type, @shift_starts, @shift_ends)
+  end
+
+  defp venue_with_types do
+    {employer, _creation} = scoped_venue_fixture(@now)
+    %{employer: employer, shift_type: shift_type_fixture(employer, @grace_minutes)}
   end
 
   defp members(person, venue_id) do

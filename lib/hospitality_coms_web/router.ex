@@ -74,6 +74,31 @@ defmodule HospitalityComsWeb.Router do
     get "/employer/venues/:venue_id/engagements", EmployerController, :engagements
     post "/employer/venues/:venue_id/invitations", EmployerController, :create_invitation
 
+    # The shift and roster half. A shift room *is* the shift — there is no
+    # `shifts` table and never was one — so `shift-rooms` is the collection a
+    # manager creates into, and the roster hangs off one.
+    #
+    # These nest under the venue like everything else on this half, and unlike
+    # the person side's `/api/shift-rooms/:id/messages`, which does not: there
+    # a room id is authorised by a roster overlap the caller already holds,
+    # while here every request is authorised by a grant at a *venue*, resolved
+    # from the path before the room id is looked at.
+    get "/employer/venues/:venue_id/shift-types", EmployerController, :shift_types
+    post "/employer/venues/:venue_id/shift-rooms", EmployerController, :create_shift_room
+    get "/employer/venues/:venue_id/shift-rooms", EmployerController, :shift_rooms
+
+    post "/employer/venues/:venue_id/shift-rooms/:shift_room_id/roster",
+         EmployerController,
+         :create_roster_entry
+
+    get "/employer/venues/:venue_id/shift-rooms/:shift_room_id/roster",
+        EmployerController,
+        :roster
+
+    delete "/employer/venues/:venue_id/shift-rooms/:shift_room_id/roster/:engagement_id",
+           EmployerController,
+           :delete_roster_entry
+
     # The other half of the handshake, and it is **not** under `/employer`. A
     # claimant needs no prior relationship to the venue — no grant, no
     # engagement, nothing but the code somebody handed them out of band — so
