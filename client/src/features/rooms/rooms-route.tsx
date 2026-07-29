@@ -1,5 +1,26 @@
 /**
- * The rooms surface: the list, and the one room that is open.
+ * The rooms surface: what the server says this worker can reach, what this
+ * browser remembers, and the one room that is open.
+ *
+ * ## Two lists, and they are not the same list
+ *
+ * **Rooms you are in** is the server's answer at this instant —
+ * `GET /api/venue-rooms`, and `GET /api/venues/:venue_id/shift-rooms` once a
+ * venue is chosen. It is where a room is *found*: venue rooms carry the venue's
+ * name and shift rooms carry the shift type's, so nothing in it is a uuid
+ * prefix. Before U12 there was no such endpoint and a room could only be added
+ * by pasting an id, which `room.ts` said in its own moduledoc.
+ *
+ * **Your list** is this browser's bookmarks. It is kept, and it is not a stale
+ * copy of the first: it holds `barred`, the one thing on this surface that was
+ * *learned* rather than fetched — nothing on the wire says in advance that a
+ * shift room is past its `closes_at` — and it is what survives a reload. Adding
+ * a room from the browse list is the same operation as pasting one, so a room
+ * reached either way takes exactly the same path into a channel.
+ *
+ * The paste box stays for the same reason the local list does: it is the only
+ * way into a room the browse list does not show, and removing a working
+ * affordance to celebrate a new one is a regression wearing a feature's hat.
  *
  * ## One room is joined at a time, on purpose
  *
@@ -8,7 +29,8 @@
  * person's readable shift-room set is unbounded and grows with every shift ever
  * rostered, so "clients must open shift rooms on demand rather than joining the
  * list". A list that joined every room in order to render it would be exactly
- * what that note warns against.
+ * what that note warns against, and the browse list makes that easier to get
+ * wrong rather than harder: it now *has* every room in it.
  *
  * The consequence is stated rather than hidden: a revocation is noticed while
  * the room is open, and on the next join otherwise — which is where KTD8 puts
@@ -26,15 +48,39 @@
  * stays and the next attempt to open it meets the refusal
  * `fetch_venue_room_membership/2` gives a suspended member, which is the truth
  * from the server rather than a state this client remembered.
+ *
+ * ## Why the browse panel's status line is not `role="status"`
+ *
+ * It is `aria-live="polite"`, which announces the same way without claiming the
+ * `status` role. This screen already has exactly one thing whose state a worker
+ * is waiting on — the open room — and two competing status regions make the
+ * important one harder to find rather than the secondary one easier.
  */
 
 import { useCallback, useState } from "react";
 
-import type { RoomClosure, RoomEntry, RoomKind, RoomRef, SendBar } from "./room";
-import { normaliseRoomId, roomKey, roomKindLabel } from "./room";
+import type {
+  RoomClosure,
+  RoomEntry,
+  RoomKind,
+  RoomRef,
+  SendBar,
+  ShiftRoomListing,
+  VenueRoomListing,
+} from "./room";
+import {
+  instantLabel,
+  normaliseRoomId,
+  roomKey,
+  roomKindLabel,
+  shiftRoomLabel,
+} from "./room";
 import type { RoomStore } from "./room-store";
 import { addRoom, findRoom, removeRoom, setRoomBar } from "./room-store";
 import { RoomView } from "./room-view";
+import { readFailureMessage } from "./refusal-message";
+import type { Loaded } from "./use-room-lists";
+import { useShiftRooms, useVenueRooms } from "./use-room-lists";
 
 export type RoomsRouteProps = {
   readonly store: RoomStore;
@@ -49,7 +95,7 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
   // it already had, React kept the mount, and nothing re-joined — so every
   // "open it again to check" correction this surface offers was a dead end,
   // including the one after a refused join and the one after a send refused
-  // `unauthorized`.
+  // `unauthorized`. It is also what re-fetches a room's history.
   const [openAttempt, setOpenAttempt] = useState(0);
 
   const openRoom = useCallback((key: string) => {
@@ -76,6 +122,17 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
     setOpenKey((current) => (current === roomKey(ref) ? null : current));
   }, []);
 
+  // Bookmarking and opening are one action, so a room found in the browse list
+  // is in the local list from the moment it is first opened — which is what
+  // makes `barred` and the reload survival apply to it too.
+  const openAndKeep = useCallback(
+    (ref: RoomRef) => {
+      update((current) => addRoom(current, ref));
+      openRoom(roomKey(ref));
+    },
+    [update, openRoom],
+  );
+
   const onEnded = useCallback(
     (entry: RoomEntry, closure: RoomClosure) => {
       switch (closure.reason) {
@@ -98,18 +155,15 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
   return (
     <section>
       <h1>Rooms</h1>
-      <p>
-        This list lives in this browser. There is no endpoint that serves it — the API has
-        four routes and none of them lists rooms — so a room is added by its id, and
-        everything <em>about</em> a room still comes from the server on every join.
-      </p>
 
-      <AddRoomForm
-        onAdd={(ref) => {
-          update((current) => addRoom(current, ref));
-          openRoom(roomKey(ref));
-        }}
-      />
+      <Browse onOpen={openAndKeep} />
+
+      <h2>Your list</h2>
+      <p>
+        This list lives in this browser. It is what is open when you come back, and it is
+        where this client remembers a room it has been told is read-only — nothing on the
+        wire says that in advance.
+      </p>
 
       <RoomList
         entries={entries}
@@ -120,6 +174,8 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
           closeIfOpen(entry.ref);
         }}
       />
+
+      <AddRoomForm onAdd={openAndKeep} />
 
       {open !== null && (
         <RoomView
@@ -138,6 +194,151 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
   );
 }
 
+/**
+ * The server's list: the venue rooms this person is in, and one venue's shift
+ * rooms at a time.
+ *
+ * One venue expanded at a time, because a shift-room list is a request per
+ * venue and expanding all of them on arrival would be a request per venue on
+ * arrival. Choosing is the asking.
+ */
+function Browse({ onOpen }: { readonly onOpen: (ref: RoomRef) => void }) {
+  const [chosen, setChosen] = useState<string | null>(null);
+  const venueRooms = useVenueRooms();
+  const shiftRooms = useShiftRooms(chosen);
+
+  return (
+    <section aria-label="Rooms you are in">
+      <h2>Rooms you are in</h2>
+
+      <ListState
+        state={venueRooms.state}
+        onRetry={venueRooms.reload}
+        empty="You are not in any venue rooms. A venue room appears here while an engagement at that venue is active."
+      />
+
+      {venueRooms.state.status === "ready" && venueRooms.state.value.length > 0 && (
+        <ul aria-label="Venue rooms">
+          {venueRooms.state.value.map((room) => (
+            <VenueRoomItem
+              key={room.venueId}
+              room={room}
+              chosen={chosen === room.venueId}
+              shiftRooms={shiftRooms.state}
+              onOpen={onOpen}
+              onChoose={() => {
+                setChosen((current) => (current === room.venueId ? null : room.venueId));
+              }}
+            />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function VenueRoomItem({
+  room,
+  chosen,
+  shiftRooms,
+  onOpen,
+  onChoose,
+}: {
+  readonly room: VenueRoomListing;
+  readonly chosen: boolean;
+  readonly shiftRooms: Loaded<readonly ShiftRoomListing[]>;
+  readonly onOpen: (ref: RoomRef) => void;
+  readonly onChoose: () => void;
+}) {
+  return (
+    <li>
+      <strong>{room.name}</strong>
+      <button
+        type="button"
+        onClick={() => {
+          onOpen({ kind: "venue", id: room.venueId });
+        }}
+      >
+        Open {room.name}
+      </button>
+      <button type="button" aria-expanded={chosen} onClick={onChoose}>
+        Shift rooms at {room.name}
+      </button>
+
+      {chosen && (
+        <>
+          <ListState
+            state={shiftRooms}
+            empty="No shift rooms here. A shift room appears once you have been on its roster."
+          />
+          {shiftRooms.status === "ready" && shiftRooms.value.length > 0 && (
+            <ul aria-label={`Shift rooms at ${room.name}`}>
+              {shiftRooms.value.map((shift) => (
+                <li key={shift.shiftRoomId}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpen({ kind: "shift", id: shift.shiftRoomId });
+                    }}
+                  >
+                    Open {shiftRoomLabel(shift)}
+                  </button>
+                  {/*
+                    The attribute keeps the instant a machine can read and the
+                    text is for the person, which is what `<time>` is for. Not
+                    comparing `closes_at` against this browser's clock is the
+                    rule (see `ShiftRoomListing`); not *formatting* it never
+                    was, and rendering it raw put `2026-03-09T21:30:00Z` on
+                    screen next to a term this client had already formatted.
+                  */}
+                  <time dateTime={shift.closesAt}>
+                    closes {instantLabel(shift.closesAt)}
+                  </time>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </li>
+  );
+}
+
+/**
+ * The three non-list states a fetched list has, and nothing when it has rows.
+ *
+ * `aria-live` without `role="status"` — see this file's header.
+ */
+function ListState<T>({
+  state,
+  empty,
+  onRetry,
+}: {
+  readonly state: Loaded<readonly T[]>;
+  readonly empty: string;
+  readonly onRetry?: () => void;
+}) {
+  switch (state.status) {
+    case "idle":
+      return null;
+    case "loading":
+      return <p aria-live="polite">Loading…</p>;
+    case "failed":
+      return (
+        <div>
+          <p aria-live="polite">{readFailureMessage(state.failure)}</p>
+          {onRetry !== undefined && (
+            <button type="button" onClick={onRetry}>
+              Try again
+            </button>
+          )}
+        </div>
+      );
+    case "ready":
+      return state.value.length === 0 ? <p aria-live="polite">{empty}</p> : null;
+  }
+}
+
 function RoomList({
   entries,
   openKey,
@@ -150,7 +351,7 @@ function RoomList({
   readonly onForget: (entry: RoomEntry) => void;
 }) {
   if (entries.length === 0) {
-    return <p>No rooms yet. Add one by its id.</p>;
+    return <p>No rooms yet. Open one from the list above, or add one by its id.</p>;
   }
 
   return (

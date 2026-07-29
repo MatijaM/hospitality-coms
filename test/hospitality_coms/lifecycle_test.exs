@@ -65,6 +65,7 @@ defmodule HospitalityComs.LifecycleTest do
   alias HospitalityComs.Profiles.Disclosure
   alias HospitalityComs.Repo
   alias HospitalityComs.Rooms
+  alias HospitalityComs.Rooms.MessagePage
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComs.RoomsFixtures
   alias HospitalityComs.Rosters
@@ -328,7 +329,7 @@ defmodule HospitalityComs.LifecycleTest do
 
       assert {:ok, _} = Lifecycle.erase_person(person_at(person, @now))
 
-      assert {:ok, messages} =
+      assert {:ok, %MessagePage{messages: messages}} =
                Rooms.list_venue_room_messages(person_at(colleague, @now), employer.venue_id)
 
       assert Enum.map(messages, & &1.id) == [message.id]
@@ -752,7 +753,7 @@ defmodule HospitalityComs.LifecycleTest do
       # Reading is untouched, which is the control on the gate being about the
       # write: the history is there for thirty days and a clock is what closure
       # put on it, not a wall.
-      assert {:ok, [_one]} =
+      assert {:ok, %MessagePage{messages: [_one]}} =
                Rooms.list_venue_room_messages(person_at(person, later), employer.venue_id)
 
       assert {:ok, run} = Lifecycle.sweep(DateTime.add(@now, 3650, :day))

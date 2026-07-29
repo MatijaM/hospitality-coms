@@ -539,14 +539,49 @@ defmodule HospitalityComs.Rooms.Records do
   end
 
   @doc """
-  The shift rooms this person may read at `instant`, earliest first.
+  The shift rooms this person may read at `instant`, earliest first, optionally
+  narrowed to one venue.
 
   The same overlap, asked from the other end. A person engaged today sees no
   room from before their engagement, because they were on nobody's roster then
   — which is KTD14 refusing the day-one hire the venue's whole shift history.
+
+  ## The venue is a parameter here rather than a `where` at the call site
+
+  `AGENTS.md`: "Queries live in the sub-module that owns the schema. Don't
+  rebuild ad-hoc queries at call sites — add a parameter to the owning function
+  instead." `nil` is every venue, which is the arity U6 shipped; a venue id
+  narrows it, and it narrows it **in the query** rather than in whatever is
+  rendering the answer. Not a disclosure either way — every row is one this
+  person may read — but shipping more than was asked becomes a leak the first
+  time the rule changes.
+
+  It is applied to the roster join's `:room` binding, before `distinct_rooms/1`
+  collapses it, so it is the same clause the employer-side list uses.
+
+  ## It does not consult suspension, and that is KTD18
+
+  Deliberately, and it is the *venue-filtered* arity that makes the omission
+  easy to lose: a list of rooms "at a venue" reads like something a person out
+  of that venue's room should not get. Suspension is the venue room only. A
+  suspended person is still on their shift rosters, still a member of their
+  shift rooms, and still able to read and write in them — `HospitalityComs
+  .RoomsTest` pins all three next to their absence from `venues_of_person/2`,
+  which is the control.
+
+  ## The shift type is *not* loaded here
+
+  A `ShiftRoom` has two instants and a `shift_type_id` and no display name at
+  all, so a caller rendering this list needs the type's name — and it cannot be
+  a `preload:` in this query. `distinct_rooms/1` selects the joined `:room`
+  binding rather than the `from` source, and Ecto refuses a preload on a query
+  whose `from` binding is not what it selects. `HospitalityComs.Rooms
+  .list_readable_shift_rooms/2` preloads it after the read, which is where
+  `AGENTS.md` asks for a preload anyway: "in the context function".
   """
-  @spec readable_shift_rooms(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
-  def readable_shift_rooms(person_id, %DateTime{} = instant) when is_binary(person_id) do
+  @spec readable_shift_rooms(Ecto.UUID.t(), Ecto.UUID.t() | nil, DateTime.t()) :: Ecto.Query.t()
+  def readable_shift_rooms(person_id, venue_id, %DateTime{} = instant)
+      when is_binary(person_id) do
     active =
       Engagement
       |> EngagementRecords.of_person(person_id)
@@ -555,14 +590,19 @@ defmodule HospitalityComs.Rooms.Records do
     roster()
     |> overlapping_open_interval()
     |> where([entry: entry], entry.engagement_id in subquery(active))
+    |> maybe_of_venue(venue_id)
     |> distinct_rooms()
     |> earliest_first()
   end
 
+  @spec maybe_of_venue(Ecto.Queryable.t(), Ecto.UUID.t() | nil) :: Ecto.Queryable.t()
+  defp maybe_of_venue(queryable, nil), do: queryable
+  defp maybe_of_venue(queryable, venue_id), do: of_venue(queryable, venue_id)
+
   ## Messages
 
   @doc """
-  A venue room's messages, oldest first.
+  A venue room's messages, unordered.
 
   `shift_room_id IS NULL` is what makes a message the venue room's. There is no
   time filter and there will not be one: KTD14 gives the venue room full history
@@ -576,17 +616,20 @@ defmodule HospitalityComs.Rooms.Records do
   why. What the caller cannot do is choose the venue: it comes off the
   engagement `HospitalityComs.Rooms.fetch_membership/2` resolved for this person
   at this instant.
+
+  The ordering is `oldest_first/1` or `most_recent/2` and is applied by the
+  caller, because the two disagree about which end of the room they start from
+  and agree about the order the answer arrives in.
   """
   @spec venue_room_messages(Ecto.UUID.t()) :: Ecto.Query.t()
   def venue_room_messages(venue_id) when is_binary(venue_id) do
     from message in RoomMessage,
       where: message.venue_id == ^venue_id,
-      where: is_nil(message.shift_room_id),
-      order_by: [asc: message.sent_at, asc: message.id]
+      where: is_nil(message.shift_room_id)
   end
 
   @doc """
-  A shift room's messages, oldest first.
+  A shift room's messages, unordered.
 
   Unfiltered by instant for the same reason: the room stops accepting messages
   at `closes_at` and stops being readable never. Who may run this is
@@ -600,9 +643,52 @@ defmodule HospitalityComs.Rooms.Records do
   """
   @spec shift_room_messages(Ecto.UUID.t()) :: Ecto.Query.t()
   def shift_room_messages(room_id) when is_binary(room_id) do
-    from message in RoomMessage,
-      where: message.shift_room_id == ^room_id,
-      order_by: [asc: message.sent_at, asc: message.id]
+    from message in RoomMessage, where: message.shift_room_id == ^room_id
+  end
+
+  @doc """
+  Messages oldest first, with `id` breaking ties.
+
+  The order a room is read in and the order the live stream that follows it
+  arrives in. `id` is random on a `binary_id` schema, so ordering by `sent_at`
+  alone would leave two messages stamped in the same second in an arbitrary
+  order — and the clock is injectable here, so "the same second" is a case tests
+  produce deliberately rather than a coincidence.
+  """
+  @spec oldest_first(Ecto.Queryable.t()) :: Ecto.Query.t()
+  def oldest_first(queryable) do
+    from message in queryable, order_by: [asc: message.sent_at, asc: message.id]
+  end
+
+  @doc """
+  The newest `limit` messages a query reaches, **returned oldest first**.
+
+  A descending scan with a limit, re-ordered ascending around it. Two things are
+  deliberate.
+
+  **The re-ordering is SQL's, not `Enum.reverse/1`'s.** `AGENTS.md` asks for
+  sorting to be pushed into the database, and the outer `order_by` is what makes
+  the page's own order a property of the query rather than of whichever caller
+  remembered to flip it.
+
+  **The caller asks for one more than it means to keep.** That extra row is how
+  `HospitalityComs.Rooms.MessagePage` answers "is this the whole history"
+  exactly, at the cost of a row rather than a second `count(*)`. Because the
+  page comes back ascending, the probe is the *oldest* row of the batch, which
+  is why `MessagePage.bounded/2` takes from the end.
+
+  **No new index.** `*_create_rooms.exs` already carries
+  `(venue_id, shift_room_id, sent_at, id)`; the column combination is unchanged
+  and a btree is scanned in either direction.
+  """
+  @spec most_recent(Ecto.Queryable.t(), pos_integer()) :: Ecto.Query.t()
+  def most_recent(queryable, limit) when is_integer(limit) and limit > 0 do
+    newest =
+      from message in queryable,
+        order_by: [desc: message.sent_at, desc: message.id],
+        limit: ^limit
+
+    from message in subquery(newest), order_by: [asc: message.sent_at, asc: message.id]
   end
 
   ## Suspensions

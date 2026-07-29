@@ -1,14 +1,11 @@
 /**
- * The typed client for the four endpoints this API has today.
+ * The typed client for the session endpoints, plus **one generic primitive**
+ * that every person-side read goes through.
  *
  *     POST   /api/log-in         {email}  -> 202
  *     POST   /api/log-in/token   {token}  -> 201 {token, person}
  *     GET    /api/me                      -> 200 {person}
  *     DELETE /api/log-out                 -> 204
- *
- * There are no others. `lib/hospitality_coms_web/router.ex` declares exactly
- * these plus a dev-only mailbox preview, and U7–U11 have not landed theirs, so
- * anything else a surface might want is absent rather than stubbed.
  *
  * Two properties are deliberate.
  *
@@ -20,6 +17,23 @@
  * `fetch` is an argument. That is the whole of the test seam — no request
  * interception, no service worker, no HTTP recording — and it is why the tests
  * for this file are fast and say what they mean.
+ *
+ * ## Why `read` is generic and the room routes are not methods here
+ *
+ * U12's room routes are the first person-side reads this API has, and the
+ * profile surface is waiting on the same fork
+ * (`features/profile/contract.ts`). Four `venueRooms()`/`shiftRooms()`/…
+ * methods here would be easier to fake and would make this file a grab-bag of
+ * every feature's endpoints by the time the profile lands its seven.
+ *
+ * So the layering is: **a feature owns its paths and its wire shapes; this file
+ * owns "an authenticated GET that decodes or fails".** `features/rooms/rooms-api.ts`
+ * is the first tenant, and a profile one adds nothing here at all.
+ *
+ * The session calls above stay as named methods. They are not reads of a
+ * feature's resource — they are how a session begins and ends, they are the
+ * only calls that are not GETs, and two of them run before there is a token to
+ * pass.
  */
 
 import { decodeErrorEnvelope, decodePersonEnvelope, decodeSession } from "./decode";
@@ -81,6 +95,26 @@ export type ApiClient = {
    * token is anonymous.
    */
   logOut(sessionToken: string): Promise<ApiResult<null>>;
+
+  /**
+   * An authenticated `GET`, decoded by the caller.
+   *
+   * `path` is absolute from the API root and carries its own query string; the
+   * caller builds it, because the caller is the one that knows what its
+   * resource is called. Only `200` is a success — every route this serves
+   * answers `200` or the error envelope, so a `204` or a redirect is a contract
+   * drift and surfaces as a failure rather than as an empty value.
+   *
+   * `decode` returns `null` for "this is not that", exactly as every decoder in
+   * `api/decode.ts` does, and `null` becomes `malformed_response`. That is what
+   * keeps a field the server renames a *named* failure instead of `undefined`
+   * arriving in a heading.
+   */
+  read<T>(
+    path: string,
+    sessionToken: string,
+    decode: (body: unknown) => T | null,
+  ): Promise<ApiResult<T>>;
 };
 
 const JSON_HEADERS: Readonly<Record<string, string>> = {
@@ -236,6 +270,15 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         "/api/log-out",
         { method: "DELETE", headers: { ...JSON_HEADERS, ...bearer(sessionToken) } },
         204,
+      );
+    },
+
+    read(path, sessionToken, decode) {
+      return expectBody(
+        path,
+        { method: "GET", headers: { ...JSON_HEADERS, ...bearer(sessionToken) } },
+        200,
+        decode,
       );
     },
   };

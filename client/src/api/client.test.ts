@@ -354,3 +354,87 @@ describe("base URL", () => {
     expect(requests[0]?.url).toBe("http://api.test/api/log-in");
   });
 });
+
+describe("read", () => {
+  it("sends the bearer token and answers the decoded value on 200", async () => {
+    // The primitive every person-side read goes through. The path is the
+    // caller's — a feature owns what its resource is called — so this asserts
+    // it is used verbatim rather than assembled here.
+    const { fetch, requests } = stubFetch(respond(200, { venue_rooms: [] }));
+
+    const result = await createApiClient({ baseUrl, fetch }).read(
+      "/api/venue-rooms?extent=all",
+      "c2Vzc2lvbg",
+      (body) => body,
+    );
+
+    expect(result).toEqual({ ok: true, value: { venue_rooms: [] } });
+    expect(requests[0]?.url).toBe(`${baseUrl}/api/venue-rooms?extent=all`);
+    expect(requests[0]?.init.method).toBe("GET");
+    expect(requests[0]?.init.headers).toMatchObject({
+      Authorization: "Bearer c2Vzc2lvbg",
+    });
+  });
+
+  it("turns a decoder's null into malformed_response rather than a value", async () => {
+    // The property the whole decoder posture rests on: a field the server
+    // renames is a *named* failure, not `undefined` arriving in a heading.
+    const { fetch } = stubFetch(respond(200, { venue_rooms: "not a list" }));
+
+    const result = await createApiClient({ baseUrl, fetch }).read(
+      "/api/venue-rooms",
+      "c2Vzc2lvbg",
+      () => null,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      failure: {
+        kind: "malformed_response",
+        status: 200,
+        message: "the 200 response was not the expected shape",
+      },
+    });
+  });
+
+  it("reads the error envelope out of a refusal", async () => {
+    // `RoomController` answers 404 for a room that does not exist and one this
+    // session may not reach, identically (AE1). The client keeps the code so a
+    // rooms-specific sentence can be chosen for it.
+    const { fetch } = stubFetch(
+      respond(404, envelope("not_found", "no such room, or it is not one you can reach")),
+    );
+
+    const result = await createApiClient({ baseUrl, fetch }).read(
+      "/api/venue-rooms/whatever/messages",
+      "c2Vzc2lvbg",
+      (body) => body,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      failure: {
+        kind: "api_error",
+        status: 404,
+        code: "not_found",
+        rawCode: "not_found",
+        message: "no such room, or it is not one you can reach",
+      },
+    });
+  });
+
+  it("does not treat a 204 as a success, because no room route answers one", async () => {
+    // Only 200 is the contract. A status nobody planned for is a drift, and a
+    // drift that decoded as an empty list would render an empty room list to a
+    // worker who is in three.
+    const { fetch } = stubFetch(respond(204));
+
+    const result = await createApiClient({ baseUrl, fetch }).read(
+      "/api/venue-rooms",
+      "c2Vzc2lvbg",
+      (body) => body,
+    );
+
+    expect(result.ok).toBe(false);
+  });
+});

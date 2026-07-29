@@ -17,8 +17,54 @@ export function createFakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     redeemMagicLink: vi.fn(() => Promise.resolve(fails<Session>(unauthorized()))),
     currentPerson: vi.fn(() => Promise.resolve(fails<Person>(unauthorized()))),
     logOut: vi.fn(() => Promise.resolve(ok(null))),
+    // Fails by default, like the other two reads above: a surface that renders
+    // whatever `read` gave it must be tested against the failure path having
+    // been reachable. A test that wants answers passes `readsFrom`.
+    read: vi.fn(() => Promise.resolve(fails<never>(offline()))),
     ...overrides,
   };
+}
+
+/**
+ * A `read` that answers the paths a test names and 404s everything else.
+ *
+ * The keys are **paths without the query string**, because the query string is
+ * `extent` and a test that wanted to answer the two extents differently is
+ * asking about the bound rather than about the route — `bodiesFor` takes the
+ * whole path when it needs to. The bodies go through the real decoders, so a
+ * fixture that is not the shape the server sends fails as
+ * `malformed_response` here exactly as it would in a browser.
+ */
+export function readsFrom(bodies: Readonly<Record<string, unknown>>): ApiClient["read"] {
+  return vi.fn((path: string, _token: string, decode: (body: unknown) => unknown) => {
+    const body = path in bodies ? bodies[path] : bodies[path.split("?")[0] ?? path];
+
+    if (body === undefined) {
+      return Promise.resolve(
+        fails<never>({
+          kind: "api_error",
+          status: 404,
+          code: "not_found",
+          rawCode: "not_found",
+          message: "no such room, or it is not one you can reach",
+        }),
+      );
+    }
+
+    const value = decode(body);
+
+    if (value === null) {
+      return Promise.resolve(
+        fails<never>({
+          kind: "malformed_response",
+          status: 200,
+          message: "the 200 response was not the expected shape",
+        }),
+      );
+    }
+
+    return Promise.resolve({ ok: true as const, value });
+  }) as ApiClient["read"];
 }
 
 export function ok<T>(value: T): ApiResult<T> {

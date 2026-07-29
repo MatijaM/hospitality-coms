@@ -352,7 +352,10 @@ describe("an authenticated session", () => {
  */
 describe("the landing page's tabs", () => {
   /** A sentence each surface renders and neither of the other two does. */
-  const ROOMS = /no rooms yet\. add one by its id/i;
+  // The rooms surface, named by a sentence only it renders. It moved when the
+  // browse list landed: the empty local list now points at the server's list
+  // above it rather than only at the paste box.
+  const ROOMS = /no rooms yet\. open one from the list above, or add one by its id/i;
   const PEERS = /anybody you worked with at the same place at the same time/i;
   const PROFILE = /no employer has confirmed a job for you yet/i;
 
