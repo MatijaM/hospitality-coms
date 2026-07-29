@@ -55,6 +55,7 @@ defmodule HospitalityComs.PostgresRolesTest do
 
   import ExUnit.CaptureLog
 
+  alias HospitalityComs.Repo.Migrations.BoundEmployerLoginConnections
   alias HospitalityComs.Repo.Migrations.CreateEmployerLoginRole
   alias HospitalityComs.Repo.Migrations.CreatePostgresRoles
   alias HospitalityComs.Repo.Migrations.GrantEmployerZone
@@ -73,6 +74,7 @@ defmodule HospitalityComs.PostgresRolesTest do
   @profile_grants_migration "grant_profile_zone"
   @retention_grants_migration "grant_retention_zone"
   @login_role_migration "create_employer_login_role"
+  @login_timeouts_migration "bound_employer_login_connections"
 
   # In the order Ecto applies them, which is the reverse of the order
   # `rolled_back_grants/0` unwinds them in. Every unit that grants adds an
@@ -95,6 +97,14 @@ defmodule HospitalityComs.PostgresRolesTest do
   # cannot start. Listing it here is what keeps the unwind in an order where
   # that cannot happen; `"loses the login role's membership ..."` below pins the
   # property itself.
+  #
+  # #45's `bound_employer_login_connections` is last, and it is here for #17's
+  # reason rather than for a `pg_shdepend` one. It writes a `pg_db_role_setting`
+  # row against `employer_login`, and `DROP ROLE` takes those with it in the same
+  # silence it takes a membership in: the drop succeeds, and re-applying
+  # `create_employer_login_role` brings back a role carrying neither. A login
+  # role dropped underneath it therefore leaves a credential that is unbounded
+  # rather than one that is refused, which is the quieter of the two failures.
   @grant_migrations [
     {@employer_grants_migration, GrantEmployerZone},
     {@engagement_grants_migration, GrantEngagementZone},
@@ -102,7 +112,8 @@ defmodule HospitalityComs.PostgresRolesTest do
     {@peer_grants_migration, GrantPeerZone},
     {@profile_grants_migration, GrantProfileZone},
     {@retention_grants_migration, GrantRetentionZone},
-    {@login_role_migration, CreateEmployerLoginRole}
+    {@login_role_migration, CreateEmployerLoginRole},
+    {@login_timeouts_migration, BoundEmployerLoginConnections}
   ]
 
   @migrations [{@roles_migration, CreatePostgresRoles} | @grant_migrations]
@@ -188,7 +199,19 @@ defmodule HospitalityComs.PostgresRolesTest do
       assert memberships_of(@login_role) == []
     end
 
-    test "bounds how long the employer role can hold a connection" do
+    test "writes two settings against employer_role, which is a catalogue claim and only that" do
+      # This test used to be called "bounds how long the employer role can hold
+      # a connection", and issue #45 measured that it does not and never did.
+      # Role settings are applied at login for the *session user*;
+      # `EmployerRepo` reaches `employer_role` with `SET ROLE`, which re-reads
+      # nothing, so a connection assuming it reports `statement_timeout = 0`
+      # with both rows sitting right here in `pg_roles`.
+      #
+      # The rows are left in place — see `bound_employer_login_connections` for
+      # why — so the assertion is unchanged and only its name and its meaning
+      # are. What actually bounds an employer connection is now on the login
+      # role, and `HospitalityComs.BoundaryTest` asserts *that* against a live
+      # connection, which is the only instrument that can tell the two apart.
       settings = role_settings("employer_role")
 
       assert Enum.any?(settings, &String.starts_with?(&1, "statement_timeout="))
@@ -211,6 +234,60 @@ defmodule HospitalityComs.PostgresRolesTest do
       # `rolled_back_grants/0` silently did nothing, the assertion would be
       # measuring an empty database instead of a rolled-back one.
       assert table_grant_count() > 0
+    end
+  end
+
+  describe "the login role's timeouts" do
+    test "come off when migrated down and go back on when migrated up again" do
+      # #45's migration is the one thing in this file whose whole effect *is* a
+      # role-level setting, so reversibility here means the two rows come off
+      # and go back. The catalogue is the right instrument for that claim and
+      # the wrong one for the behavioural claim: a setting takes effect at
+      # login, and nothing inside the sandbox transaction can open a connection,
+      # so `HospitalityComs.BoundaryTest` owns the live reading.
+      assert timeout_settings(@login_role) == [
+               "idle_in_transaction_session_timeout=10s",
+               "statement_timeout=5s"
+             ]
+
+      migrate(@login_timeouts_migration, :down)
+
+      assert timeout_settings(@login_role) == []
+
+      capture_log(fn -> migrate(@login_timeouts_migration, :up) end)
+
+      assert timeout_settings(@login_role) == [
+               "idle_in_transaction_session_timeout=10s",
+               "statement_timeout=5s"
+             ]
+    end
+
+    test "are taken by DROP ROLE in silence, which is why the migration is in the list above" do
+      # The same measurement #17 made about the membership, made about the
+      # settings, and it is why `bound_employer_login_connections` is the last
+      # entry in `@grant_migrations` rather than an unlisted migration that
+      # happens to touch a role.
+      #
+      # `DROP ROLE` does not refuse on account of a `pg_db_role_setting` row —
+      # settings are not `pg_shdepend` rows — it removes them without comment,
+      # and the role a re-applied `up` brings back carries none. So a login role
+      # dropped underneath this migration leaves a credential that is
+      # *unbounded* rather than one that fails loudly, and the migration that
+      # would have bounded it is already recorded as applied.
+      @grant_migrations
+      |> Enum.reject(fn {name, _module} -> name == @login_timeouts_migration end)
+      |> Enum.reverse()
+      |> Enum.each(fn {name, _module} -> migrate(name, :down) end)
+
+      refute role_exists?(@login_role)
+      assert timeout_settings(@login_role) == []
+
+      capture_log(fn -> migrate(@login_role_migration, :up) end)
+
+      # The control on the sentence above: the role really is back, so the empty
+      # setting list is a role carrying nothing rather than a role that is absent.
+      assert role_exists?(@login_role)
+      assert timeout_settings(@login_role) == []
     end
   end
 
@@ -323,6 +400,10 @@ defmodule HospitalityComs.PostgresRolesTest do
     %{rows: rows} = Repo.query!("SELECT rolconfig FROM pg_roles WHERE rolname = $1", [name])
     settings_from_rows(rows)
   end
+
+  # Sorted, so the assertions read as a set rather than depending on the order
+  # `ALTER ROLE` happened to append them in.
+  defp timeout_settings(name), do: name |> role_settings() |> Enum.sort()
 
   defp settings_from_rows([[settings]]) when is_list(settings), do: settings
   defp settings_from_rows(_rows), do: []

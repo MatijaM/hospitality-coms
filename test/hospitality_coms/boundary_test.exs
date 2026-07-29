@@ -2446,24 +2446,44 @@ defmodule HospitalityComs.BoundaryTest do
       assert dependent_objects(Zones.employer_login_role()) == ["table venues"]
     end
 
-    test "carries no role-level settings, so U1's timeouts are not enabled by accident" do
-      # A finding this unit surfaces and deliberately does not act on. U1 set
-      # `statement_timeout` and `idle_in_transaction_session_timeout` on
-      # `employer_role` and called them part of the time model. Measured: they
-      # have never taken effect, because role-level settings are applied at
-      # login for the *session user* and `SET ROLE` does not re-apply them.
+    test "bounds how long one of its statements may run, on a live connection" do
+      # #17 pinned the *absence* of this, so that turning it on had to be
+      # deliberate. Issue #45 is that deliberate act, and the inversion is not a
+      # weakening: the assertion it replaces said "no cap is in force", this one
+      # says "this cap is in force", and the second is strictly the harder claim.
       #
-      # Moving them onto the login role is what would make them effective, and
-      # that is a behaviour change with its own risk — a ten-second
-      # idle-in-transaction cap on a sandbox connection that holds a
-      # transaction open for the length of a test is a flake generator. This
-      # assertion is what stops it happening as a side effect of #17.
-      assert role_settings(Zones.employer_login_role()) == []
+      # **It is read from a connection rather than from `pg_roles`, and that
+      # distinction is the whole of the issue.** U1 wrote both settings onto
+      # `employer_role` and its migration called them part of the time model;
+      # they never took effect, because role settings are applied at login for
+      # the *session user* and `EmployerRepo` reaches `employer_role` by
+      # `SET ROLE`. A catalogue read would have passed for twelve units while
+      # nothing was bounded. `effective/2` asks the connection, after
+      # `after_connect` has run, which is the only instrument that can tell the
+      # two apart.
+      assert effective(EmployerRepo, "statement_timeout") == "5s"
     end
 
-    test "is measured by a query that can see a setting, which is what makes the above mean anything" do
-      # The control. Every role in the cluster has no settings by default, so
-      # an empty list is also what a query reading the wrong column returns.
+    test "bounds how long one of its transactions may sit idle, on the same connection" do
+      assert effective(EmployerRepo, "idle_in_transaction_session_timeout") == "10s"
+    end
+
+    test "is what the same instrument reports as 0 when a role is only assumed, which is the bug" do
+      # The control, and it is the load-bearing one in this block. Both
+      # assertions above are satisfied by a helper that quietly read
+      # `pg_roles.rolconfig` instead — `employer_role` carries U1's identical
+      # pair there to this day, so a catalogue read would answer "5s" and "10s"
+      # and neither test would notice.
+      #
+      # Here the same helper is pointed at a connection that reached
+      # `employer_role` the way `EmployerRepo` used to: by assumption, from a
+      # session that logged in as somebody else. The catalogue says 5s. The
+      # connection says 0. A helper reading the catalogue fails this test.
+      assert assumed_role_setting("statement_timeout") == "0"
+      assert assumed_role_setting("idle_in_transaction_session_timeout") == "0"
+
+      # And the pair really is in the catalogue, so the contrast above is
+      # between two live values rather than between a value and an absence.
       settings = role_settings(Zones.employer_role())
 
       assert Enum.any?(settings, &String.starts_with?(&1, "statement_timeout="))
@@ -3308,6 +3328,34 @@ defmodule HospitalityComs.BoundaryTest do
 
   defp settings_from_rows([[settings]]) when is_list(settings), do: settings
   defp settings_from_rows(_rows), do: []
+
+  # What a setting is *worth* on a connection, as opposed to what the catalogue
+  # says about the role. Issue #45 is the whole distinction: `pg_roles.rolconfig`
+  # records what somebody wrote, `current_setting/1` records what Postgres will
+  # enforce, and for twelve units those two disagreed with nothing to say so.
+  #
+  # A raw `query!/2` on `EmployerRepo` deliberately bypasses the unscoped guard
+  # — documented in that module and pinned elsewhere in this file — which is
+  # what lets this ask the connection a question that has nothing to do with a
+  # venue.
+  defp effective(repo, setting) do
+    %{rows: [[value]]} = repo.query!("SELECT current_setting($1)", [setting])
+    value
+  end
+
+  # The same reading, taken the way `EmployerRepo` used to arrive at
+  # `employer_role`: log in as somebody else, then assume it. `SET LOCAL` so the
+  # sandbox transaction's rollback puts the connection back however the
+  # assertions above it go.
+  defp assumed_role_setting(setting) do
+    Repo.query!("SET LOCAL ROLE #{Zones.employer_role()}", [])
+
+    try do
+      effective(Repo, setting)
+    after
+      Repo.query!("RESET ROLE", [])
+    end
+  end
 
   # Every relation the boundary has an opinion about: all three zones' tables
   # and both employer views. The login role must hold nothing on any of them,
