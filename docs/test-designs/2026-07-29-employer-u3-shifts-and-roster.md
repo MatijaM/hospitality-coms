@@ -432,3 +432,139 @@ within the response.
 | Regression protection | 4/5 | three disclosed regressions, one of which (`room_controller_test.exs`) is proved by a file *not* changing, which is weaker evidence than a new assertion |
 | Falsifiability | 5/5 | every row names a mechanism whose removal fails it; rows 1 and 15 name the *ordering*, which is the defect the plan says has already been shipped elsewhere |
 | Risk of a vacuous pass | 4/5 | closed on the headline rows; the residue is that rows 10–18 assert against a response rather than against the row, so a render echoing its own request would pass some of them — row 11 is what reaches the row |
+
+## Revisions made during implementation
+
+Recorded rather than silently applied, because the gate exists to be departed from explicitly. The
+sections above are not edited to agree with what shipped.
+
+1. **The brief's own fixture size was wrong, and it is the finding of the unit.** Every "Controls"
+   line above says the fixture holds `bound + 1` rows, copying #48. **Measured: at `bound + 1` the
+   selection direction is unobservable.** The read selects `limit + 1` rows as its probe, so
+   against a venue holding exactly `limit + 1` a descending scan and an ascending one return *the
+   same set*; `bounded/2` then takes the same tail from both. Flipping
+   `Records.most_recent_rooms/2` to ascending killed **zero** tests.
+
+   **The same hole is in #48's merged message bound**, and it was measured there too: flipping
+   `Records.most_recent/2` to ascending killed zero tests in `rooms_test.exs` and
+   `room_controller_test.exs`. That is the defect the whole bound exists to prevent — a page taken
+   from the wrong end satisfies every count assertion and hides the newest rows — so a fixture that
+   cannot see it certifies nothing about it.
+
+   Six fixtures moved to `limit + 2`: this unit's two and #48's four. The flip now kills three
+   tests in each family. `room_controller_test.exs` was **not** touched, so its regression role for
+   the `Extent` extraction stays clean; its own message fixture is still `limit + 1` and is
+   end-to-end coverage rather than a bound proof.
+
+2. **The unit did not split into two pull requests, and the brief's own commit-split promise was
+   not kept either.** Decision 1 argued for one PR with two commits, shift half then roster half.
+   The two halves share `employer_controller.ex`, `router.ex` and `employer_controller_test.exs`,
+   including one interleaved moduledoc, so splitting the commit meant hand-building a
+   shift-only variant of three files and restoring it — fiddly, with a real chance of an
+   intermediate commit that does not compile, for a reviewability gain a single PR diff already
+   provides. One implementation commit, plus a separate commit for revision 1's finding.
+
+3. **The plan's file list omits `lib/hospitality_coms/rosters.ex` and
+   `test/hospitality_coms/rosters_test.exs`**, although its own Approach text names
+   *"`list_roster/2`'s engagement preload for `role_label` (KTD-E10)"* as one of three context
+   changes. KTD-E10 lives in `HospitalityComs.Rosters`, not in `HospitalityComs.Rooms`.
+
+4. **Decision 7 held and is now measured.** Mapping `:already_rostered` to `409` kills two tests —
+   AE8's and R15's four-way equality — so the flat mapping is load-bearing rather than incidental.
+
+5. **AE8's count certifies nothing, and the brief predicted the wrong reason.** Row 22 says it
+   fails without `unrostered/3`. **Measured: deleting `unrostered/3`'s refusal kills exactly one
+   test, the context's**, and not the route's. `roster_entries_no_overlap` refuses the second
+   insert, the changeset arm maps to the same flat `404`, and the roster still holds one entry. The
+   count is AE8's literal requirement; the **status** is what a mutation moves, and revision 4 is
+   what moves it. This is U2's AE3 finding again, in a different context.
+
+6. **Two guards are redundant and are kept anyway.** Widening `@term_fields` to include
+   `grace_period_minutes` and `venue_id` kills **zero** tests, because `ShiftRoom.changeset/3`
+   casts two fields and `put_change`s the grace and the venue off the resolved shift type. Removing
+   `list_shift_rooms/2`'s `is_binary(grant_id)` guard kills **zero**, because
+   `Venues.fetch_acting_grant/1` heads on the same guard. Both are
+   `docs/solutions/test-failures/what-a-zero-kill-mutation-means.md`'s case (b) — a guard protecting
+   a different entry point — not a coverage hole and not a deletion. Row 11's control still
+   measures the end-to-end claim (body asks 120, row stores 45), which is what the requirement
+   says; it just does not attribute it to the controller.
+
+7. **Row 25's row assertion has a second guard nobody wrote for it.** Replacing the closing
+   `update_all` with `delete_all` fails with `42501 insufficient_privilege`:
+   `employer_role` holds no `DELETE` on `roster_entries`, so the grant tier refuses the deletion
+   before any Elixir does. The test still kills the mutation; the attribution belongs to the
+   database.
+
+8. **Refusal sentences are four, not one.** The brief implies one flat sentence per action.
+   Shipped: `@no_venue` for the venue (R17), `@no_shift_type` for a type this venue does not run,
+   `@no_shift_room` for a roster read, `@no_roster_target` for R15's four conditions and the
+   removal's `:not_rostered`. The venue is cast **before** the other ids, in its own `with` step,
+   so a malformed venue id answers what an unresolvable venue answers and a malformed room or
+   engagement id answers what an id naming nothing answers. One `EntityId.cast/1` inside the `with`
+   cannot tell those apart, because both arms are `:error`.
+
+9. **Rows do not map one-to-one onto test bodies**, as every unit since U8 has recorded. Thirty
+   rows became **thirty-two** new Elixir bodies — twenty-one in `employer_controller_test.exs`,
+   eight in `rooms_test.exs`, three in `rosters_test.exs` — plus one existing `rooms_test.exs` body
+   changed mechanically for the new return type. Rows 27 and 28 are one body each looping over six
+   routes rather than six bodies; rows 29 and 30 are whole existing files rather than new bodies.
+
+10. **Baseline arithmetic.** **1166/1170** before, **1198/1202** after — thirty-two new bodies, and
+    the same four `PostgresRolesTest` failures naming `hospitality_coms_dev` (issue #20), which are
+    a developer's local migration rather than this branch's.
+
+## Mutation record
+
+Thirty-four mutations, each applied to a clean tree, measured against the narrowest files that
+could answer, then restored. Every new behavioural test is killed by at least one.
+
+| # | Mutation | Tests killed |
+|---|----------|--------------|
+| 1 | `most_recent_rooms/2` selects ascending | **0** at a `bound + 1` fixture; **3** at `bound + 2` — see revision 1 |
+| 1b | `most_recent/2` (messages) selects ascending | **0** at `limit + 1`; **3** at `limit + 2` |
+| 2 | the page is not re-ordered ascending (selection order shown) | 4 |
+| 3 | `:all` applies the bound too | 2 |
+| 4 | `ShiftRoomPage.bounded/2` takes from the front | 3 |
+| 5 | `complete` hard-coded `false` | 4 |
+| 6 | `complete` hard-coded `true` | 2 |
+| 7 | the `:shift_type` preload is dropped from the list | 6 |
+| 8 | the created room does not carry the type it was built from | 4 |
+| 9 | the roster's `:engagement` preload is dropped | 6 |
+| 10 | the written roster entry does not carry its engagement | 8 |
+| 11 | `render_shift_type/1` loses `grace_period_minutes` | 1 |
+| 12 | `ShiftRoom.changeset/3` also casts `grace_period_minutes` | **0** — `put_change` overwrites it |
+| 12b | …and the `put_change` is removed with it | 20 |
+| 13 | `create_shift_room/2` skips `EntityId.cast/1` on the type | 1 (`Ecto.Query.CastError` → `500`) |
+| 14 | `@term_fields` widened to `grace_period_minutes` and `venue_id` | **0** — see revision 6 |
+| 15 | `create_shift_room/2` loses its `bad_request` clause | 1 |
+| 16 | the shift type's `:not_found` answers `409` | 2 |
+| 17 | the shift changeset arm answers `404` rather than `422` | 1 |
+| 18 | `Extent.cast/1` falls back to `:recent` for an unknown word | 2 (one of them `room_controller_test.exs`'s) |
+| 19 | `:already_rostered` answers `409` rather than the flat `404` | 2 |
+| 20 | `Rosters.unrostered/3`'s refusal deleted | 1, and **not** the route's — see revision 5 |
+| 21 | the roster ids skip `EntityId.cast/1` | 1 |
+| 22 | `create_roster_entry/2` loses its `bad_request` clause | 1 |
+| 23 | removal answers `200` with the closed entry | 3 |
+| 24 | removal deletes the row rather than closing the period | 12 — see revision 7 |
+| 25 | `render_roster_entry/1` names the entry rather than the engagement | 2 |
+| 26 | `render_roster_entry/1` grows `person_id` | 1 |
+| 27 | `shift_types/2` refuses a venue with none | 2 |
+| 28 | `shift_types/2` answers an ungranted venue with `[]` | 1 |
+| 29 | the shift-room response drops `complete` | 3 |
+| 30 | `list_shift_rooms/1` defaults to `:all` | 2 |
+| 31 | the roster read answers an unknown room with `[]` | 1 |
+| 32 | the removal route skips `EntityId.cast/1` | 1 |
+| 33 | shift types come back newest first | 1 |
+| 34 | `list_shift_rooms/2` loses its grant guard | **0** — see revision 6 |
+| 35 | the shift-types route leaves the authenticated pipeline | 4 |
+| 36 | `rendered_shift_room/1` grows `shift_type_id` | 3 (one of them `room_controller_test.exs`'s) |
+
+**Mutations 1, 1b, 14, 20 and 34 are the ones worth reading twice.** The first two are the unit's
+finding and are a defect in a merged test as much as in this one. The other three are zero-kills
+that are *not* coverage holes, and the reasoning for leaving each is in the revisions above.
+
+Two things are deliberately **not** asserted, following U1 and U2. Nothing pins `.credo.exs`'s
+contents from a test — the rule is that the file does not change, which a diff shows. And nothing
+asserts the *absence* of a `grant_id` or a `venue_id` field on any form, only that a body naming
+one changes no row; a test for the absence of a thing passes for ever whether or not anything
+prevents it.

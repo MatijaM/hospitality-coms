@@ -470,11 +470,18 @@ A disconnect **does not stop** the channel, unlike a room revocation — the top
 
 ## Employer transport
 
-Two routes, `HospitalityComsWeb.EmployerController`, on the existing `:authenticated_person` pipeline.
+Nine routes, `HospitalityComsWeb.EmployerController`, all on the existing `:authenticated_person` pipeline.
 
 ```
-GET /api/employer/venues                          the venues this session may act for
-GET /api/employer/venues/:venue_id/engagements    that venue's people, now
+GET    /api/employer/venues                        the venues this session may act for
+GET    .../venues/:id/engagements                  that venue's people, now
+POST   .../venues/:id/invitations                  an offer, and the code that redeems it
+GET    .../venues/:id/shift-types                  the kinds of shift this venue runs
+POST   .../venues/:id/shift-rooms                  tonight's shift
+GET    .../venues/:id/shift-rooms[?extent=all]     the venue's shifts, most recent first
+POST   .../shift-rooms/:id/roster                  put an engagement on one
+GET    .../shift-rooms/:id/roster                  who is on it now
+DELETE .../shift-rooms/:id/roster/:engagement_id   take them off it
 ```
 
 **There is no employer pipeline and there must not be one.** Authority is per venue and the venue is a path parameter, so a pipeline would have to know which venue before the router had parsed one. `EmployerAuth.employer_scope/2` is called inside each action that names one, and resolves the acting grant against the database on every request.
@@ -524,6 +531,32 @@ POST /api/claims                                  the worker accepting it, in th
 
 **`claim_controller_test.exs` is not sandboxed**, for `employer_controller_test.exs`'s reason and one sharper: a claim reads an invitation written through `EmployerRepo` and writes an engagement through `Repo`, so under the sandbox every claim in the file would fail on a foreign key.
 
+## Shifts and the roster over HTTP
+
+U3's six routes, and unlike U1 and U2 two of the context functions behind them changed shape.
+
+**`Rooms.list_shift_rooms/1` selects from the other end of the order it displays**, and getting that wrong is silent. It was `Records.earliest_first/1` over every room the venue had ever had; a `limit` in front of *that* returns the venue's **oldest** rooms, satisfies every count assertion, and hides the shift the manager created a minute ago — which is the payoff of the flow the route exists for. It is now `Records.most_recent_rooms/2`: a descending scan with a `limit + 1` probe, re-ordered ascending in SQL around it, exactly `most_recent/2`'s shape for messages. The answer is a `Rooms.ShiftRoomPage` carrying `complete`, and the second arity takes `:recent` or `:all`.
+
+**The ordering key is `starts_at`, not `inserted_at`, and they are different lists.** A manager who builds next month's rota before tonight's shift gets next month's rooms in the page. `starts_at` is chosen anyway because a page must be a *contiguous suffix* of the order it is displayed in — selecting on one column and displaying on another gives a scattered subset in which `complete` says nothing about *where* the rest is. **Assumption on the record:** a backdated shift at a venue with more than the bound's worth of later-starting rooms is reachable only through `extent=all`.
+
+**`recent_shift_room_limit/0` is 30 and no relationship to `recent_message_limit/0`'s 50 is asserted anywhere** (issue #42). What the two do share is the rule: the number lives in the context and no caller may pass one. `HospitalityComsWeb.Extent` is where the word `recent`/`all` becomes one — it was `RoomController`'s private `extent/1` and moved when `EmployerController` became its second caller, which is `EntityId`'s precedent and keeps the refusal sentence in one place.
+
+**A bound needs `limit + 2` rows to be observable, and `limit + 1` is what every fixture had.** Measured: the read selects `limit + 1` as its probe, so against a venue or a room holding exactly `limit + 1` the descending scan and an ascending one select the *same set*, and flipping the direction kills nothing. #48's four message fixtures and this unit's two shift-room ones are all at `limit + 2` now, where the flip kills three tests in each family. A count assertion was never the issue; the fixture size was.
+
+**`Rooms.create_shift_room/3` and `Rosters.add_to_roster/3` hand back a row that can be rendered.** The room carries the `ShiftType` it was built from and the entry carries its `Engagement` — the structs already in hand inside the same transaction, not a `preload` re-reading a row a statement old. That is what lets one render function serve the create response and the list. `RoomController.rendered_shift_room/1` is public for the same reason `RoomChannel.rendered/1` is: an employer shape carrying `shift_type_id` where the person's carries `shift_type_name` would be one entity with two spellings.
+
+**`Rosters.list_roster/2` preloads the engagement, and a client-side join could not replace it.** A `RosterEntry` carries no role label, so R13 had no source. Joining against the venue's people list has a hole that only shows in use: `add_to_roster/3` accepts an engagement whose term has **not opened**, while `list_engagements/1` answers only with engagements active at the instant — so next Monday's starter, on next Tuesday's rota today, renders as a bare UUID. **The test fixture must contain that starter or the hole is unobserved**, and both the context test and the route test assert the absence from the people list beside the label. `list_engagement_periods/3` is deliberately not preloaded: a different caller with a different association set gets a different function.
+
+**R15's four refusals are one answer.** Another venue's shift room, another venue's engagement, an id naming nothing, and an engagement already on the roster — plus a malformed id — all `404` with one sentence, compared for **equality** in the test rather than matched separately. `Rosters` distinguishes `:already_rostered` internally and the transport is where that stops. The counter-argument is in `EmployerController`'s moduledoc rather than deleted: `:already_rostered` is reachable only after both ids resolved inside the caller's own venue, so it discloses nothing `GET …/roster` would not, and flattening costs the operator a usable message. Reversing it is a requirement change, not a bug fix.
+
+**Removal answers `204` and the row stays** with `left_at` set (KTD6b); the test asserts the surviving row, because a route that deleted passes everything else. Two guards make that true and only one is this application's: `employer_role` holds no `DELETE` on `roster_entries`, so the grant tier refuses it before any code does.
+
+**A missing id in a *body* is `400`; a present one that resolves to nothing is `404`.** `shift_type_id` and `engagement_id` arrive in bodies, so "you did not name the thing" and "the thing you named is not one you can use" are two different mistakes — `ClaimController`'s shape for a request carrying no `claim_code`. The tests assert the two bodies are **unequal**, which is the mirror of R15's equality.
+
+**Two guards here are redundant and measured as such.** Widening `EmployerController`'s `@term_fields` to include `grace_period_minutes` and `venue_id` kills nothing: `ShiftRoom.changeset/3` casts two fields and `put_change`s the rest off the resolved shift type, so the controller's `Map.take/2` is a second line in front of a rule the changeset already holds. Removing `list_shift_rooms/2`'s `is_binary(grant_id)` guard kills nothing either, because `Venues.fetch_acting_grant/1` heads on the same guard. Both are kept — they protect different entry points — and neither should be read as covered by a route test.
+
+**`Rosters.unrostered/3` is a friendly check, not the guard.** Deleting it kills exactly one test, the context's, and **not** AE8's route-level one: `roster_entries_no_overlap` refuses the second insert, the changeset arm maps to the same flat `404`, and the roster still holds one entry. The count in AE8's test is the requirement's literal words; the **status** is what a mutation moves.
+
 ## Five disclosures on the record
 
 None is a bug and none is closed here. All are written down so a later unit decides about them deliberately.
@@ -535,6 +568,8 @@ None is a bug and none is closed here. All are written down so a later unit deci
 **The HTTP surface renders a field list, so no client reaches the key.** `GET /api/employer/venues/:venue_id/engagements` is `{engagement_id, role_label, starts_at, ends_at}`, pinned in `employer_controller_test.exs` by an exact key set against a literal, with `Engagement.__schema__(:fields)` containing `:person_id` beside it as the control. The context function is unchanged; what is closed is the route, not the disclosure.
 
 **`employer_role` holds table-level `SELECT` on `invitations`, and that includes `claim_code_digest`.** The digest is SHA-256 of 32 random bytes, so it is not a working credential and cannot be turned back into one — but `Records.outstanding_invitations/2` returns whole `Invitation` structs, so **a U6 endpoint that renders one wholesale ships the digest to the client.** Render a field list, not the struct. Narrowing the grant to named columns is the alternative and was not taken, because the digest is also what the claim looks the invitation up by. **U2 is the first route that renders an invitation, and it renders a field list**: `{invitation_id, role_label, starts_at, ends_at, code_expires_at}`, with the plaintext code beside it rather than inside it, and the same three pins the employer transport section describes plus a fourth — the returned code is hashed and compared against the stored digest, because otherwise "the response carries a plaintext code" and "the response carries a string" are the same green. **The disclosure is not closed**: `Engagements.list_invitations/1` still returns whole structs and no route renders *it*, which is the deferred "listing outstanding invitations" the origin names.
+
+**U3's roster render is the third field list, and it is the one that could have leaked.** `GET …/roster` is `{engagement_id, role_label, joined_at}` rendered off a *preloaded* `Engagement`, so the struct carrying `person_id` is one field access away; the render is pinned by an exact key set with `Engagement.__schema__(:fields)` beside it. Adding `person_id` to it fails that test, measured.
 
 **`Rooms.list_venue_room_members/2` hands every member of a room the `person_id` of every other member.** It returns whole `Engagement` structs and it is the only list in the tree that discloses one worker's identity key to another. U8/U9 render it: project a field list, and attribute on the engagement's `id` — the `author_engagement_id` a message already carries (KTD15b), venue-local by construction — rather than on `person_id`. The same shape as the `claim_code_digest` note above, aimed at a different consumer.
 
