@@ -18,15 +18,17 @@ import type { TokenStore } from "./token-store";
 import { createMemoryTokenStore } from "./token-store";
 
 function Probe() {
-  const { state, redeem, logOut, retry } = useSession();
+  const { state, redeem, rename, logOut, retry } = useSession();
   const [redemption, setRedemption] = useState("none");
 
   return (
     <div>
       <p>status: {state.status}</p>
       {state.status === "authenticated" && <p>person: {state.person.email}</p>}
+      {state.status === "authenticated" && <p>name: {state.person.displayName}</p>}
       {state.status === "authenticated" && <p>token: {state.token}</p>}
       <p>redemption: {redemption}</p>
+      <button onClick={() => void rename("Wendy Darling")}>rename</button>
       <button
         onClick={() => {
           void redeem("pasted-token").then((outcome) => {
@@ -292,6 +294,67 @@ describe("logging out", () => {
 
     expect(await screen.findByText("status: anonymous")).toBeInTheDocument();
     expect(store.read()).toBeNull();
+  });
+
+  it("stays logged out when a rename lands after the log-out", async () => {
+    // Both calls await the server, so they interleave: a rename in flight when
+    // the person leaves answers to a session that has gone. Applied blind it
+    // puts `authenticated` back on screen carrying a token the server has
+    // deleted and this store no longer holds — the shared terminal's next
+    // person finding the last one's name on the bar.
+    const store = createMemoryTokenStore("c2Vzc2lvbg");
+    const renamed = deferred<ApiResult<Person>>();
+
+    renderSession(
+      createFakeApi({
+        currentPerson: () => Promise.resolve(ok(somePerson)),
+        changeDisplayName: () => renamed.promise,
+      }),
+      store,
+    );
+
+    await screen.findByText("name: Captain Nemo");
+    await userEvent.click(screen.getByRole("button", { name: "rename" }));
+    await userEvent.click(screen.getByRole("button", { name: "log out" }));
+    await screen.findByText("status: anonymous");
+
+    await act(async () => {
+      renamed.settle(ok({ ...somePerson, displayName: "Wendy Darling" }));
+      await renamed.promise;
+    });
+
+    // Three assertions rather than one, because the status alone passes
+    // against a state that kept the person and only relabelled itself.
+    expect(screen.getByText("status: anonymous")).toBeInTheDocument();
+    expect(screen.queryByText("name: Wendy Darling")).not.toBeInTheDocument();
+    expect(store.read()).toBeNull();
+  });
+
+  it("applies a rename that lands while the session is still the same one", async () => {
+    // The control. Without it the test above passes against a `rename` that
+    // never writes anything at all.
+    const store = createMemoryTokenStore("c2Vzc2lvbg");
+    const renamed = deferred<ApiResult<Person>>();
+
+    renderSession(
+      createFakeApi({
+        currentPerson: () => Promise.resolve(ok(somePerson)),
+        changeDisplayName: () => renamed.promise,
+      }),
+      store,
+    );
+
+    await screen.findByText("name: Captain Nemo");
+    await userEvent.click(screen.getByRole("button", { name: "rename" }));
+
+    await act(async () => {
+      renamed.settle(ok({ ...somePerson, displayName: "Wendy Darling" }));
+      await renamed.promise;
+    });
+
+    expect(await screen.findByText("name: Wendy Darling")).toBeInTheDocument();
+    expect(screen.getByText("status: authenticated")).toBeInTheDocument();
+    expect(screen.getByText("token: c2Vzc2lvbg")).toBeInTheDocument();
   });
 });
 

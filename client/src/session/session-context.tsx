@@ -256,12 +256,31 @@ export function SessionProvider({
         return { ok: false, failure: notAuthenticated };
       }
 
-      const result = await api.changeDisplayName(displayName, state.token);
+      const token = state.token;
+      const result = await api.changeDisplayName(displayName, token);
       if (!result.ok) return { ok: false, failure: result.failure };
 
       // The token is unchanged — a rename is not a credential event — so only
       // the person moves.
-      setState({ status: "authenticated", token: state.token, person: result.value });
+      //
+      // The **updater** form, because this closure was built before the
+      // request went out and the session can end while it is in flight:
+      // `logOut` awaits the server exactly as this does, so the two interleave
+      // freely. Applied blind, a rename landing after a log-out puts
+      // `authenticated` back on screen carrying a token the server has already
+      // deleted and the store no longer holds — the effect above refuses a
+      // stale answer for the same reason, and this is that check reached from
+      // the other side. Asked of the state rather than of `tokenStore`,
+      // because state is what is being overwritten and the two disagree for
+      // one render after `redeem` persists.
+      //
+      // The answer stays `{ok: true}` either way. The server did rename them;
+      // there is simply no longer a session for it to show up on.
+      setState((current) =>
+        current.status === "authenticated" && current.token === token
+          ? { ...current, person: result.value }
+          : current,
+      );
 
       return { ok: true };
     },
