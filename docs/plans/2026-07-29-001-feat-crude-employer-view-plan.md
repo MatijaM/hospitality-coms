@@ -393,6 +393,12 @@ the human's place; the PR body repeats that substitution.** `AGENTS.md` requires
   suspensions not consulted. It belongs here rather than in U4 because it is the same resolver's
   question asked without a venue id, and AE10 ("no venues, one sentence") is its test.
 - **Files:**
+  - `lib/hospitality_coms/engagements.ex` — the new read: venues where this person holds an
+    engagement carrying a live grant, **suspensions not consulted**. OQ1's decision turns on
+    exactly that clause, so it is named here rather than left implied by the approach text.
+  - `lib/hospitality_coms/engagements/records.ex` — its query
+  - `test/hospitality_coms/engagements_test.exs` — including the suspended manager who still
+    appears, without which this endpoint is indistinguishable from the one it was chosen over
   - `lib/hospitality_coms_web/employer_auth.ex` (new)
   - `lib/hospitality_coms_web/channel_auth.ex` (delegate `employer_scope/2`)
   - `lib/hospitality_coms_web/controllers/employer_controller.ex` (new)

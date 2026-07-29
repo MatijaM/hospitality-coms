@@ -316,5 +316,3 @@ unstyled page carrying all of it; one claim box on the worker's side.
   list here that grows without limit, and `AGENTS.md` says paginate every such list. #48 built the
   shape for exactly this. R11 assumes yes, at roughly forty-five minutes; answering no means
   striking R11 rather than trimming the work.
-</content>
-</invoke>
