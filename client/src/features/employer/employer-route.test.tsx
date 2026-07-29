@@ -23,48 +23,41 @@
  * answers `409` twice with two opposite instructions.
  */
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ApiClient } from "../../api/client";
 import type { RequestFailure } from "../../api/errors";
-import { App } from "../../app/app";
 import { instantLabel, termLabel } from "../../app/instant";
-import { SessionProvider } from "../../session/session-context";
-import { createMemoryTokenStore } from "../../session/token-store";
+import { writesTo } from "../../test-support/fake-api";
+// The render harness moved to `test-support/` when U5 added two more files
+// driving this same page; it is the block that used to sit here, unchanged.
 import {
-  createFakeApi,
-  ok,
-  readsFrom,
-  somePerson,
-  writesTo,
-} from "../../test-support/fake-api";
-import { createMemoryRoomStore } from "../rooms/room-store";
+  HARBOUR,
+  OFFER,
+  PEOPLE,
+  SHIFT_ROOMS,
+  SHIFT_TYPES,
+  VENUES,
+  chooseHarbour,
+  engagementBody as engagement,
+  renderEmployer,
+  twoVenues,
+} from "../../test-support/employer-harness";
 
-const HARBOUR = "11111111-1111-4111-8111-111111111111";
-const KOLEKTIV = "22222222-2222-4222-8222-222222222222";
-
-const VENUES = "/api/employer/venues";
-const PEOPLE = `/api/employer/venues/${HARBOUR}/engagements`;
-const OFFER = `POST /api/employer/venues/${HARBOUR}/invitations`;
-
-const twoVenues = {
-  venues: [
-    { venue_id: HARBOUR, name: "Harbour Tavern" },
-    { venue_id: KOLEKTIV, name: "Kolektiv" },
-  ],
+/**
+ * What U5's shift panels read, so a test about the *people* list can only see
+ * the people list's own answer.
+ *
+ * `readsFrom` answers an unstubbed path with a `404`, and the venue desk now
+ * carries three lists — so without this the failure sentence appears three
+ * times and an exact `findByText` matches none of them uniquely.
+ */
+const quietPanels = {
+  [SHIFT_TYPES]: { shift_types: [] },
+  [SHIFT_ROOMS]: { shift_rooms: [], complete: true },
 };
-
-function engagement(id: string, roleLabel: string) {
-  return {
-    engagement_id: id,
-    role_label: roleLabel,
-    starts_at: "2026-03-09T13:00:00Z",
-    ends_at: "2026-06-07T13:00:00Z",
-  };
-}
 
 const issuedOffer = {
   invitation: {
@@ -79,49 +72,6 @@ const issuedOffer = {
 
 function refusal(status: number, code: string, message: string): RequestFailure {
   return { kind: "api_error", status, code: "unrecognised", rawCode: code, message };
-}
-
-function renderEmployer(
-  bodies: Readonly<Record<string, unknown>> = {},
-  write: ApiClient["write"] = writesTo({}),
-) {
-  // `readsFrom` behind a recorder, because `ApiClient["read"]` is a generic
-  // function type and `vi.mocked(...).mock.calls` does not survive it. `paths`
-  // is what "asked twice" is counted on; `toHaveBeenCalledWith` still works,
-  // since this is a `vi.fn` at runtime.
-  const paths: string[] = [];
-  const answered = readsFrom(bodies);
-  const read = vi.fn(
-    (path: string, token: string, decode: (body: unknown) => unknown) => {
-      paths.push(path);
-
-      return answered(path, token, decode);
-    },
-  ) as ApiClient["read"];
-
-  const api = createFakeApi({
-    currentPerson: () => Promise.resolve(ok(somePerson)),
-    logOut: () => Promise.resolve(ok(null)),
-    read,
-    write,
-  });
-
-  render(
-    <MemoryRouter initialEntries={["/employer"]}>
-      <SessionProvider api={api} tokenStore={createMemoryTokenStore("c2Vzc2lvbg")}>
-        <App roomStore={createMemoryRoomStore()} />
-      </SessionProvider>
-    </MemoryRouter>,
-  );
-
-  return { read, write, paths };
-}
-
-/** Picks Harbour Tavern out of the venue list and waits for its desk. */
-async function chooseHarbour() {
-  await userEvent.click(await screen.findByRole("button", { name: "Harbour Tavern" }));
-
-  return screen.findByRole("region", { name: "Harbour Tavern" });
 }
 
 async function offer(role: string) {
@@ -275,7 +225,10 @@ describe("the venue's people", () => {
     // worded for a room because the fake is shared — and reading it back on
     // this page is the point: what is on screen is what the envelope carried,
     // not a sentence this file could have written.
-    renderEmployer({ [VENUES]: twoVenues });
+    //
+    // `quietPanels` is what keeps that assertion about the *people* list now
+    // that the desk carries three; U5's own files own the shift panels' refusals.
+    renderEmployer({ [VENUES]: twoVenues, ...quietPanels });
 
     await chooseHarbour();
 
