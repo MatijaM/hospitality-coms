@@ -9,7 +9,6 @@ config :hospitality_coms, HospitalityComs.Repo,
   username: "postgres",
   password: "postgres",
   hostname: "localhost",
-  port: String.to_integer(System.get_env("HC_TEST_PGPORT") || "5432"),
   # A second checkout needs its own cluster, not its own database on the shared
   # one: worktree isolation isolates the filesystem and not Postgres, and a
   # second *database* holding grants makes `DROP ROLE` fail in both
@@ -30,6 +29,9 @@ config :hospitality_coms, HospitalityComs.EmployerRepo,
   username: "employer_login",
   password: "employer_login",
   hostname: "localhost",
+  # Both repos or neither: a run with only one overridden reaches two clusters,
+  # and the sandbox then sees rows the other connection cannot.
+  port: String.to_integer(System.get_env("HC_TEST_PGPORT") || "5432"),
   database: "hospitality_coms_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
