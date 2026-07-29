@@ -59,6 +59,13 @@ config :hospitality_coms,
 # them matters: a completed announcement is what stops the sweep re-announcing
 # the same expiry every five minutes, so retention has to outlast the window the
 # sweep looks back over. Seven days against one is the margin.
+#
+# **That ordering is now checked, and this comment is no longer what holds it.**
+# `HospitalityComs.Workers.EngagementSweeper` reads the `max_age` below with
+# `Application.compile_env/3` and raises at compile time if its lookback is not
+# shorter (issue #42, item 2). The read goes lib→config and must never be
+# reversed: config cannot depend on `lib`, and this file is loaded before any of
+# it exists. Lowering `max_age` past a day fails the build.
 config :hospitality_coms, Oban,
   repo: HospitalityComs.Repo,
   queues: [engagements: 5, lifecycle: 1],
@@ -84,14 +91,24 @@ config :hospitality_coms, Oban,
   ]
 
 # The retention sweeper's two bounds, and they are a pair rather than two
-# settings. `batch_size` caps each of the four triggers; `ceiling` is the total
-# above which a run rolls **every** trigger back and records itself as refused.
+# settings. `batch_size` caps each trigger; `ceiling` is the total above which a
+# run rolls **every** trigger back and records itself as refused.
 #
-# Four times 500 is 2000, so an ordinary run cannot reach 5000. That is
-# deliberate: the ceiling is the guard that fires when a batch bound is missing
-# or a later trigger is added without one, not a throttle. A ceiling an ordinary
-# run could hit would refuse the same rows on every tick and the sweep would
-# never make progress again.
+# One full batch per trigger cannot reach the ceiling, so an ordinary run cannot
+# either. That is deliberate: the ceiling is the guard that fires when a batch
+# bound is missing or a later trigger is added without one, not a throttle. A
+# ceiling an ordinary run could hit would refuse the same rows on every tick and
+# the sweep would never make progress again.
+#
+# **These two values are what `HospitalityComs.Lifecycle.batch_size/0` and
+# `ceiling/0` actually answer**, and no compile-time check reaches them: the
+# module's `@default_*` attributes carry the same ordering and its `raise` covers
+# those, but `setting/2` reads this file at runtime. So the ordering is asserted
+# a second time over the effective pair, in
+# `test/hospitality_coms/constant_agreement_test.exs`. The trigger count in both
+# comes from `RetentionRun.triggers/0`; "four" used to be written out here and
+# twice in `lifecycle.ex`, and a fifth trigger would have invalidated all three
+# without anything noticing (issue #42, item 4).
 config :hospitality_coms, HospitalityComs.Lifecycle, batch_size: 500, ceiling: 5_000
 
 # The employer zone acts as a Postgres role that holds no privilege on

@@ -88,6 +88,26 @@ defmodule HospitalityComs.Lifecycle.RetentionRun do
   def outcomes, do: @outcomes
 
   @doc """
+  Every trigger a run counts separately.
+
+  Exported so that "four triggers" stops being a number written in prose. It was
+  one in three places — twice in `HospitalityComs.Lifecycle` and once in
+  `config/config.exs` — all of them arguing that four full batches cannot reach
+  the blast-radius ceiling, and none of them able to notice a fifth trigger being
+  added (issue #42, item 4). `Lifecycle` now derives the multiplier from here and
+  raises at compile time if the product reaches the ceiling.
+
+  A trigger *is* one of these, rather than being described by one: the sweep
+  counts each separately because they fail for unrelated reasons, and a count has
+  to have a column to be recorded in. So the list cannot drift from the schema
+  without `changeset/4` failing to store something, and
+  `test/hospitality_coms/constant_agreement_test.exs` pins it against
+  `__schema__(:fields)` as well.
+  """
+  @spec triggers() :: [atom(), ...]
+  def triggers, do: [:own_message_copies, :shift_messages, :roster_entries, :venue_room_messages]
+
+  @doc """
   A run record, stamped from the instant the sweep used.
 
   Nothing is cast from attributes: every value here is produced by

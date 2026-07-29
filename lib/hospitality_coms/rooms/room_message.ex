@@ -81,6 +81,26 @@ defmodule HospitalityComs.Rooms.RoomMessage do
           updated_at: DateTime.t() | nil
         }
 
+  # The number `room_messages_body_within_bound` in `*_create_rooms.exs`
+  # enforces, and it is declared twice because a migration literal cannot move
+  # (issue #42, item 5). The two are compared in
+  # `test/hospitality_coms/constant_agreement_test.exs`, which reads the CHECK
+  # back out of `pg_constraint`.
+  #
+  # It is *not* derived from and does not derive `HospitalityComs.Peers.PeerMessage`
+  # or `HospitalityComs.Profiles.CorrectionRequest`, which declare the same
+  # figure. Nothing depends on those three agreeing; coupling them would buy a
+  # `Peers → Rooms` and a `Profiles → Rooms` compile-time dependency to enforce an
+  # agreement no mechanism needs, and would still leave every migration literal
+  # unchecked.
+  #
+  # **One relation here is real, and it is an ordering.**
+  # `HospitalityComs.Lifecycle.RetainedMessageCopy` holds a verbatim copy of one
+  # of these bodies, has no length validation, and is written with `insert_all` —
+  # so its own CHECK is reached with no changeset in front of it. Raising this
+  # number past `retained_message_copies_body_within_bound` would not return a
+  # changeset error; it would raise `Postgrex.Error` inside the retention
+  # transaction. That ordering is asserted in the same test file.
   @max_body_length 4000
 
   @doc """

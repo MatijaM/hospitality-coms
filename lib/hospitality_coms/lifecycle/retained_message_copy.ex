@@ -66,6 +66,21 @@ defmodule HospitalityComs.Lifecycle.RetainedMessageCopy do
   own transaction. Copies are written in bulk with `insert_all`, so the
   primary key is minted in Elixir — `binary_id` autogeneration happens in Ecto's
   insert path and `insert_all` is not on it.
+
+  **There is therefore no changeset in front of `body`, and that makes one
+  agreement load-bearing** (issue #42, item 5). `retained_message_copies_body_within_bound`
+  has to admit anything `room_messages_body_within_bound` admits, because this
+  row is a verbatim copy of one of those. If it did not, a message the venue
+  accepted would raise `Postgrex.Error` out of the retention transaction rather
+  than returning an error anybody could act on — and the transaction it would
+  take down is the one that gives a worker their own copy of what they said.
+
+  The relation is an ordering rather than an equality: this bound may be wider
+  than `HospitalityComs.Rooms.RoomMessage.max_body_length/0`, never narrower.
+  Both sides are values only a migration can move, so it is asserted in
+  `test/hospitality_coms/constant_agreement_test.exs` rather than derived.
+  Adding a `validate_length/3` here would not help — nothing on this path builds
+  a changeset to run it.
   """
 
   use Ecto.Schema

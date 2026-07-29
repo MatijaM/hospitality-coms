@@ -94,7 +94,12 @@ defmodule HospitalityComs.Profiles.CorrectionRequest do
   """
   @type resolution() :: :accepted | :declined
 
-  # The same bound `room_messages` and `peer_messages` carry.
+  # The number `correction_requests_body_within_bound` in `*_create_profiles.exs`
+  # enforces. It is the same figure `room_messages` and `peer_messages` carry,
+  # and that resemblance is left as one: nothing depends on the three agreeing,
+  # so each is pinned to its own table's CHECK instead — read back out of
+  # `pg_constraint` in `test/hospitality_coms/constant_agreement_test.exs`, which
+  # is the only side that can drift silently (issue #42, item 5).
   @max_body_length 4000
 
   @resolutions ~w(accepted declined)a

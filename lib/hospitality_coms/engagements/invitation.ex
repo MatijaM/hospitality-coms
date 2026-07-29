@@ -102,12 +102,27 @@ defmodule HospitalityComs.Engagements.Invitation do
   @doc """
   The longest a claim code may stay redeemable after it is issued.
 
-  The same fourteen days `HospitalityComs.Accounts.PersonToken.session_validity_in_days/0`
-  gives a session, and for the same reason: both are bearer credentials that
-  grant something to whoever presents them first. The lifetime used to be
-  whatever the caller asked for and there is still no way to withdraw a code
-  early, so an unbounded one was a credential that could outlive the venue's
-  interest in it by years.
+  Fourteen days, chosen for the reason
+  `HospitalityComs.Accounts.PersonToken.session_validity_in_days/0` chose the
+  same figure: both are bearer credentials that grant something to whoever
+  presents them first. The lifetime used to be whatever the caller asked for and
+  there is still no way to withdraw a code early, so an unbounded one was a
+  credential that could outlive the venue's interest in it by years.
+
+  **The agreement with that function is a coincidence of judgement, not a
+  constraint, and this must not be derived from it** (issue #42, item 3). Nothing
+  anywhere compares a claim code's horizon to a session's; they are separate
+  product choices about separate credentials. What this number *is* bound to is
+  `invitations_code_expiry_within_bound` in `*_create_engagements.exs`, a
+  migration literal that cannot move — so deriving from `PersonToken` would mean
+  that raising the session horizon, in a module with nothing to do with
+  invitations, silently walked this bound away from the database CHECK and
+  produced exactly the divergence #42 is about.
+
+  That pair is checked instead, by reading the live constraint back out in
+  `test/hospitality_coms/constant_agreement_test.exs`. Note that the changeset
+  tests in `engagements_test.exs` cannot do it: they derive their input from this
+  function, so they move with it.
   """
   @spec max_code_validity_in_days() :: pos_integer()
   def max_code_validity_in_days, do: @max_code_validity_in_days
