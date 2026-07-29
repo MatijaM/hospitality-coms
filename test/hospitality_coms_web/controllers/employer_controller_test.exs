@@ -174,11 +174,28 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
     test "answers an unknown venue, a malformed id and sixteen raw bytes identically",
          %{conn: conn} do
       # R17's flatness, asserted by equality rather than by three separate
-      # matches. The sixteen-byte case is the one that kills the mutation:
-      # delete `byte_size(id) == 36` from `EntityId.cast/1` and
-      # `Ecto.UUID.cast/1` encodes sixteen raw bytes into a valid-looking id
-      # naming nothing. A thirty-five-character id is *not* the same claim —
-      # `cast/1` rejects it unaided — so it is not tested here as evidence.
+      # matches.
+      #
+      # **What each id proves here, measured rather than assumed.** The
+      # *malformed* one is what kills the mutation: without
+      # `HospitalityComsWeb.EntityId.cast/1` in front of the resolver it reaches
+      # Ecto's query builder and raises `Ecto.Query.CastError`, so Phoenix
+      # answers `500` and a caller can tell a malformed id from an unknown one
+      # by the status — AE1 lost at the one place the id comes from outside.
+      #
+      # The **sixteen-byte** one is carried as input-class coverage and **is not
+      # evidence for `byte_size(id) == 36`** on this route, contrary to what a
+      # reading of `room_controller_test.exs` would suggest. Measured: dropping
+      # that guard kills nothing in this file. Both branches converge here —
+      # `Ecto.UUID.cast/1` alone encodes sixteen raw bytes into a valid-looking
+      # id, which then names no venue, which is the same `404` with the same
+      # body. That is R17 working, not a hole. The guard *is* observable on
+      # `GET /api/venues/:venue_id/shift-rooms`, which answers `200 []` for a
+      # castable unknown id and `404` for an uncastable one, and
+      # `room_controller_test.exs` is where it is pinned.
+      #
+      # A thirty-five-character id would prove less still — `Ecto.UUID.cast/1`
+      # rejects it unaided — so it is not here at all.
       %{person: person} = manager()
 
       unknown = refusal(conn, person, Ecto.UUID.generate())
@@ -236,13 +253,23 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
 
   describe "the acting grant is resolved on every call" do
     test "builds a scope carrying the venue, the grant and the person scope's instant" do
+      # The instant is KTD-E1 and it is asserted behaviourally rather than by
+      # reading `.credo.exs`: the clock is moved *away* from the scope's
+      # instant, both still inside the term, so a resolver that read
+      # `Clock.now/0` for itself would stamp the scope with a moment this
+      # request never happened at — and every period comparison downstream
+      # would then be answered against it.
       %{person: person, venue: venue, grant: grant} = manager()
       scope = person_scope(person)
+      elsewhere_in_the_term = DateTime.add(@now, 1, :day)
+
+      :ok = Clock.Offset.set(elsewhere_in_the_term)
 
       assert {:ok, %EmployerScope{} = employer} = EmployerAuth.employer_scope(scope, venue.id)
       assert employer.venue_id == venue.id
       assert employer.grant_id == grant.id
       assert employer.now == scope.now
+      refute employer.now == elsewhere_in_the_term
     end
 
     test "answers :no_grant once the grant is revoked, having answered :ok before" do

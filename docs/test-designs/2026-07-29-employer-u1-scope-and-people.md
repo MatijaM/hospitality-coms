@@ -370,4 +370,115 @@ file passes for the wrong reason**.
 Recorded rather than silently applied, because the gate exists to be departed from explicitly.
 The sections above are not edited to agree with what shipped.
 
-_(to be appended)_
+1. **Row 24 is wrong, and the plan it came from is wrong with it.** The plan's U1 test scenario
+   says of the sixteen-byte id: *"This is the case that kills the mutation: delete
+   `byte_size(id) == 36` from `EntityId.cast/1`…"* **Measured: that mutation kills nothing in
+   `employer_controller_test.exs`.** It kills two tests elsewhere —
+   `room_controller_test.exs`'s sixteen-raw-bytes case and `venue_room_channel_test.exs`'s.
+
+   The reason is this route's own flatness. On `GET /api/venues/:venue_id/shift-rooms` a castable
+   unknown id answers `200 []` and an uncastable one answers `404`, so removing the guard is
+   observable. Here both converge: a sixteen-byte string cast into a valid-looking id names no
+   venue, `EmployerAuth` answers `:no_grant`, and the body is byte-identical to the one a
+   malformed id gets. That is R17 working, not a hole — and it means the case must not be
+   described as evidence for the guard. The test keeps the id as input-class coverage and its
+   comment now says exactly what it does and does not prove, with the malformed id named as the
+   case that *does* kill a mutation (drop the cast entirely and Phoenix answers `500`).
+
+   The same correction is in `CLAUDE.md`'s new Employer transport section, because a later unit
+   copying this file would otherwise copy the wrong claim.
+
+2. **Decision 4 is confirmed by measurement and it is the sharpest thing in the plan.** Mutation
+   6 — `EmployerAuth.employer_scope/2` resolving an engagement's `grant_id` without asking
+   whether the grant is live — kills the direct assertion and leaves the route-level revocation
+   test **green**, because `Engagements.list_engagements/1` opens with
+   `Venues.fetch_acting_grant/1`. A file carrying only the route-level test would have reported
+   R16 as proved and proved nothing.
+
+3. **Row 12 was strengthened after a mutation could not reach it.** As briefed it asserted
+   `employer.now == scope.now` with `Clock.Offset` pinned to the same instant the scope carried,
+   so a resolver reading `Clock.now/0` for itself produced an identical value and the assertion
+   could not see it. The test now moves the clock **away** from the scope's instant — both still
+   inside the term, so resolution succeeds either way — and asserts the scope's instant is the
+   scope's and not the clock's. Mutation 16 kills it. KTD-E1 is now pinned behaviourally rather
+   than only by `.credo.exs` being unchanged in the diff.
+
+4. **One briefed test certified nothing and was deleted rather than kept.** "A person with no
+   engagements at all answers `[]`" (edge case list, and criterion 11's context half) survived
+   *every* mutation, including one that deleted the membership filter outright: the fixture had no
+   venues, so `[]` was the answer whatever the query said. It is the "absence assertion passes by
+   default" shape. Deleted from `engagements_test.exs`. The claim survives where it is real — the
+   controller's AE10 test, whose subject is a worker at a venue **somebody else manages**, and
+   which mutations 2 and 19 both kill.
+
+5. **A test the brief did not ask for was added, because a mutation found the gap.** Dropping
+   `of_person/2` from `managed_venues/2` killed nothing in `engagements_test.exs`: every case
+   there happened to have nobody else managing the venue in question. `"is per person: somebody
+   else's authority answers nothing for this one"` closes it, and mutation 19 now kills two.
+
+6. **`EmployerAuth` has no test file of its own; its assertions live in
+   `employer_controller_test.exs`.** The brief's file list implied a controller test file only,
+   and this is that file carrying a `describe "the acting grant is resolved on every call"`
+   block. Deliberate rather than lazy: revision 2's distinction is between two assertions about
+   the *same* revocation, and separating them into two files is how a later reader comes to
+   believe the route-level one is the proof.
+
+7. **`Lifecycle.Records` was found overclaiming and left alone.** `orphaned_venues/1`'s docstring
+   says `EmployerGrant.live_at/2` is *"reused rather than restated, so 'live' cannot come to mean
+   two things"*; `live_grant/1` and `live_grant_holder/1` restate it inline, correlated on
+   `parent_as(:venue)`. Recorded in the brief's Decision 1 before implementation and recorded in
+   `CLAUDE.md` after it. Not fixed here — composing `live_at/1` into a correlated subquery
+   changes a retention query's plan and no assertion in this unit needs it.
+
+8. **Two of the plan's own factual claims are stale.** KTD-E1 says *"`CLAUDE.md` says four and
+   names three"* about `:boundary_modules`; `CLAUDE.md` on `origin/main` says **seven** and names
+   all seven, and `.credo.exs` holds seven. The rule KTD-E1 actually states — *"this plan adds
+   nothing to it"* — is unaffected and holds: `.credo.exs` is byte-identical in this diff.
+
+9. **Rows do not map one-to-one onto test bodies**, as every unit since U8 has recorded. Thirty
+   rows became **twenty-two** new Elixir bodies — nine in `engagements_test.exs`, thirteen in the
+   new `employer_controller_test.exs`. Rows 29 and 30 are whole existing files rather than new
+   bodies.
+
+10. **Baseline arithmetic.** **1122/1126** before, **1144/1148** after — twenty-two new bodies, and
+    the same four `PostgresRolesTest` failures naming `hospitality_coms_dev` (issue #20), which
+    are a developer's local migration rather than this branch's.
+
+## Mutation record
+
+Twenty-one mutations, each applied to a clean tree, measured against the narrowest file that could
+answer, then restored with `git checkout --`. Every new behavioural test is killed by at least one.
+
+| # | Mutation | Tests killed |
+|---|----------|--------------|
+| 1 | `Records.managed_venues/2` composes `Rooms.Records.unsuspended/2` (OQ1's defect) | 2 |
+| 2 | `managed_venues/2` drops the live-grant filter | 3 |
+| 3 | `managed_venues/2` drops `active_at/2` | 2 |
+| 4 | `managed_venues/2` orders by name descending | 1 |
+| 5 | `EmployerGrant.live_at/1` ignores revocation | 3 |
+| 6 | `EmployerAuth.employer_scope/2` resolves a grant without asking whether it is live | 1 |
+| 7 | `render_engagement/1` grows `person_id` | 1 |
+| 8 | `render_venue/1` renders the id where the name goes | 1 |
+| 9 | the refusal is `403` rather than `404` | 3 |
+| 10 | `EntityId.cast/1` is not called at all | 1 |
+| 11 | `EntityId.cast/1` drops `byte_size(id) == 36` | **0 here**, 2 elsewhere |
+| 12 | `fetch_grant_holding_engagement/2` stops asking about the grant | 3 |
+| 13 | `Records.oldest_first/1` orders newest first | 2 |
+| 14 | the employer routes leave the `:authenticated_person` pipeline | 1 |
+| 15 | `render_engagement/1` loses `role_label` | 1 |
+| 16 | `EmployerAuth` reads the clock instead of taking the scope's instant | 1 |
+| 17 | `Records.active_at/2` loses its lower bound | 2 |
+| 18 | `managed_venues/2` selects the engagement id, not the venue id | 9 |
+| 19 | `managed_venues/2` stops filtering by person | 2 |
+| 20 | `managed_venues/2` drops the membership filter entirely | 5 |
+| 21 | `list_managed_venues/1` accepts any scope | 1 |
+
+**Mutations 1, 6 and 11 are the ones worth reading twice.** The first is the whole of OQ1 — it is
+the endpoint this unit was chosen *over*, applied as a patch, and exactly two tests notice. The
+second confirms the plan's claim that R16's obvious test proves nothing here. The third
+**disproves** a claim the plan made, and is why revision 1 exists.
+
+Two things are deliberately **not** asserted. Nothing pins `.credo.exs`'s contents from a test —
+the rule is that the file does not change, which a diff shows and a test would only restate. And
+nothing asserts the absence of an employer pipeline, because a test for the absence of a thing
+passes for ever whether or not anything prevents it.

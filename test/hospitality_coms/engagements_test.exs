@@ -1549,8 +1549,22 @@ defmodule HospitalityComs.EngagementsTest do
       assert Enum.map(Engagements.list_managed_venues(manager), & &1.id) == [first.id, last.id]
     end
 
-    test "answers an empty list for a person who manages nothing" do
-      assert Engagements.list_managed_venues(person_scope_fixture(@now)) == []
+    test "is per person: somebody else's authority answers nothing for this one" do
+      # Measured: without this row, dropping `of_person/2` from the query kills
+      # no test in this file. Every other case here happens to have nobody else
+      # managing the venue in question.
+      {employer, creation} = scoped_venue_fixture(@now)
+      manager = person_scope_fixture(@now)
+      bystander = person_scope_fixture(@now)
+
+      engagement_fixture(employer, manager, %{
+        starts_at: @now,
+        ends_at: @in_a_month,
+        grant_id: creation.grant.id
+      })
+
+      assert [_venue] = Engagements.list_managed_venues(manager)
+      assert Engagements.list_managed_venues(bystander) == []
     end
 
     test "refuses an employer scope and an anonymous person scope by function clause" do
