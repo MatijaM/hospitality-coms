@@ -163,6 +163,7 @@ describe("redeemMagicLink", () => {
         person: {
           id: "8b1b0a3c-0000-4000-8000-000000000001",
           email: "worker@example.com",
+          display_name: "Captain Nemo",
         },
       }),
     );
@@ -176,6 +177,7 @@ describe("redeemMagicLink", () => {
         person: {
           id: "8b1b0a3c-0000-4000-8000-000000000001",
           email: "worker@example.com",
+          displayName: "Captain Nemo",
         },
       },
     });
@@ -199,7 +201,11 @@ describe("redeemMagicLink", () => {
   it("refuses a 201 whose body has no token rather than reporting an undefined session", async () => {
     const { fetch } = stubFetch(
       respond(201, {
-        person: { id: "8b1b0a3c-0000-4000-8000-000000000001", email: null },
+        person: {
+          id: "8b1b0a3c-0000-4000-8000-000000000001",
+          email: null,
+          display_name: "Former colleague",
+        },
       }),
     );
 
@@ -216,6 +222,7 @@ describe("currentPerson", () => {
         person: {
           id: "8b1b0a3c-0000-4000-8000-000000000001",
           email: "worker@example.com",
+          display_name: "Captain Nemo",
         },
       }),
     );
@@ -224,7 +231,11 @@ describe("currentPerson", () => {
 
     expect(result).toEqual({
       ok: true,
-      value: { id: "8b1b0a3c-0000-4000-8000-000000000001", email: "worker@example.com" },
+      value: {
+        id: "8b1b0a3c-0000-4000-8000-000000000001",
+        email: "worker@example.com",
+        displayName: "Captain Nemo",
+      },
     });
     expect(requests[0]?.url).toBe("http://api.test/api/me");
     expect(requests[0]?.init.method).toBe("GET");
@@ -236,7 +247,11 @@ describe("currentPerson", () => {
   it("reads an erased person's null address as null rather than failing to decode", async () => {
     const { fetch } = stubFetch(
       respond(200, {
-        person: { id: "8b1b0a3c-0000-4000-8000-000000000001", email: null },
+        person: {
+          id: "8b1b0a3c-0000-4000-8000-000000000001",
+          email: null,
+          display_name: "Former colleague",
+        },
       }),
     );
 
@@ -244,7 +259,11 @@ describe("currentPerson", () => {
 
     expect(result).toEqual({
       ok: true,
-      value: { id: "8b1b0a3c-0000-4000-8000-000000000001", email: null },
+      value: {
+        id: "8b1b0a3c-0000-4000-8000-000000000001",
+        email: null,
+        displayName: "Former colleague",
+      },
     });
   });
 

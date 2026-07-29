@@ -86,30 +86,56 @@ describe("decodeErrorEnvelope", () => {
 
 describe("decodePerson", () => {
   it("accepts a null address, because erasure nulls it", () => {
-    expect(decodePerson({ id: "abc", email: null })).toEqual({ id: "abc", email: null });
+    expect(
+      decodePerson({ id: "abc", email: null, display_name: "Former colleague" }),
+    ).toEqual({ id: "abc", email: null, displayName: "Former colleague" });
+  });
+
+  it("reads the display name the server gives every person", () => {
+    expect(
+      decodePerson({ id: "abc", email: "worker@example.com", display_name: "Puck" }),
+    ).toEqual({ id: "abc", email: "worker@example.com", displayName: "Puck" });
   });
 
   it("rejects a person with no id, rather than one whose id is undefined", () => {
-    expect(decodePerson({ email: "worker@example.com" })).toBeNull();
+    expect(
+      decodePerson({ email: "worker@example.com", display_name: "Puck" }),
+    ).toBeNull();
   });
 
   it("rejects an address that is not a string or null", () => {
-    expect(decodePerson({ id: "abc", email: 42 })).toBeNull();
+    expect(decodePerson({ id: "abc", email: 42, display_name: "Puck" })).toBeNull();
   });
 
   it("rejects an address key that is missing entirely", () => {
-    expect(decodePerson({ id: "abc" })).toBeNull();
+    expect(decodePerson({ id: "abc", display_name: "Puck" })).toBeNull();
+  });
+
+  it("rejects a person with no display name rather than rendering a placeholder", () => {
+    // #66. `display_name` is `NOT NULL` on the server and an erased person
+    // carries a value rather than a null, so there is no body this refuses that
+    // the API can produce — and a fallback here would show every person under
+    // one invented string the moment the field stopped arriving.
+    expect(decodePerson({ id: "abc", email: "worker@example.com" })).toBeNull();
+    expect(
+      decodePerson({ id: "abc", email: "worker@example.com", display_name: null }),
+    ).toBeNull();
   });
 });
 
 describe("decodeSession", () => {
   it("rejects a session whose person does not decode", () => {
     expect(
-      decodeSession({ token: "abc", person: { email: "worker@example.com" } }),
+      decodeSession({
+        token: "abc",
+        person: { email: "worker@example.com", display_name: "Puck" },
+      }),
     ).toBeNull();
   });
 
   it("rejects a session with no token", () => {
-    expect(decodeSession({ person: { id: "abc", email: null } })).toBeNull();
+    expect(
+      decodeSession({ person: { id: "abc", email: null, display_name: "Puck" } }),
+    ).toBeNull();
   });
 });

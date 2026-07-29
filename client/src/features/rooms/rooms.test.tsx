@@ -364,6 +364,7 @@ describe("a rejected send", () => {
         body: "on my way",
         sent_at: "2026-07-28T09:00:00Z",
         author_engagement_id: OWN_ENGAGEMENT_ID,
+        author_display_name: "Captain Nemo",
       });
     });
 
@@ -647,12 +648,14 @@ describe("messages", () => {
         body: "kitchen is short tonight",
         sent_at: "2026-07-28T09:00:00Z",
         author_engagement_id: OTHER_ENGAGEMENT_ID,
+        author_display_name: "Captain Nemo",
       });
       channel.emit("message", {
         id: "aaaaaaaa-0000-4000-8000-000000000002",
         body: "i can stay",
         sent_at: "2026-07-28T09:01:00Z",
         author_engagement_id: OWN_ENGAGEMENT_ID,
+        author_display_name: "Captain Nemo",
       });
     });
 
@@ -661,13 +664,47 @@ describe("messages", () => {
     });
     const bodies = messageBodies();
 
-    // Attribution is the engagement, never the person (KTD15b). This session's
-    // own engagement id came back on the join reply, so it can mark its own.
+    // Attribution is the author's chosen name **and** the engagement (KTD15b,
+    // #66). This session's own engagement id came back on the join reply, so it
+    // can mark its own — and somebody else's line leads with their name, with
+    // the shortened engagement id beside it because display names are not
+    // unique. The full id is still never rendered.
     expect(bodies[0]).toContain("kitchen is short tonight");
-    expect(bodies[0]).toMatch(new RegExp(`^${OTHER_ENGAGEMENT_ID.slice(0, 8)}`));
+    expect(bodies[0]).toMatch(
+      new RegExp(`^Captain Nemo · ${OTHER_ENGAGEMENT_ID.slice(0, 8)}`),
+    );
     expect(bodies[0]).not.toContain(OTHER_ENGAGEMENT_ID);
     expect(bodies[1]).toMatch(/^You/);
+    expect(bodies[1]).not.toContain("Captain Nemo");
     expect(bodies[1]).toContain("i can stay");
+  });
+
+  it("names an author whose engagement has ended, from what the server sent", async () => {
+    // #66's argument for the server carrying the name. A venue room keeps full
+    // history, so a message from somebody no longer on the roll is ordinary —
+    // and this client holds no roll to join against anyway. The name is on the
+    // message, so the only way this can be wrong is the server getting it
+    // wrong, which is where `rooms_test.exs` asserts it.
+    const { socket } = renderRooms([entry(venueRoom)]);
+    const channel = await open(socket, venueRoom);
+
+    act(() => {
+      channel.emit("message", {
+        id: "aaaaaaaa-0000-4000-8000-000000000009",
+        body: "handing over",
+        sent_at: "2026-07-28T08:00:00Z",
+        author_engagement_id: OTHER_ENGAGEMENT_ID,
+        author_display_name: "Former colleague",
+      });
+    });
+
+    await waitFor(() => {
+      expect(messageBodies()).toHaveLength(1);
+    });
+
+    expect(messageBodies()[0]).toMatch(
+      new RegExp(`^Former colleague · ${OTHER_ENGAGEMENT_ID.slice(0, 8)}`),
+    );
   });
 
   it("shows a message once, though the sender receives it twice", async () => {
@@ -680,6 +717,7 @@ describe("messages", () => {
       body: "on my way",
       sent_at: "2026-07-28T09:02:00Z",
       author_engagement_id: OWN_ENGAGEMENT_ID,
+      author_display_name: "Captain Nemo",
     };
 
     await userEvent.type(composer(), "on my way");

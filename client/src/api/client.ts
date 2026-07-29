@@ -2,10 +2,11 @@
  * The typed client for the session endpoints, plus **one generic primitive**
  * that every person-side read goes through.
  *
- *     POST   /api/log-in         {email}  -> 202
- *     POST   /api/log-in/token   {token}  -> 201 {token, person}
- *     GET    /api/me                      -> 200 {person}
- *     DELETE /api/log-out                 -> 204
+ *     POST   /api/log-in         {email}         -> 202
+ *     POST   /api/log-in/token   {token}         -> 201 {token, person}
+ *     GET    /api/me                             -> 200 {person}
+ *     PATCH  /api/me             {display_name}  -> 200 {person}
+ *     DELETE /api/log-out                        -> 204
  *
  * Two properties are deliberate.
  *
@@ -127,6 +128,26 @@ export type ApiClient = {
 
   /** Reads back the person a session token belongs to. */
   currentPerson(sessionToken: string): Promise<ApiResult<Person>>;
+
+  /**
+   * Changes the name this session's person is shown under, and reads it back.
+   *
+   * A named method rather than a `write` from a feature module, for the reason
+   * the four above are named: it is the **same resource** `currentPerson`
+   * reads, and `PATCH /api/me` living in a feature while `GET /api/me` lives
+   * here is one endpoint with two homes. The file header's argument against
+   * named methods is about a *feature's* resources — the room routes, the
+   * profile surface's seven — and a person's own name is not one of those.
+   *
+   * The refusals are the server's: `400` with no `display_name` in the body,
+   * `422` with `fields.display_name` for one the schema declines. Both arrive
+   * as an enumerated failure, so a caller renders the server's own sentence
+   * rather than inventing one.
+   */
+  changeDisplayName(
+    displayName: string,
+    sessionToken: string,
+  ): Promise<ApiResult<Person>>;
 
   /**
    * Ends the session.
@@ -322,6 +343,19 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
       return expectBody(
         "/api/me",
         { method: "GET", headers: { ...JSON_HEADERS, ...bearer(sessionToken) } },
+        200,
+        decodePersonEnvelope,
+      );
+    },
+
+    changeDisplayName(displayName, sessionToken) {
+      return expectBody(
+        "/api/me",
+        {
+          method: "PATCH",
+          headers: { ...JSON_HEADERS, ...bearer(sessionToken) },
+          body: JSON.stringify({ display_name: displayName }),
+        },
         200,
         decodePersonEnvelope,
       );

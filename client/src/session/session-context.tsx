@@ -50,6 +50,16 @@ export type SessionState =
 export type RedeemOutcome =
   { readonly ok: true } | { readonly ok: false; readonly failure: RequestFailure };
 
+/**
+ * What changing your display name produced.
+ *
+ * The same two-arm shape `RedeemOutcome` has, and for the same reason: the
+ * caller is an event handler, nothing throws, and a refusal carries the
+ * server's own sentence rather than one this client invented.
+ */
+export type RenameOutcome =
+  { readonly ok: true } | { readonly ok: false; readonly failure: RequestFailure };
+
 // Function-valued *properties* rather than methods, because every consumer
 // destructures them off the context and a method torn off its object is what
 // `unbound-method` exists to complain about.
@@ -58,12 +68,34 @@ export type SessionContextValue = {
   /** The API client, so a surface does not have to be handed one separately. */
   readonly api: ApiClient;
   readonly redeem: (linkToken: string) => Promise<RedeemOutcome>;
+  /**
+   * Changes the display name, and replaces the person this session carries.
+   *
+   * It lives on the session rather than on a feature because the person *is*
+   * the session's, and because the state it has to update is here: a rename
+   * that wrote the row and left `state.person` alone would show the old name
+   * until the next reload, on every screen a session rests on.
+   *
+   * Answers `{ok: false}` and changes nothing when the session is not
+   * authenticated — there is no token to send and no person to replace.
+   */
+  readonly rename: (displayName: string) => Promise<RenameOutcome>;
   readonly logOut: () => Promise<void>;
   /** Asks again after `unavailable`. */
   readonly retry: () => void;
 };
 
 const SessionContext = createContext<SessionContextValue | null>(null);
+
+// `rename` is reachable only from inside `RequireSession`, so this is a type
+// narrowing rather than a state anybody meets. It is a real failure value
+// rather than a throw because every caller of `rename` is an event handler
+// that voids the promise.
+const notAuthenticated: RequestFailure = {
+  kind: "network_error",
+  message: "you are not signed in",
+  cause: null,
+};
 
 // `TokenStore` says its three operations do not throw. These two hold the
 // application to that even when a store handed in from outside does not: a
@@ -218,6 +250,24 @@ export function SessionProvider({
     [api, tokenStore],
   );
 
+  const rename = useCallback(
+    async (displayName: string): Promise<RenameOutcome> => {
+      if (state.status !== "authenticated") {
+        return { ok: false, failure: notAuthenticated };
+      }
+
+      const result = await api.changeDisplayName(displayName, state.token);
+      if (!result.ok) return { ok: false, failure: result.failure };
+
+      // The token is unchanged — a rename is not a credential event — so only
+      // the person moves.
+      setState({ status: "authenticated", token: state.token, person: result.value });
+
+      return { ok: true };
+    },
+    [api, state],
+  );
+
   const logOut = useCallback(async () => {
     // The API's answer is not acted on. A 401 means the row is already gone,
     // and an unreachable server means it is not — but the token is in this
@@ -245,8 +295,8 @@ export function SessionProvider({
   }, [tokenStore]);
 
   const value = useMemo(
-    () => ({ state, api, redeem, logOut, retry }),
-    [state, api, redeem, logOut, retry],
+    () => ({ state, api, redeem, rename, logOut, retry }),
+    [state, api, redeem, rename, logOut, retry],
   );
 
   return <SessionContext value={value}>{children}</SessionContext>;

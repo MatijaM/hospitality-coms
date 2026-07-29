@@ -255,7 +255,9 @@ function PeerEntry({
 
   return (
     <>
-      <strong>{shortId(peer.personId)}</strong>{" "}
+      <strong>
+        {peer.displayName} · {shortId(peer.personId)}
+      </strong>{" "}
       <span>
         {peer.roleLabel} at {peer.venueName}
       </span>{" "}
@@ -269,7 +271,7 @@ function PeerEntry({
             onOpenConversation(conversation.connectionId);
           }}
         >
-          Open conversation with {shortId(peer.personId)}
+          Open conversation with {peer.displayName}
         </button>
       ) : asked !== null ? (
         // Its own sentence rather than `requestStateLabel`, which names the
@@ -284,7 +286,7 @@ function PeerEntry({
             void ask();
           }}
         >
-          Ask {shortId(peer.personId)} to connect
+          Ask {peer.displayName} to connect
         </button>
       ) : (
         <span>{requestStateLabel(pending.state)}</span>

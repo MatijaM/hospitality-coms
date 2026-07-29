@@ -83,9 +83,9 @@ export function normalisePersonId(value: string): string | null {
  * `HospitalityComsWeb.PeerChannel.rendered_peer/1` of a
  * `HospitalityComs.Peers.Visibility`, which is derived on every read and stored
  * nowhere. What it carries about a counterpart — their id, the shared venue and
- * the employer-authored role label — is exactly what the venue room's roll
- * already discloses, and there is **no email address in it**, which is the only
- * other identifying column `people` has.
+ * the employer-authored role label, and since #66 their display name — is
+ * exactly what the venue room's roll already discloses, and there is **no email
+ * address in it**, which is the only other identifying column `people` has.
  *
  * One entry per counterpart per venue: two venues are two entries, and two
  * stints at one venue are merged by `Visibility.merge_stints/1` before they
@@ -94,6 +94,7 @@ export function normalisePersonId(value: string): string | null {
  */
 export type Peer = {
   readonly personId: string;
+  readonly displayName: string;
   readonly venueId: string;
   readonly venueName: string;
   readonly roleLabel: string;

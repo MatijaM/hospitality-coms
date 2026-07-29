@@ -283,6 +283,7 @@ describe("merging a room's history with its stream", () => {
     body,
     sentAt: "2026-07-28T09:00:00Z",
     authorEngagementId: "33333333-3333-4333-8333-333333333333",
+    authorDisplayName: "Captain Nemo",
   });
 
   it("puts the fetched history first and appends what arrived after", () => {

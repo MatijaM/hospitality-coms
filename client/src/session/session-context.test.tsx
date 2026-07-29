@@ -146,7 +146,11 @@ describe("resolving a stored token on load", () => {
   it("ignores a stale success about a token the store no longer holds", async () => {
     const store = createMemoryTokenStore("stale-token");
     const stale = deferred<ApiResult<Person>>();
-    const otherPerson = { id: "8b1b0a3c-0000-4000-8000-000000000002", email: null };
+    const otherPerson = {
+      id: "8b1b0a3c-0000-4000-8000-000000000002",
+      email: null,
+      displayName: "Wendy Darling",
+    };
 
     renderSession(
       createFakeApi({

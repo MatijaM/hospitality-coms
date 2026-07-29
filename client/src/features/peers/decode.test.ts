@@ -42,6 +42,7 @@ describe("the join reply", () => {
 describe("a peer", () => {
   const wire = {
     person_id: OTHER,
+    display_name: "Captain Nemo",
     venue_id: "8b1b0a3c-0000-4000-8000-00000000000e",
     venue_name: "The Anchor",
     role_label: "Bartender",
@@ -55,6 +56,7 @@ describe("a peer", () => {
     // one — `peers_test.exs` asserts its absence on the other side.
     expect(decodePeer(wire)).toEqual({
       personId: OTHER,
+      displayName: "Captain Nemo",
       venueId: wire.venue_id,
       venueName: "The Anchor",
       roleLabel: "Bartender",
