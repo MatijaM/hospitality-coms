@@ -111,6 +111,9 @@ fieldset > legend {
 }
 
 fieldset > button {
+  /* The global rule adds a top margin for a button that follows prose. In a
+     grid the row gap already spaces it, so the two compound. */
+  margin-top: 0;
   grid-column: 2;
   justify-self: start;
 }
