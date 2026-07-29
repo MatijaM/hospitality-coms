@@ -7,9 +7,15 @@ defmodule HospitalityComsWeb.EmployerController do
   carried by a channel with no events. These are its first routes, and the shape
   they establish is the one every later employer route copies.
 
-      GET  /api/employer/venues                          the venues this session may act for
-      GET  /api/employer/venues/:venue_id/engagements    that venue's people, now
-      POST /api/employer/venues/:venue_id/invitations    an offer, and the code that redeems it
+      GET    /api/employer/venues                        the venues this session may act for
+      GET    .../venues/:id/engagements                  that venue's people, now
+      POST   .../venues/:id/invitations                  an offer, and the code that redeems it
+      GET    .../venues/:id/shift-types                  the kinds of shift this venue runs
+      POST   .../venues/:id/shift-rooms                  tonight's shift
+      GET    .../venues/:id/shift-rooms                  the venue's shifts, most recent first
+      POST   .../shift-rooms/:id/roster                  put an engagement on one
+      GET    .../shift-rooms/:id/roster                  who is on it now
+      DELETE .../shift-rooms/:id/roster/:engagement_id   take them off it
 
   ## There is no employer pipeline, and there must not be one
 
@@ -110,6 +116,72 @@ defmodule HospitalityComsWeb.EmployerController do
   condition `unauthorized`. That divergence is deliberate and the argument is in
   `HospitalityComsWeb.EmployerAuth`'s moduledoc.
 
+  ## A shift room *is* the shift, and its list is bounded
+
+  There is no `shifts` table and there never was one: a shift room is a term, a
+  shift type, and the grace its type gives it. So `POST shift-rooms` names a
+  type and two instants, and `venue_id` and `grace_period_minutes` are **not
+  castable** — both come off the shift type
+  `HospitalityComs.Rooms.create_shift_room/3` resolves inside its own
+  transaction. A `venue_id` arriving in user attributes is a cross-tenant write
+  waiting for somebody to forget to strip it, and a castable grace would let one
+  room outlive the type that justified it.
+
+  The list is bounded to `HospitalityComs.Rooms.recent_shift_room_limit/0` and
+  `?extent=all` lifts it, exactly as `HospitalityComsWeb.RoomController`'s
+  history reads work, through the same `HospitalityComsWeb.Extent`. **The bound
+  selects the venue's *latest* rooms**, which is R11 and is not what a limit on
+  the rota's own order would have done — see
+  `HospitalityComs.Rooms.Records.most_recent_rooms/2`.
+
+  ## The roster's refusals are flat, and that includes "already rostered"
+
+  R15: *"Rostering an engagement that is already rostered, or naming a shift
+  room or engagement that does not belong to this venue, is refused without
+  disclosing which."* Four conditions, one answer — the same `404` and the same
+  sentence an id naming nothing gets. `HospitalityComs.Rosters` distinguishes
+  `:already_rostered` from `:not_found` internally and this is where the
+  distinction stops.
+
+  **The counter-argument is recorded rather than acted on**, because it is a
+  good one and reversing this is a requirement change rather than a bug fix.
+  `:already_rostered` is reachable only after both ids have resolved *inside the
+  caller's own venue* — `add_to_roster/3` checks the grant, then the room at
+  this venue, then a live engagement at this venue, and only then whether an
+  open entry exists — so it would disclose nothing the same session cannot read
+  from `GET …/roster`. That is exactly `HospitalityComsWeb.ClaimController`'s
+  argument for R6's three distinguishable refusals. What flatness costs is
+  operator feedback: a manager who adds the same person twice is told there is
+  no such shift room or engagement, which is true and unhelpful.
+
+  **The changeset arm collapses into the same answer**, and that is not
+  sloppiness. `HospitalityComs.Rosters.RosterEntry.join_changeset/3` casts
+  nothing from user attributes, so the only changeset `add_to_roster/3` can
+  produce is `roster_entries_no_overlap` — which is `:already_rostered` reached
+  by losing a race rather than by the friendly check. One condition, one answer.
+  It needs two concurrent callers and is therefore carried untested here;
+  `HospitalityComs.RostersTest` and `HospitalityComs.RoomsConcurrencyTest` own
+  it.
+
+  ## Removing closes a period, so the answer is `204` and not the row
+
+  `remove_from_roster/3` sets `left_at` and keeps the row (KTD6b) — access
+  somebody has already earned by overlapping a room's open window cannot be
+  withdrawn by any write this application permits. Handing the closed entry back
+  would give a client a row it must not render, so the answer is `204` with no
+  body and the client re-reads the roster.
+
+  ## A missing id in a body is `400`; a present one that names nothing is `404`
+
+  `shift_type_id` and `engagement_id` arrive in request bodies rather than
+  paths, so there are two distinct failures. Naming nothing at all is a client
+  bug and answers `400` with the field's name, which is
+  `HospitalityComsWeb.ClaimController`'s shape for a request carrying no
+  `claim_code`. Naming something malformed, something unknown, or something
+  belonging to another venue is the flat `404` — `HospitalityComsWeb.EntityId`
+  is what keeps the malformed one out of Ecto's query builder, where it would
+  raise and answer `500`, telling a caller malformed from unknown by the status.
+
   ## The rate limiter, revisited now that this surface writes
 
   `HospitalityComsWeb.LoginRateLimit` sits in front of `POST /api/log-in` alone,
@@ -137,14 +209,30 @@ defmodule HospitalityComsWeb.EmployerController do
   alias HospitalityComs.Engagements
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Engagements.Invitation
+  alias HospitalityComs.Rooms
+  alias HospitalityComs.Rooms.MessagePage
+  alias HospitalityComs.Rooms.ShiftRoom
+  alias HospitalityComs.Rooms.ShiftRoomPage
+  alias HospitalityComs.Rosters
+  alias HospitalityComs.Rosters.RosterEntry
+  alias HospitalityComs.Venues
+  alias HospitalityComs.Venues.ShiftType
   alias HospitalityComs.Venues.Venue
   alias HospitalityComsWeb.EmployerAuth
   alias HospitalityComsWeb.EntityId
   alias HospitalityComsWeb.ErrorEnvelope
+  alias HospitalityComsWeb.Extent
+  alias HospitalityComsWeb.RoomController
 
   @no_venue "no such venue, or it is not one you can act for"
+  @no_shift_type "no such shift type at this venue"
+  @no_shift_room "no such shift room at this venue"
+  @no_roster_target "no such shift room or engagement here, or the roster already says otherwise"
   @rejected_offer "the offer was not accepted"
+  @rejected_shift "the shift was not accepted"
   @grant_not_live "the authority this offer would confer is no longer live"
+  @shift_type_required "shift_type_id is required"
+  @engagement_required "engagement_id is required"
 
   # KTD-E5. Independent constants: the seven is not derived from
   # `Invitation.max_code_validity_in_days/0` and must not become so (issue #42).
@@ -154,6 +242,12 @@ defmodule HospitalityComsWeb.EmployerController do
   # Exactly what a caller may name. `grant_id` is deliberately absent — see the
   # moduledoc.
   @offer_fields ~w(role_label starts_at ends_at code_expires_at)
+
+  # And exactly what a caller may name about a shift. `venue_id` and
+  # `grace_period_minutes` are absent because both come off the resolved shift
+  # type; `shift_type_id` is absent because it is an argument rather than an
+  # attribute, cast before the context is called.
+  @term_fields ~w(starts_at ends_at)
 
   @doc """
   The venues this session may act for at the request's instant.
@@ -223,6 +317,194 @@ defmodule HospitalityComsWeb.EmployerController do
     end
   end
 
+  @doc """
+  The kinds of shift this venue runs, oldest first.
+
+  A venue with none answers `200 []` rather than a refusal: the venue exists and
+  this session may act for it, and having configured nothing is not an error. It
+  does mean no shift can be created there, which is a gap in the seed rather
+  than in this route.
+  """
+  @spec shift_types(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def shift_types(conn, %{"venue_id" => venue_id}) do
+    %PersonScope{} = scope = conn.assigns.current_scope
+
+    with {:ok, id} <- EntityId.cast(venue_id),
+         {:ok, employer} <- EmployerAuth.employer_scope(scope, id),
+         {:ok, types} <- Venues.list_shift_types(employer) do
+      json(conn, %{shift_types: Enum.map(types, &render_shift_type/1)})
+    else
+      :error -> not_found(conn)
+      {:error, :no_grant} -> not_found(conn)
+    end
+  end
+
+  @doc """
+  Creates tonight's shift: a room of the named type, over the named term.
+
+  The type is resolved against the database at this venue, and the room's
+  `venue_id` and `grace_period_minutes` come from it rather than from the body.
+  See the moduledoc.
+  """
+  @spec create_shift_room(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def create_shift_room(conn, %{"venue_id" => venue_id, "shift_type_id" => type} = params) do
+    %PersonScope{} = scope = conn.assigns.current_scope
+
+    with {:ok, id} <- EntityId.cast(venue_id),
+         {:ok, employer} <- EmployerAuth.employer_scope(scope, id),
+         {:ok, type_id} <- named(type),
+         {:ok, room} <- Rooms.create_shift_room(employer, type_id, term(params)) do
+      conn
+      |> put_status(:created)
+      |> json(%{shift_room: RoomController.rendered_shift_room(room)})
+    else
+      :error -> not_found(conn)
+      {:error, :no_grant} -> not_found(conn)
+      {:error, :not_found} -> no_shift_type(conn)
+      {:error, %Ecto.Changeset{} = changeset} -> rejected_shift(conn, changeset)
+    end
+  end
+
+  def create_shift_room(conn, _params), do: refuse(conn, :bad_request, @shift_type_required)
+
+  @doc """
+  The venue's shift rooms, most recent first and bounded unless `extent=all`.
+
+  "Most recent" is by the shift's own start, and the page comes back earliest
+  first within itself so that a rota reads forwards. `complete` says whether the
+  page is the lot; a caller cannot work that out from the list, because a full
+  page and a full history of the same length are the same list.
+  """
+  @spec shift_rooms(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def shift_rooms(conn, %{"venue_id" => venue_id} = params) do
+    %PersonScope{} = scope = conn.assigns.current_scope
+
+    with {:ok, id} <- EntityId.cast(venue_id),
+         {:ok, extent} <- Extent.cast(params),
+         {:ok, employer} <- EmployerAuth.employer_scope(scope, id),
+         {:ok, %ShiftRoomPage{} = page} <- Rooms.list_shift_rooms(employer, extent) do
+      json(conn, %{
+        shift_rooms: Enum.map(page.rooms, &RoomController.rendered_shift_room/1),
+        complete: page.complete
+      })
+    else
+      :error -> refuse_cast(conn, params)
+      {:error, :no_grant} -> not_found(conn)
+    end
+  end
+
+  @doc """
+  Puts an engagement on a shift room's roster, from this request's instant.
+
+  The entry has no upper bound until somebody removes it, so a person added
+  mid-shift is a member for the rest of the room's open window. An engagement
+  whose term has not opened yet is accepted — that is what a rota is for — and
+  confers nothing until it does.
+  """
+  @spec create_roster_entry(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def create_roster_entry(
+        conn,
+        %{
+          "venue_id" => venue_id,
+          "shift_room_id" => shift_room_id,
+          "engagement_id" => engagement_id
+        }
+      ) do
+    %PersonScope{} = scope = conn.assigns.current_scope
+
+    with {:ok, id} <- EntityId.cast(venue_id),
+         {:ok, employer} <- EmployerAuth.employer_scope(scope, id),
+         {:ok, room_id} <- named(shift_room_id),
+         {:ok, held} <- named(engagement_id),
+         {:ok, entry} <- Rosters.add_to_roster(employer, room_id, held) do
+      conn
+      |> put_status(:created)
+      |> json(%{roster_entry: render_roster_entry(entry)})
+    else
+      :error -> not_found(conn)
+      {:error, :no_grant} -> not_found(conn)
+      {:error, :not_found} -> no_roster_target(conn)
+      {:error, :already_rostered} -> no_roster_target(conn)
+      {:error, %Ecto.Changeset{}} -> no_roster_target(conn)
+    end
+  end
+
+  def create_roster_entry(conn, _params), do: refuse(conn, :bad_request, @engagement_required)
+
+  @doc """
+  The shift room's roster at this request's instant, earliest joined first.
+
+  Entries whose period contains the instant, each naming the engagement and its
+  role label. Not the room's membership — an entry can be live before the room
+  opens — and not its readers, which includes closed periods that overlapped.
+  """
+  @spec roster(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def roster(conn, %{"venue_id" => venue_id, "shift_room_id" => shift_room_id}) do
+    %PersonScope{} = scope = conn.assigns.current_scope
+
+    with {:ok, id} <- EntityId.cast(venue_id),
+         {:ok, employer} <- EmployerAuth.employer_scope(scope, id),
+         {:ok, room_id} <- named(shift_room_id),
+         {:ok, entries} <- Rosters.list_roster(employer, room_id) do
+      json(conn, %{roster: Enum.map(entries, &render_roster_entry/1)})
+    else
+      :error -> not_found(conn)
+      {:error, :no_grant} -> not_found(conn)
+      {:error, :not_found} -> no_shift_room(conn)
+    end
+  end
+
+  @doc """
+  Takes an engagement off a shift room's roster, closing its period at this
+  request's instant.
+
+  `204`, and the row stays. See the moduledoc.
+  """
+  @spec delete_roster_entry(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def delete_roster_entry(conn, %{
+        "venue_id" => venue_id,
+        "shift_room_id" => shift_room_id,
+        "engagement_id" => engagement_id
+      }) do
+    %PersonScope{} = scope = conn.assigns.current_scope
+
+    with {:ok, id} <- EntityId.cast(venue_id),
+         {:ok, employer} <- EmployerAuth.employer_scope(scope, id),
+         {:ok, room_id} <- named(shift_room_id),
+         {:ok, held} <- named(engagement_id),
+         {:ok, _entry} <- Rosters.remove_from_roster(employer, room_id, held) do
+      send_resp(conn, :no_content, "")
+    else
+      :error -> not_found(conn)
+      {:error, :no_grant} -> not_found(conn)
+      {:error, :not_found} -> no_roster_target(conn)
+      {:error, :not_rostered} -> no_roster_target(conn)
+    end
+  end
+
+  # An id a client named, refused the way the context refuses one that names
+  # nothing.
+  #
+  # **The venue is cast separately, before this, and that ordering is the
+  # design.** A malformed venue id has to answer what an unresolvable venue
+  # answers (R17); a malformed *shift room* or *engagement* id has to answer
+  # what an id naming nothing answers, which is a different sentence and a
+  # different requirement (R15). One `EntityId.cast/1` in a `with` cannot tell
+  # the two apart, because both arms are `:error`.
+  @spec named(String.t()) :: {:ok, Ecto.UUID.t()} | {:error, :not_found}
+  defp named(id), do: id |> EntityId.cast() |> cast_or_refuse()
+
+  @spec cast_or_refuse({:ok, Ecto.UUID.t()} | :error) ::
+          {:ok, Ecto.UUID.t()} | {:error, :not_found}
+  defp cast_or_refuse({:ok, id}), do: {:ok, id}
+  defp cast_or_refuse(:error), do: {:error, :not_found}
+
+  # Two instants off the body and nothing else. The shift type is a positional
+  # argument to `create_shift_room/3` and the room's venue and grace come off
+  # it, so `Map.take/2` here is what stops either arriving from a client.
+  @spec term(map()) :: map()
+  defp term(params), do: Map.take(params, @term_fields)
+
   # Four fields off the body and three defaults, and neither half is negotiable:
   # `Map.take/2` is what stops a `grant_id` reaching the changeset, and the
   # instant is the scope's rather than a second reading of the clock (KTD-E1).
@@ -284,14 +566,96 @@ defmodule HospitalityComsWeb.EmployerController do
     }
   end
 
+  # `venue_id` is *not* rendered: the caller named it in the path, and a shift
+  # type has no other field. `grace_period_minutes` is here because it is the
+  # only thing that distinguishes two types with similar names, and because it
+  # is what a manager is choosing between.
+  @spec render_shift_type(ShiftType.t()) :: %{
+          shift_type_id: Ecto.UUID.t(),
+          name: String.t(),
+          grace_period_minutes: non_neg_integer()
+        }
+  defp render_shift_type(%ShiftType{} = shift_type) do
+    %{
+      shift_type_id: shift_type.id,
+      name: shift_type.name,
+      grace_period_minutes: shift_type.grace_period_minutes
+    }
+  end
+
+  # **A field list off a preloaded `Engagement`**, and that is the reason for
+  # the shape rather than tidiness: an `Engagement` carries `person_id`, the
+  # globally stable cross-venue key `CLAUDE.md` records as a live disclosure. A
+  # roster rendered wholesale would hand a manager the identity key of everybody
+  # on the shift.
+  #
+  # `engagement_id` is the entry's identity on this API — it is what the
+  # removal route names, and `roster_entries_no_overlap` plus
+  # `Records.rostered_at/2` mean at most one live entry per engagement per room,
+  # so it is unique within the response. The entry's own id is not rendered
+  # because no route takes one.
+  #
+  # `left_at` is not rendered either: every entry in this list is live at the
+  # request's instant, so the column is null or in the future, and shipping it
+  # would invite a client to render a closed period.
+  @spec render_roster_entry(RosterEntry.t()) :: %{
+          engagement_id: Ecto.UUID.t(),
+          role_label: String.t(),
+          joined_at: String.t()
+        }
+  defp render_roster_entry(%RosterEntry{engagement: %Engagement{} = engagement} = entry) do
+    %{
+      engagement_id: entry.engagement_id,
+      role_label: engagement.role_label,
+      joined_at: DateTime.to_iso8601(entry.joined_at)
+    }
+  end
+
   @spec not_found(Plug.Conn.t()) :: Plug.Conn.t()
   defp not_found(conn), do: refuse(conn, :not_found, @no_venue)
 
+  @spec no_shift_type(Plug.Conn.t()) :: Plug.Conn.t()
+  defp no_shift_type(conn), do: refuse(conn, :not_found, @no_shift_type)
+
+  @spec no_shift_room(Plug.Conn.t()) :: Plug.Conn.t()
+  defp no_shift_room(conn), do: refuse(conn, :not_found, @no_shift_room)
+
+  # **R15's four conditions, one answer**: a shift room that is not this
+  # venue's, an engagement that is not, an id that names nothing, and an
+  # engagement already on this roster. Also the removal's `:not_rostered`,
+  # which covers an entry closed a moment ago and a room that never existed.
+  #
+  # The sentence is its own rather than `@no_venue` because by this point the
+  # *venue* has resolved — the session proved it may act for it — so a sentence
+  # about the venue would be one the caller can see is false. That the venue
+  # resolved is not a disclosure: they hold the grant, so they knew.
+  @spec no_roster_target(Plug.Conn.t()) :: Plug.Conn.t()
+  defp no_roster_target(conn), do: refuse(conn, :not_found, @no_roster_target)
+
+  # `HospitalityComsWeb.RoomController`'s manoeuvre, for the same reason: both
+  # casts answer `:error` and the two mistakes are not the same mistake. A
+  # malformed id is `404`; an unknown extent is `400`.
+  @spec refuse_cast(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  defp refuse_cast(conn, params), do: refuse_extent(conn, Extent.cast(params))
+
+  @spec refuse_extent(Plug.Conn.t(), {:ok, MessagePage.extent()} | :error) :: Plug.Conn.t()
+  defp refuse_extent(conn, :error), do: refuse(conn, :bad_request, Extent.refusal())
+  defp refuse_extent(conn, {:ok, _extent}), do: not_found(conn)
+
   @spec rejected(Plug.Conn.t(), Ecto.Changeset.t(Invitation.t())) :: Plug.Conn.t()
-  defp rejected(conn, changeset) do
+  defp rejected(conn, changeset), do: rejected_with(conn, @rejected_offer, changeset)
+
+  @spec rejected_shift(Plug.Conn.t(), Ecto.Changeset.t(ShiftRoom.t())) :: Plug.Conn.t()
+  defp rejected_shift(conn, changeset), do: rejected_with(conn, @rejected_shift, changeset)
+
+  # A rejected *write* is `422` with the fields it rejected, and nothing is
+  # disclosed by it: the session has already proved it may act for the venue, so
+  # the only news in the body is what it just sent.
+  @spec rejected_with(Plug.Conn.t(), String.t(), Ecto.Changeset.t()) :: Plug.Conn.t()
+  defp rejected_with(conn, message, changeset) do
     conn
     |> put_status(:unprocessable_entity)
-    |> json(ErrorEnvelope.for_changeset(:unprocessable_entity, @rejected_offer, changeset))
+    |> json(ErrorEnvelope.for_changeset(:unprocessable_entity, message, changeset))
   end
 
   # The status atom is the envelope's code, so the two cannot drift apart —

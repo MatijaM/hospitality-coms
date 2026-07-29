@@ -95,6 +95,59 @@ defmodule HospitalityComs.RoomsFixtures do
   end
 
   @doc """
+  `count` shift rooms of `shift_type`, one day apart from `first_starts_at` and
+  eight hours long, returning their ids **earliest first**.
+
+  ## Why this is `insert_all` rather than thirty-one creations
+
+  `HospitalityComs.Rooms.recent_shift_room_limit/0` can only be demonstrated by
+  a venue holding **more rooms than the bound**, and a test asserting "thirty
+  came back" against a fixture of twelve passes for the wrong reason — the shape
+  `docs/solutions/test-failures/tests-that-certify-nothing.md` catalogues. So
+  every such test needs `limit + 1` rooms, four of them do, and
+  `Rooms.create_shift_room/3` is a transaction with a grant resolution and a
+  type resolution in it.
+
+  `closes_at` is a generated column and is left to the database, exactly as it
+  is on the real write.
+
+  **The ids are returned earliest first**, because the assertion that matters is
+  not how many rooms came back but *which*: a bound that took the venue's oldest
+  rooms satisfies every count. A caller names `List.first/1` and `List.last/1`.
+  """
+  @spec shift_rooms_fixture(EmployerScope.t(), ShiftType.t(), pos_integer(), DateTime.t()) ::
+          [Ecto.UUID.t()]
+  def shift_rooms_fixture(
+        %EmployerScope{} = scope,
+        %ShiftType{} = shift_type,
+        count,
+        %DateTime{} = first_starts_at
+      )
+      when is_integer(count) and count > 0 do
+    stamped_at = DateTime.truncate(scope.now, :second)
+
+    rows =
+      Enum.map(1..count//1, fn n ->
+        starts_at = DateTime.truncate(DateTime.add(first_starts_at, n - 1, :day), :second)
+
+        %{
+          id: Ecto.UUID.generate(),
+          venue_id: shift_type.venue_id,
+          shift_type_id: shift_type.id,
+          starts_at: starts_at,
+          ends_at: DateTime.add(starts_at, 8, :hour),
+          grace_period_minutes: shift_type.grace_period_minutes,
+          inserted_at: stamped_at,
+          updated_at: stamped_at
+        }
+      end)
+
+    {^count, nil} = Repo.insert_all(ShiftRoom, rows)
+
+    Enum.map(rows, & &1.id)
+  end
+
+  @doc """
   A roster entry putting `engagement_id` on `room` from the scope's instant.
   """
   @spec roster_entry_fixture(EmployerScope.t(), ShiftRoom.t(), Ecto.UUID.t()) :: RosterEntry.t()
