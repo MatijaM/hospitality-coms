@@ -72,6 +72,15 @@ defmodule HospitalityComsWeb.Router do
     # venues it is engaged at.
     get "/employer/venues", EmployerController, :venues
     get "/employer/venues/:venue_id/engagements", EmployerController, :engagements
+    post "/employer/venues/:venue_id/invitations", EmployerController, :create_invitation
+
+    # The other half of the handshake, and it is **not** under `/employer`. A
+    # claimant needs no prior relationship to the venue — no grant, no
+    # engagement, nothing but the code somebody handed them out of band — so
+    # nesting it under a venue would name an authority the caller does not have
+    # and cannot be asked for. `HospitalityComsWeb.ClaimController` casts the
+    # code and nothing else: accepting an offer is accepting *the* offer.
+    post "/claims", ClaimController, :create
   end
 
   # The mailbox preview is how the magic link is read during development, since
