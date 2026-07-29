@@ -409,3 +409,133 @@ the wrong reason**.
 | Regression protection | 4/5 | rests on seven existing files, two of which (`parameter_filter_test.exs`, `boundary_test.exs`) are asserted by *not moving* |
 | Falsifiability | 5/5 | every row names a mechanism whose removal fails it; rows 18 and 16 name the fixture design as the mechanism, which is the unit's finding |
 | Risk of a vacuous pass | 4/5 | closed on the headline rows; the residue is that rows 4–8 assert against a response rather than against the row, so a render that echoed the request would pass them — row 3 and row 10 are what reach the row |
+
+## Revisions made during implementation
+
+Recorded rather than silently applied, because the gate exists to be departed from explicitly.
+The sections above are not edited to agree with what shipped.
+
+1. **Decision 4's AE3 argument is wrong in its mechanism and in its conclusion, and the plan is
+   wrong with it — measured.** The plan says: *"Two claimants produce non-overlapping engagements,
+   so the count is 2 without the consume step and the guard is the only thing holding it at 1."*
+
+   **Measured: with the consume's `claimed_at IS NULL` clause deleted, the count is 1 with two
+   claimants as well as with one.** One invitation can produce at most one engagement whatever the
+   consume does, because `engagements.invitation_id` carries a unique index — the backstop
+   `HospitalityComs.Engagements`'s moduledoc names in "Three races" and
+   `*_create_engagements.exs` documents under *"The unique index on `invitation_id` is the race
+   guard"*. The plan attributes the one-claimant floor to `engagements_no_overlap`; the observed
+   refusal is `invitation_id has already been taken`, from the index, in both fixtures.
+
+   So the **count certifies nothing in either fixture**, and the assertion that kills the mutation
+   in both is the **status**: `409 conflict` becomes `422 unprocessable_entity`. Both fixtures
+   kill it.
+
+   The two-claimant fixture is kept, on a weaker and true claim rather than the plan's: with one
+   claimant *three* mechanisms refuse the second call — the consume, the unique index and the
+   exclusion constraint — and a green test cannot say which it exercised. Two claimants remove one
+   of the three. The test's comment and the file's moduledoc now say exactly this, and the count
+   is labelled as AE3's literal requirement rather than as the proof.
+
+2. **The plan's AE2 prediction is exactly right, and is now measured.** A one-claimant version of
+   the two-offers test was written, run against a **correct** tree, and fails with
+   `422 {"period": ["overlaps an engagement this person already holds at this venue"]}` — a
+   failure that reads as a bug in the route. The probe file was deleted after measuring.
+
+3. **KTD-E5's claim about which bound the both-directions test pins is wrong.** The plan says
+   *"U2's both-directions test pins the **changeset's** bound"*. **Measured: neutering
+   `Invitation.validate_code_validity/2` kills nothing** — `declare_constraints/1` attaches
+   `invitations_code_expiry_within_bound` with the *same message string*, so Postgres refuses and
+   Ecto returns an identical field error. No route-level test can attribute the refusal to either
+   declaration, by construction.
+
+   That is `docs/solutions/test-failures/what-a-zero-kill-mutation-means.md`'s case (b) — a
+   redundant guard — but **not** its remedy: the two guards protect different entry points on
+   purpose (the changeset for callers, the CHECK for a `Repo.insert_all` that never passed through
+   one), and `engagements_test.exs` has the test that bypasses the changeset to prove the second.
+   So nothing is deleted; the claim is corrected. What the test does pin is *the bound, as
+   observed from the route*, and it is load-bearing: moving `@max_code_validity_in_days` to 21
+   while the migration's literal stays at 14 kills it, alongside `constant_agreement_test.exs`.
+   It is a second tripwire on issue #42's pair, from a third place.
+
+4. **Decision 3 held: the `:conferrable, :grant_not_live` arm is reachable and is tested.** The
+   plan's instruction to state it as untested was not followed, and the test kills a mutation
+   (M19). The *employer* route's own `:grant_not_live` arm is the one that is genuinely
+   unreachable, and it is recorded in `EmployerController`'s moduledoc rather than given a test
+   that appears to reach it.
+
+5. **`config/config.exs` is untouched, as Decision 6 predicted.** The allowlist already covers
+   `claim_code`, and M21 — adding `claim_code` to the keep list, which is literally what the plan
+   asked for — **kills the new log test**. The plan's instruction would have introduced the bug
+   its own requirement forbids.
+
+6. **One row moved file.** Row 24's employer half lives in `employer_controller_test.exs` and its
+   claim half in `claim_controller_test.exs`, one test each rather than one row spanning two
+   files.
+
+7. **Rows do not map one-to-one onto test bodies**, as every unit since U8 has recorded.
+   Twenty-six rows became **twenty-two** new Elixir bodies — eleven added to
+   `employer_controller_test.exs` and eleven in the new `claim_controller_test.exs`. Rows 7 and 8
+   are one body (a bound is one test, read from both sides), rows 1–2 and 13–14 are one body each
+   with their control inline, and rows 25–26 are whole existing files rather than new bodies.
+
+8. **One new test passes against a tree with no route at all**, and it is worth naming rather than
+   leaving for somebody to find. "Refuses a code that names nothing, and writes no engagement"
+   asserts `404` with `code: "not_found"`, which is exactly what Phoenix's own router answers for
+   an unrouted path — so during the red run it was the single green test in the file. It is
+   load-bearing now (M16 kills it), but the file's other refusal tests are what distinguish "the
+   route exists and refused" from "there is no route".
+
+9. **Baseline arithmetic.** **1144/1148** before, **1166/1170** after — twenty-two new bodies, and
+   the same four `PostgresRolesTest` failures naming `hospitality_coms_dev` (issue #20), which are
+   a developer's local migration rather than this branch's.
+
+10. **A note on running this suite locally.** The Postgres cluster is shared with other projects,
+    `max_connections` is 100, and one `mix test` here opens `System.schedulers_online() * 2`
+    connections **per repo** — 64 on a sixteen-core machine. With two other suites running, that
+    does not fit and every run dies at `ecto.create` with `53300 too_many_connections`, which
+    reads like a broken database rather than a busy one. `ELIXIR_ERL_OPTIONS="+S 4:4"` brings it
+    to 16 and is what the mutation runs below used.
+
+## Mutation record
+
+Twenty-three mutations, each applied to a clean tree, measured against the narrowest file that
+could answer, then restored. Every new behavioural test is killed by at least one.
+
+| # | Mutation | Tests killed |
+|---|----------|--------------|
+| 1 | `Records.claimable/2` drops `is_nil(claimed_at)` — the consume guard | 1 |
+| 2 | `render_invitation/1` grows `claim_code_digest` | 1 |
+| 3 | `render_invitation/1` loses `code_expires_at` | 5 |
+| 4 | `claim_code` carries the digest rather than the code | 2 |
+| 5 | `offer/2` uses `Map.put/3` rather than `Map.put_new/3` | 3 |
+| 6 | `offer/2` defaults nothing | 9 |
+| 7 | `@offer_fields` widened to include `grant_id` | 1 |
+| 8 | the code-expiry default moves from 7 to 14 — onto the bound | 2 |
+| 9 | the term default moves from 90 days to 1 | 1 |
+| 10 | `starts_at` defaults to tomorrow | 2 |
+| 11 | `Invitation.validate_code_validity/2` neutered | **0** — see revision 3 |
+| 11b | `@max_code_validity_in_days` moves to 21, the migration's literal does not | 2 (one of them `constant_agreement_test.exs`'s) |
+| 12 | `create_invitation/2` skips `EntityId.cast/1` | 1 |
+| 13 | `create_invitation/2`'s `:no_grant` answers `403` | 1 |
+| 14 | `:already_claimed` maps to `404` like an unknown code | 1 |
+| 15 | `:code_expired` maps to `409` | 1 |
+| 16 | `:unknown_code` maps to `409` | 2 |
+| 17 | the claim's render grows `person_id` | 1 |
+| 18 | the changeset arm maps to `409` with no fields | 1 |
+| 19 | the `:conferrable` arm maps to `404` | 1 |
+| 20 | a missing `claim_code` answers like an unknown code | 1 |
+| 21 | **`claim_code` added to the allowlist — what the plan asked for** | 1 |
+| 22 | `POST /api/claims` leaves the `:authenticated_person` pipeline | 1 |
+| 23 | the claim's render loses `accepted_at` | 1 |
+
+**Mutations 1, 11 and 21 are the ones worth reading twice.** The first disproves the plan's
+account of AE3 while confirming its instinct. The second is a zero-kill that is *not* a coverage
+hole, and the reasoning for leaving it is revision 3. The third is the plan's own instruction,
+applied as a patch, breaking the requirement it was written to satisfy.
+
+Two things are deliberately **not** asserted, following U1. Nothing pins `.credo.exs`'s contents
+from a test — the rule is that the file does not change, which a diff shows and a test would only
+restate. And nothing asserts the absence of a `grant_id` field on the *form*, only that a body
+naming one confers nothing; a test for the absence of a thing passes for ever whether or not
+anything prevents it.
