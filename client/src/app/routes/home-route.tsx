@@ -42,6 +42,19 @@
  * a log-out control that moved with the tab would be a log-out control a worker
  * has to hunt for.
  *
+ * It is `SessionBar` now rather than inline markup, because U4 added two full
+ * pages of their own and a shared terminal needs the log-out on every screen a
+ * session rests on. Same sentence, same button label, moved verbatim.
+ *
+ * ## The two employer doors are links and not tabs
+ *
+ * `/employer` and `/claim` are used by two people in two windows at once, so
+ * neither is "another surface of mine" the way the three tabs are — and the
+ * tab strip is a keyboard widget whose wrapping is asserted over exactly three
+ * entries. They sit under their own heading with a sentence saying which
+ * person each is for, which is also the only place this client says out loud
+ * that managing a venue and working at one are the same account.
+ *
  * It lost its `<h1>Signed in</h1>` in the move. Each of the three surfaces
  * brings its own — "Rooms", "Peers", "Your record" — so keeping one here made
  * two on the page, and the one that would have won the reader's attention was
@@ -71,12 +84,14 @@
 
 import type { KeyboardEvent } from "react";
 import { useId, useRef, useState } from "react";
+import { Link } from "react-router";
 
 import { PeersRoute } from "../../features/peers/peers-route";
 import { ProfileRoute } from "../../features/profile/profile-route";
 import type { RoomStore } from "../../features/rooms/room-store";
 import { RoomsRoute } from "../../features/rooms/rooms-route";
 import { useSession } from "../../session/session-context";
+import { SessionBar } from "../session-bar";
 
 const TABS = [
   { id: "rooms", label: "Rooms" },
@@ -91,7 +106,7 @@ export type HomeRouteProps = {
 };
 
 export function HomeRoute({ roomStore }: HomeRouteProps) {
-  const { state, logOut } = useSession();
+  const { state } = useSession();
   const [open, setOpen] = useState<TabId>("rooms");
 
   // Unique per rendered strip, because two landing pages in one document would
@@ -143,17 +158,7 @@ export function HomeRoute({ roomStore }: HomeRouteProps) {
 
   return (
     <section>
-      <p>
-        You are signed in as <strong>{state.person.email ?? "an erased account"}</strong>.
-      </p>
-      <button
-        type="button"
-        onClick={() => {
-          void logOut();
-        }}
-      >
-        Log out
-      </button>
+      <SessionBar />
 
       <div role="tablist" aria-label="Your surfaces">
         {TABS.map((tab) => (
@@ -194,6 +199,24 @@ export function HomeRoute({ roomStore }: HomeRouteProps) {
         and a worker who came here to read a room should not have to scroll past
         them to reach one.
       */}
+      <h2>Venues</h2>
+      <p>
+        The same account does both of these. There is no separate employer log-in and no
+        employer password — an authority is something a venue grants to a person, and it
+        is checked against the database on every single request.
+      </p>
+      <ul>
+        <li>
+          <Link to="/employer">Venues you manage</Link> — who is engaged at one of them
+          right now, and the offer that brings somebody new onto it. Empty, with a
+          sentence, if nobody has granted you an authority anywhere.
+        </li>
+        <li>
+          <Link to="/claim">Claim a job</Link> — paste a code a manager handed you and see
+          the engagement it produced.
+        </li>
+      </ul>
+
       <h2>Profile</h2>
       <p>
         <strong>That tab cannot connect yet.</strong> The record itself is built —

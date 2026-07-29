@@ -1,13 +1,26 @@
 /**
  * The routing shell.
  *
- * Seven routes. `/rooms` is U7's, `/peers` is U8's and `/profile` is U9's, and
+ * Nine routes. `/rooms` is U7's, `/peers` is U8's and `/profile` is U9's, and
  * they are the three surfaces here that need a socket. `/` renders all three
  * in tabs and keeps its own; the three paths are what every test above those
  * surfaces enters through, so they stay whatever the landing page does. What is left of the plan
  * — archived engagements, erasure, the demo controls — still needs an endpoint
  * or a channel that does not exist, and a placeholder route for one would be a
  * guess at a URL somebody else is about to choose.
+ *
+ * **`/employer` and `/claim` are the two halves of one gesture and are two
+ * routes rather than one screen with a mode.** They are used by two different
+ * people in two different windows at the same time — that is the whole of the
+ * demo — and a mode switch would put a manager one wrong click away from a
+ * claim box and a new starter one wrong click away from issuing offers at a
+ * venue they do not manage. `/claim` is deliberately not under `/employer`
+ * either, mirroring `POST /api/claims` not being under `/api/employer`: a
+ * claimant needs no authority anywhere.
+ *
+ * Both sit behind `RequireSession` like every other surface. The claimant needs
+ * their **own** session — the code confers a job, not a log-in — and that is
+ * the property the second demo window exists to show.
  *
  * **`/profile` is the one route here whose channel does not exist either**, and
  * that is a deliberate exception rather than the rule quietly bending: U9
@@ -35,6 +48,8 @@
 
 import { Route, Routes } from "react-router";
 
+import { ClaimPanel } from "../features/claim/claim-panel";
+import { EmployerRoute } from "../features/employer/employer-route";
 import { PeersRoute } from "../features/peers/peers-route";
 import { ProfileRoute } from "../features/profile/profile-route";
 import { RoomsRoute } from "../features/rooms/rooms-route";
@@ -78,6 +93,22 @@ export function App({ roomStore }: { readonly roomStore: RoomStore }) {
           element={
             <RequireSession>
               <ProfileRoute />
+            </RequireSession>
+          }
+        />
+        <Route
+          path="/employer"
+          element={
+            <RequireSession>
+              <EmployerRoute />
+            </RequireSession>
+          }
+        />
+        <Route
+          path="/claim"
+          element={
+            <RequireSession>
+              <ClaimPanel />
             </RequireSession>
           }
         />

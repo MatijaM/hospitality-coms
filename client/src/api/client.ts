@@ -34,6 +34,26 @@
  * feature's resource — they are how a session begins and ends, they are the
  * only calls that are not GETs, and two of them run before there is a token to
  * pass.
+ *
+ * ## `write` is `read`'s counterpart and the file gains nothing else
+ *
+ * The employer surface is mostly writes, and until it there was no
+ * authenticated non-GET here at all. `write` sits beside `read` under the same
+ * rule one verb further: **this file owns "an authenticated request that
+ * decodes or fails"; a feature owns its paths, its bodies and its wire
+ * shapes.**
+ *
+ * It takes the method and the one status that counts as success, rather than
+ * being three functions, because the two callers this surface has already
+ * disagree about both: `POST /api/employer/venues/:id/invitations` succeeds
+ * `201` with a body, and U5's roster removal succeeds `204` with none.
+ *
+ * **The decoder is optional and that is the whole difference from `read`.**
+ * Omitting it means the response body is never read — which is what makes a
+ * bodiless `204` a success rather than `malformed_response`, and it is exactly
+ * what a `read`-shaped implementation gets wrong. `read` cannot have that
+ * branch: every route it serves answers `200` with a body, so a `204` there is
+ * a contract drift and is reported as one.
  */
 
 import { decodeErrorEnvelope, decodePersonEnvelope, decodeSession } from "./decode";
@@ -57,6 +77,26 @@ export type FetchLike = (url: string, init: RequestInit) => Promise<HttpResponse
 export type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly failure: RequestFailure };
+
+/** The methods this API answers on anything that is not a read. */
+export type WriteMethod = "POST" | "PUT" | "PATCH" | "DELETE";
+
+/**
+ * One authenticated write, described by the feature that owns it.
+ *
+ * `status` is the single status that counts as success, named rather than
+ * guessed: `201` for a resource this request created, `204` for one it removed.
+ * Anything else — including a `200` nobody planned for — is a failure, decoded
+ * as the error envelope, for the reason `read` gives about `204`.
+ */
+export type WriteRequest = {
+  readonly method: WriteMethod;
+  /** Absolute from the API root, carrying its own query string if it has one. */
+  readonly path: string;
+  /** Serialised as JSON. Omitted for a request that carries none. */
+  readonly body?: unknown;
+  readonly status: number;
+};
 
 export type ApiClientConfig = {
   /**
@@ -114,6 +154,28 @@ export type ApiClient = {
     path: string,
     sessionToken: string,
     decode: (body: unknown) => T | null,
+  ): Promise<ApiResult<T>>;
+
+  /**
+   * An authenticated write, decoded by the caller when it answers a body.
+   *
+   * Only `request.status` is a success; every other status is read as the error
+   * envelope, so a refusal arrives as `api_error` or `api_field_error` with the
+   * server's own `code` and `message` intact and a `422`'s `fields` attached to
+   * the inputs they name.
+   *
+   * `decode` returns `null` for "this is not that", exactly as everywhere else
+   * in this client, and `null` becomes `malformed_response`.
+   *
+   * **Omit `decode` for a success that carries no body.** The response body is
+   * then not read at all and the value is `null`, so a `204` is a success. `T`
+   * defaults to `null` for that case, which is why the two call shapes need no
+   * second function.
+   */
+  write<T = null>(
+    request: WriteRequest,
+    sessionToken: string,
+    decode?: (body: unknown) => T | null,
   ): Promise<ApiResult<T>>;
 };
 
@@ -280,6 +342,28 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
         200,
         decode,
       );
+    },
+
+    write<T>(
+      request: WriteRequest,
+      sessionToken: string,
+      decode?: (body: unknown) => T | null,
+    ): Promise<ApiResult<T>> {
+      const init: RequestInit = {
+        method: request.method,
+        headers: { ...JSON_HEADERS, ...bearer(sessionToken) },
+        ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+      };
+
+      if (decode !== undefined) {
+        return expectBody(request.path, init, request.status, decode);
+      }
+
+      // No decoder means no body is expected, so none is read — the branch
+      // `read` cannot have. `T` is `null` here by the signature's own default:
+      // inferring it from a decoder is the only way it is ever anything else,
+      // and there is no decoder on this path.
+      return expectStatus(request.path, init, request.status) as Promise<ApiResult<T>>;
     },
   };
 }

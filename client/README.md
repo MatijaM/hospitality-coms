@@ -2,20 +2,25 @@
 
 The React client for hospitality-coms. U12 is being built in slices — the plan's
 own note says it "is the coarsest unit in the plan and will likely split during
-execution once the surface count is real" — and four have landed: the
+execution once the surface count is real" — and five have landed: the
 **foundation** (toolchain, typed API client, log-in), the **room surfaces**
 (U7's venue and shift rooms, the composer, the revocation), the **peer
 surfaces** (U8's directory, the request state machine, 1:1 conversations,
-disconnect) and the **profile surface** (U9's record, per-audience disclosure,
-corrections).
+disconnect), the **profile surface** (U9's record, per-audience disclosure,
+corrections) and the **handshake** (the crude employer view's U4: the venue
+picker, the venue's people, the offer, and the claim panel that redeems it).
 
-**The fourth is different from the other three and the difference is not
-small: no channel on the server answers any of its events.** U9 settled the
-shapes and deliberately added no transport, so the profile surface is built
-against the shapes with the envelope written down in one place —
+**The profile surface is different from the other four and the difference is
+not small: no channel on the server answers any of its events.** U9 settled the
+shapes and deliberately added no transport, so it is built against the shapes
+with the envelope written down in one place —
 `src/features/profile/contract.ts`. Read that before assuming anything behind
 `/profile` works against a running server. U10 and U11's surfaces are still
 absent, and the table at the bottom says what each is waiting on.
+
+The handshake is the opposite case: `/employer` and `/claim` speak to routes
+that exist and are tested end to end on the server, so those two work against a
+running Phoenix today.
 
 ## Why a separate directory and not the asset pipeline
 
@@ -234,9 +239,40 @@ src/socket/           the connection, the channel error envelope, the topic-id r
 src/features/rooms/   venue and shift rooms: the list, a room, the composer
 src/features/peers/   the directory, requests, conversations, the disconnect
 src/features/profile/ the record, the disclosure ledger, corrections, a peer's record
-src/app/              routes, and the landing page that tabs three of them
+src/features/employer/ the venue picker, the venue's people, the offer and its code
+src/features/claim/   the worker's half of the handshake: one code, one engagement
+src/app/              routes, the landing page that tabs three of them, and three
+                      pieces of shared plumbing — `use-fetched.ts`, `session-bar.tsx`
+                      and `instant.ts`
 src/test-support/     fakes shared by the tests above the client and the socket
 ```
+
+`src/app/use-fetched.ts` was `features/rooms/use-room-lists.ts`'s private
+`useFetched` until the employer surface became its second caller. It is React
+state, so it is here rather than in `src/api/`: **nothing in `src/api/` imports
+React**, and that is what lets the client and its decoders be tested with no
+renderer at all.
+
+`src/app/session-bar.tsx` is the identity line and the log-out control, moved
+out of `HomeRoute` verbatim when U4 added two full pages of its own. Hospitality
+is a shared-terminal industry, and a log-out that only exists on the page the
+session opened on is one somebody has to navigate back to.
+
+`src/app/instant.ts` holds `instantLabel` and `termLabel` — one instant, and a
+term whose end carries its day only when the term crosses one. Both were
+`room.ts`'s, and that file recorded the condition for moving them: _"the move
+belongs to whichever unit adds the caller after U4's two."_ U4 added both, so it
+is that unit; the move landed one commit behind the code that owed it, and
+`docs/test-designs/2026-07-29-employer-u4-write-verb-and-handshake.md` says why.
+`room.ts` re-exports both under the same names, so no rooms file changed.
+
+**"Another day" is decided in the reader's timezone, by a formatter built at
+module load**, which is why `features/rooms/room.test.ts` sets `process.env.TZ`,
+calls `vi.resetModules()` and re-imports. A term of 23:00–07:00 crosses midnight
+in UTC and does not three hours east; a comparison made in UTC, or in the
+venue's zone, is wrong for somebody reading from anywhere else. The matrix
+covers both directions and kills a UTC comparison under `TZ=UTC` and
+`TZ=Pacific/Kiritimati` alike, measured.
 
 `src/socket/topic-id.ts` is the one rule for turning a string into a topic
 suffix — 36 bytes then a uuid cast, lowercased. It was written in `room.ts` and
@@ -275,11 +311,32 @@ no bare `Error` in it, and four members —
 produce, traced through `SessionController`, `PersonAuth` and `ErrorJSON`.
 Anything else becomes `unrecognised` with the wire value kept in `rawCode`.
 
-The server's `message` is **never rendered**. The envelope says it is for a
-human reading a log; the user-facing copy lives in `src/app/failure-message.ts`,
-keyed on `code`, and the switches are exhaustive, so adding a code fails the
-build. `fields` is the exception and is shown as it arrives, because those
-messages name an input the worker filled in.
+The server's `message` is **never rendered** — on the four session endpoints and
+the three socket surfaces. The envelope says it is for a human reading a log;
+the user-facing copy lives in `src/app/failure-message.ts`, keyed on `code`, and
+the switches are exhaustive, so adding a code fails the build. `fields` is the
+exception and is shown as it arrives, because those messages name an input the
+worker filled in.
+
+**The employer and claim surfaces are the deliberate exception, and it is a
+measurement rather than a preference.** `ErrorEnvelope`'s `code` _is_ the
+response's status atom, and `HospitalityComsWeb.ClaimController` answers `409`
+twice with two different sentences on purpose — `:already_claimed` (the offer is
+gone for good) and `:grant_not_live` (the code is unspent, and re-issuing the
+authority makes it work again). Those are opposite instructions to the person
+reading them, so a switch keyed on `conflict` must be wrong about one of them;
+R6 asks in as many words for "a sentence that distinguishes those three". Those
+controllers also write for the screen rather than the log — _"no such venue, or
+it is not one you can act for"_, _"that claim code has expired"_.
+
+So `features/employer/refusal-message.ts` and `features/claim/refusal-message.ts`
+render `failure.message`, and only for the failures those routes **author**:
+`unauthorized` comes from `PersonAuth` a pipeline above them and keeps local
+copy, as do a network failure and a malformed body, which carry no sentence at
+all. The cost is stated in both files: this client no longer controls that copy.
+Each surface therefore has two tests for it — one watching a sentence arrive,
+and a second sending a _different_ sentence under the same code, so a component
+hard-coding a string that happens to match fails.
 
 Nothing in `src/api/` throws. Every call answers `{ok: true, value}` or
 `{ok: false, failure}`, so a caller cannot skip the failure path by not writing
@@ -400,6 +457,14 @@ the conversation is still there when you come back, and this one is not.
 The open tab is deliberately **not** in the URL. Each surface already has one,
 and `?tab=peers` disagreeing with `/peers` about which is canonical is a bug
 nobody would find quickly.
+
+**`/employer` and `/claim` are links under the panel rather than two more
+tabs.** They are used by two different people in two windows at the same time,
+so neither is "another surface of mine" the way the three tabs are; and the tab
+strip is a keyboard widget whose wrapping is asserted over exactly three
+entries, so a fourth would be a rewrite of tests about something else. The
+sentence above the links is also the only place this client says out loud that
+managing a venue and working at one are the same account.
 
 **The Profile tab is shown even though nothing answers it**, with the reason on
 the page rather than in this file: the record, its attested entries and the
@@ -909,6 +974,82 @@ graph names who somebody knows; this names every term they have served, every
 venue that asserted one, every contest they have raised, and the ledger, which
 is the list of what they did not want seen.
 
+## The handshake
+
+`src/features/employer/` and `src/features/claim/` are the two halves of flow
+F1: a manager picks a venue, sees who is on it, offers somebody a job and copies
+a code; in a second window a new starter with their own session pastes that code
+and sees the engagement it produced.
+
+They are two feature directories and two routes rather than one screen with a
+mode. `POST /api/claims` is deliberately not under `/api/employer` — a claimant
+needs no grant, no engagement and no prior relationship to the venue — and a
+claim panel filed under the employer surface would say the opposite with its
+directory name.
+
+### `write` is the one verb `api/client.ts` gained
+
+`read` was "an authenticated GET that decodes or fails". `write` is the same
+sentence one verb further: it takes the method, the path, an optional body and
+**the single status that counts as success**, because the callers already
+disagree about it — the offer succeeds `201` with a body and U5's roster removal
+succeeds `204` with none.
+
+**The decoder is optional and that is the whole difference from `read`.**
+Omitting it means the body is never read, which is what makes a bodiless `204` a
+success rather than `malformed_response` — and it is exactly what a
+`read`-shaped implementation gets wrong. `read` cannot have that branch: every
+route it serves answers `200` with a body, so a `204` there is a drift and is
+reported as one. Both directions have a test, and `fake-api`'s `write` **fails
+by default** like `read` does, asserted directly in `fake-api.test.ts` so a
+surface cannot be tested without a reachable failure path.
+
+### The venue picker is a grant-based read, not the venue-room list
+
+`GET /api/employer/venues`, not `GET /api/venue-rooms`. The two return the same
+`{venue_id, name}` shape and the second needed no new route, so this was the
+plan's own recommendation — and it was settled the other way, for a reason that
+is a fact about the contexts rather than a preference.
+
+`Rooms.list_venue_rooms/1` applies `unsuspended/2`;
+`Engagements.fetch_grant_holding_engagement/2` never consults a suspension. So a
+manager who used the person-side venue-room opt-out — their own choice, about
+their own reading, at their own venue — would keep full authority over that
+venue and **disappear from their own picker**, with no other way in and nothing
+failing anywhere to say why, since every employer request they made by hand
+would still work. That is the coupling KTD18 exists to prevent, arriving at the
+transport after both tiers below it got it right. `engagements_test.exs` carries
+the suspended manager who appears in the grant-based list with
+`list_venue_rooms/1` answering `[]` beside them; `employer-route.test.tsx`
+asserts the path, because nothing about the rendered list distinguishes the two.
+
+### The claim code exists in exactly one place
+
+`useOfferDesk` holds it in component state. Nothing else touches it: no store,
+no `localStorage` key, no URL, and nothing added to `SessionProvider`'s
+`onSessionEnded`, because there is nothing here that would survive to be
+cleared. The row keeps only a SHA-256 digest and no route renders one, so
+dismissing does not hide the code — it loses it, which is why the warning sits
+**beside** it rather than appearing afterwards (R2).
+
+Three tests carry that, and each reaches the positive state before asserting an
+absence: dismissing hides it and a re-render does not bring it back; choosing
+another venue loses it (`VenueDesk` is keyed on the venue); and logging out
+takes it off the screen, which is why `SessionBar` is on this page at all.
+
+### Nothing on the employer page names a human
+
+`GET /api/employer/venues/:venue_id/engagements` renders `{engagement_id,
+role_label, starts_at, ends_at}` and there is no name column anywhere in the
+schema to omit. The client carries the fourth pin on that (the server has three):
+every decoder builds its object naming fields one at a time — never a spread —
+so a `person_id` that reaches this client reaches nothing past the decoder.
+`features/employer/decode.test.ts` pins the key set against a literal written
+out in the test file and feeds a payload carrying `person_id` and an email
+through it; `employer-route.test.tsx` does the same against the DOM, with the
+same fixture, because a fixture without one would make both assertions pass for
+the wrong reason.
+
 ## Deliberately absent, and why
 
 Nothing below is stubbed. A placeholder for a shape nobody has chosen costs the
@@ -925,16 +1066,18 @@ The worker-facing profile surface is **built** and its transport is not; that is
 "waiting on U9" would be wrong in both directions — U9 has landed, and the
 events still do not exist.
 
-`lib/hospitality_coms_web/router.ex` declares the four session routes plus the
-four room reads issue #48 added, and the dev mailbox preview. `src/api/client.ts`
-covers the session four as named methods and everything else through one generic
-`read`; the room paths and decoders live in `features/rooms/rooms-api.ts`, which
-is the shape the profile surface should copy rather than adding methods to the
-client.
+`lib/hospitality_coms_web/router.ex` declares the four session routes, the four
+room reads issue #48 added, the three employer routes and `POST /api/claims`,
+plus the dev mailbox preview. `src/api/client.ts` covers the session four as
+named methods and everything else through two generic verbs, `read` and `write`;
+the paths and decoders live in the feature that owns them —
+`features/rooms/rooms-api.ts`, `features/employer/employer-api.ts`,
+`features/claim/claim-api.ts` — which is the shape the profile surface should
+copy rather than adding methods to the client.
 
-There is still no HTTP surface for engagements, rosters or anything an employer
-does. U8 built no endpoint either — the peer surface is entirely `PeerChannel`,
-which is why it needs no list held in this browser.
+**Shifts and the roster are the employer half that is not here yet.** The
+handshake is; `GET /api/employer/venues/:id/shift-rooms` and the roster writes
+are the plan's U3 on the server and U5 here.
 
 ### Things that were tempting to guess, and were not
 

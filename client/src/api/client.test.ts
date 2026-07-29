@@ -438,3 +438,197 @@ describe("read", () => {
     expect(result.ok).toBe(false);
   });
 });
+
+describe("write", () => {
+  const offer = { role_label: "Runner" };
+
+  it("sends the method it was given, the body as JSON, and the bearer token", async () => {
+    // The method is a parameter rather than baked in, because U5 ships a
+    // `DELETE` through this same function and a `write` that could only POST
+    // would become two functions the moment it did.
+    const { fetch, requests } = stubFetch(respond(201, { invitation: {} }));
+
+    await createApiClient({ baseUrl, fetch }).write(
+      {
+        method: "POST",
+        path: "/api/employer/venues/v1/invitations",
+        body: offer,
+        status: 201,
+      },
+      "c2Vzc2lvbg",
+      (body) => body,
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(`${baseUrl}/api/employer/venues/v1/invitations`);
+    expect(requests[0]?.init.method).toBe("POST");
+    expect(requests[0]?.init.body).toBe(JSON.stringify(offer));
+    expect(requests[0]?.init.headers).toMatchObject({
+      Authorization: "Bearer c2Vzc2lvbg",
+      "Content-Type": "application/json",
+    });
+  });
+
+  it("carries a method that is not POST, unchanged", async () => {
+    // The control for the assertion above: a `write` that hard-coded "POST"
+    // passes it, because "POST" is what that test asks for.
+    const { fetch, requests } = stubFetch(respond(204));
+
+    await createApiClient({ baseUrl, fetch }).write(
+      { method: "DELETE", path: "/api/rosters/r1", status: 204 },
+      "c2Vzc2lvbg",
+    );
+
+    expect(requests[0]?.init.method).toBe("DELETE");
+    expect(requests[0]?.init.body).toBeUndefined();
+  });
+
+  it("answers the decoded value on the status it was told to expect", async () => {
+    const { fetch } = stubFetch(respond(201, { claim_code: "aGFuZGVk" }));
+
+    const result = await createApiClient({ baseUrl, fetch }).write(
+      { method: "POST", path: "/api/employer/venues/v1/invitations", status: 201 },
+      "c2Vzc2lvbg",
+      (body) => body,
+    );
+
+    expect(result).toEqual({ ok: true, value: { claim_code: "aGFuZGVk" } });
+  });
+
+  it("treats a 200 as a failure when 201 is what the route promises", async () => {
+    // Only the named status is a success, and a 2xx nobody planned for is a
+    // drift like any other. `POST /api/employer/venues/:id/invitations` answers
+    // `201`; a `200` from it means something in front of Phoenix answered.
+    const { fetch } = stubFetch(respond(200, { invitation: {}, claim_code: "x" }));
+
+    const result = await createApiClient({ baseUrl, fetch }).write(
+      { method: "POST", path: "/api/employer/venues/v1/invitations", status: 201 },
+      "c2Vzc2lvbg",
+      (body) => body,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: { kind: "malformed_response", status: 200 },
+    });
+  });
+
+  it("reads the error envelope out of a refusal, keeping code and message", async () => {
+    // `ClaimController` distinguishes three code refusals by status **and**
+    // sentence, deliberately (R6), so both have to survive the trip.
+    const { fetch } = stubFetch(
+      respond(409, envelope("conflict", "that claim code has already been redeemed")),
+    );
+
+    const result = await createApiClient({ baseUrl, fetch }).write(
+      { method: "POST", path: "/api/claims", body: { claim_code: "x" }, status: 201 },
+      "c2Vzc2lvbg",
+      (body) => body,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      failure: {
+        kind: "api_error",
+        status: 409,
+        code: "unrecognised",
+        rawCode: "conflict",
+        message: "that claim code has already been redeemed",
+      },
+    });
+  });
+
+  it("keeps a 422's per-field messages attached to the fields they name", async () => {
+    const { fetch } = stubFetch(
+      respond(
+        422,
+        envelope("unprocessable_entity", "the offer was not accepted", {
+          role_label: ["can't be blank"],
+        }),
+      ),
+    );
+
+    const result = await createApiClient({ baseUrl, fetch }).write(
+      {
+        method: "POST",
+        path: "/api/employer/venues/v1/invitations",
+        body: { role_label: "" },
+        status: 201,
+      },
+      "c2Vzc2lvbg",
+      (body) => body,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        kind: "api_field_error",
+        status: 422,
+        fields: { role_label: ["can't be blank"] },
+      },
+    });
+  });
+
+  it("turns a decoder's null into malformed_response rather than a value", async () => {
+    const { fetch } = stubFetch(respond(201, { invitation: "not an object" }));
+
+    const result = await createApiClient({ baseUrl, fetch }).write(
+      { method: "POST", path: "/api/employer/venues/v1/invitations", status: 201 },
+      "c2Vzc2lvbg",
+      () => null,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      failure: {
+        kind: "malformed_response",
+        status: 201,
+        message: "the 201 response was not the expected shape",
+      },
+    });
+  });
+
+  it("returns a network failure rather than throwing when fetch rejects", async () => {
+    const { fetch } = stubFetch(new TypeError("Failed to fetch"));
+
+    const result = await createApiClient({ baseUrl, fetch }).write(
+      { method: "POST", path: "/api/claims", body: { claim_code: "x" }, status: 201 },
+      "c2Vzc2lvbg",
+      (body) => body,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: { kind: "network_error", message: "Failed to fetch" },
+    });
+  });
+
+  // **The control the whole shape exists for.** A 204 carries no body at all,
+  // so a `write` built like `read` — read the body, decode it, fail on null —
+  // reports U5's roster removal as `malformed_response` and the surface says
+  // the removal failed after it succeeded. Omitting the decoder is what makes
+  // the body go unread; this is the assertion that fails if it stops being.
+  it("treats a bodiless 204 as a success, not as a malformed response", async () => {
+    const { fetch } = stubFetch(respond(204));
+
+    const result = await createApiClient({ baseUrl, fetch }).write(
+      { method: "DELETE", path: "/api/rosters/r1", status: 204 },
+      "c2Vzc2lvbg",
+    );
+
+    expect(result).toEqual({ ok: true, value: null });
+  });
+
+  it("still refuses a 204 that was not the status the caller named", async () => {
+    // The other half of the control: "no body was read" must not become "any
+    // status is fine". A `204` where a `201` was promised is a drift.
+    const { fetch } = stubFetch(respond(204));
+
+    const result = await createApiClient({ baseUrl, fetch }).write(
+      { method: "POST", path: "/api/claims", body: { claim_code: "x" }, status: 201 },
+      "c2Vzc2lvbg",
+    );
+
+    expect(result.ok).toBe(false);
+  });
+});
