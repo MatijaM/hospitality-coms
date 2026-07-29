@@ -21,6 +21,14 @@
  * catch is a client-side *ascending* sort, because within one page the server's
  * order already is ascending — recorded in this unit's brief rather than
  * claimed away.
+ *
+ * **The form empties itself on success and keeps everything on a refusal**, and
+ * that pair is the only thing standing between a manager and a duplicate shift
+ * room. Two rooms of one type over one term are legitimately creatable, so the
+ * second click gets a `201` and there is nothing downstream to catch it. Both
+ * directions are asserted and each reaches its positive state first — the three
+ * values are sent before "the fields are blank" is asked, because a field that
+ * was never filled satisfies that on its own.
  */
 
 import { screen, waitFor, within } from "@testing-library/react";
@@ -276,6 +284,83 @@ describe("creating a shift", () => {
     // The control: a form that closed the submit unconditionally would pass
     // every assertion above.
     expect(submit).toBeEnabled();
+  });
+
+  it("empties the form once the shift is created, so a second click repeats nothing", async () => {
+    // **The positive state is reached first.** The three values are asserted
+    // present *and* asserted sent before anything is asserted about the fields
+    // being blank — otherwise a form that was never filled satisfies the whole
+    // body, which is the shape this project has shipped once and caught twice.
+    //
+    // The in-flight guard does not cover this. `creating` is `false` again the
+    // moment the answer arrives, and nothing downstream deduplicates: two shift
+    // rooms of one type over one term are legitimately creatable, so a second
+    // click answers `201` and the manager un-creates a room by hand.
+    const write = writesTo({ [CREATE_SHIFT]: { body: { shift_room: NEWEST } } });
+    renderEmployer(bodies(), write);
+
+    await chooseHarbour();
+    await fillShiftForm("Close");
+
+    expect(await screen.findByLabelText(/shift type/i)).toHaveValue(CLOSE);
+    expect(screen.getByLabelText(/^starts$/i)).toHaveValue("2026-03-09T21:00");
+    expect(screen.getByLabelText(/^ends$/i)).toHaveValue("2026-03-10T05:00");
+
+    await userEvent.click(screen.getByRole("button", { name: /create this shift/i }));
+
+    await waitFor(() => {
+      expect(write).toHaveBeenCalledOnce();
+    });
+
+    const sent = vi.mocked(write).mock.calls[0]?.[0]?.body as {
+      shift_type_id: string;
+    };
+
+    expect(sent.shift_type_id).toBe(CLOSE);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/shift type/i)).toHaveValue("");
+    });
+
+    expect(screen.getByLabelText(/^starts$/i)).toHaveValue("");
+    expect(screen.getByLabelText(/^ends$/i)).toHaveValue("");
+    // `blank` is what closes the submit again, so the second click is not
+    // merely useless — it is unavailable, which is the same affordance the
+    // manager met before they typed anything.
+    expect(screen.getByRole("button", { name: /create this shift/i })).toBeDisabled();
+  });
+
+  it("keeps what the manager typed when the create is refused", async () => {
+    // **The control for the body above, and the direction that is worse to get
+    // wrong.** A `422` names the field that was not accepted; a form that
+    // emptied itself on *submit* rather than on success would hand the manager
+    // that sentence with nothing left on screen to correct.
+    const write = writesTo({
+      [CREATE_SHIFT]: {
+        failure: {
+          kind: "api_field_error",
+          status: 422,
+          code: "unprocessable_entity",
+          rawCode: "unprocessable_entity",
+          message: "the shift was not accepted",
+          fields: { ends_at: ["must be after the start"] },
+        },
+      },
+    });
+    renderEmployer(bodies(), write);
+
+    await chooseHarbour();
+    await fillShiftForm("Close");
+    await userEvent.click(screen.getByRole("button", { name: /create this shift/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /must be after the start/i,
+    );
+
+    expect(screen.getByLabelText(/shift type/i)).toHaveValue(CLOSE);
+    expect(screen.getByLabelText(/^starts$/i)).toHaveValue("2026-03-09T21:00");
+    expect(screen.getByLabelText(/^ends$/i)).toHaveValue("2026-03-10T05:00");
+    expect(screen.getByRole("button", { name: /create this shift/i })).toBeEnabled();
   });
 
   it("creates once however fast the button is clicked", async () => {

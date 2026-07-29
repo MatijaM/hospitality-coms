@@ -20,6 +20,15 @@
  * `ok(null)` whether or not a decoder was passed, so the only thing that can
  * tell the two apart is the call's own shape — hence the argument-count
  * assertion.
+ *
+ * **The picker forgets its choice on success and keeps it on a refusal.** There
+ * *is* a server-side guard behind this one — `roster_entries_no_overlap`, with
+ * `Rosters.unrostered/3` in front of it — so a repeated add stores nothing. What
+ * it stores instead is R15's flat `404`, one sentence for four conditions, which
+ * a manager cannot tell from the shift room having gone away. Both directions
+ * are asserted and each reaches its positive state first: the choice is in the
+ * picker, and the engagement is on the wire, before "the picker is empty" is
+ * asked of it.
  */
 
 import { screen, waitFor } from "@testing-library/react";
@@ -252,6 +261,81 @@ describe("adding somebody to a shift", () => {
       expect.any(String),
       expect.any(Function),
     );
+  });
+
+  it("empties the picker once somebody is added, so a second click repeats nothing", async () => {
+    // **The positive state is reached first, twice over**: the picker is
+    // asserted to hold the choice, and the choice is asserted to have reached
+    // the wire, before "the picker is empty" is asked. A picker nobody ever
+    // used satisfies that assertion on its own.
+    //
+    // `busy` does not cover this. It is `false` again the moment the answer
+    // arrives, with the same person still named — and the second add meets
+    // `roster_entries_no_overlap`, which R15 flattens into the same `404` as
+    // "no such shift room". The manager reads that as the shift having gone.
+    const answers: Record<string, unknown> = bodies();
+    const write = writesTo({
+      [`POST ${rosterPath(TONIGHT)}`]: {
+        body: { roster_entry: entry(RUNNER, "Runner") },
+      },
+    });
+    renderEmployer(answers, write);
+
+    await openTonight();
+    await userEvent.selectOptions(
+      await screen.findByLabelText(/add somebody/i),
+      screen.getByRole("option", { name: /runner/i }),
+    );
+
+    expect(screen.getByLabelText(/add somebody/i)).toHaveValue(RUNNER);
+
+    answers[rosterPath(TONIGHT)] = { roster: [entry(RUNNER, "Runner")] };
+
+    await userEvent.click(screen.getByRole("button", { name: /add to this shift/i }));
+
+    await waitFor(() => {
+      expect(write).toHaveBeenCalledWith(
+        expect.objectContaining({ body: { engagement_id: RUNNER } }),
+        expect.any(String),
+        expect.any(Function),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/add somebody/i)).toHaveValue("");
+    });
+
+    // The submit closes on the empty choice, so the repeat is unavailable
+    // rather than merely refused.
+    expect(screen.getByRole("button", { name: /add to this shift/i })).toBeDisabled();
+  });
+
+  it("keeps the choice when the add is refused", async () => {
+    // **The control for the body above.** The remedy for a refusal is usually
+    // to pick somebody else, and a picker that emptied itself on *submit* would
+    // make the manager re-open the list to find out who they had just tried.
+    const write = writesTo({
+      [`POST ${rosterPath(TONIGHT)}`]: {
+        failure: refusal(
+          404,
+          "not_found",
+          "no such shift room or engagement here, or the roster already says otherwise",
+        ),
+      },
+    });
+    renderEmployer(bodies(), write);
+
+    await openTonight();
+    await userEvent.selectOptions(
+      await screen.findByLabelText(/add somebody/i),
+      screen.getByRole("option", { name: /runner/i }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /add to this shift/i }));
+
+    await screen.findByRole("alert");
+
+    expect(screen.getByLabelText(/add somebody/i)).toHaveValue(RUNNER);
+    expect(screen.getByRole("button", { name: /add to this shift/i })).toBeEnabled();
   });
 
   it("does not add nobody", async () => {

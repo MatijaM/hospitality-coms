@@ -29,6 +29,20 @@
  * promises a caller. The race it prevents is a second `DELETE` after a
  * successful one, which answers `404` — so the manager is told the removal
  * failed, for the removal that worked.
+ *
+ * ## `busy` is not what stops a duplicate add, and this one has a server behind it
+ *
+ * It covers two clicks on one outstanding request; once the answer is back it
+ * is `false` again and the picker still holds whoever was chosen. So `add`
+ * answers whether the write was accepted and `RosterPanel` forgets the choice
+ * on that branch alone.
+ *
+ * Unlike the shift form there **is** a guard underneath — a second add of one
+ * engagement to one shift meets `roster_entries_no_overlap`, and `Rosters`'
+ * own `unrostered/3` check in front of it — so nothing duplicate is stored.
+ * What arrives instead is R15's flat `404`, one sentence covering four
+ * conditions, which a manager cannot tell from the shift room having gone away.
+ * The clearing is what stops that refusal being reachable by accident at all.
  */
 
 import { useCallback, useMemo, useState } from "react";
@@ -45,7 +59,15 @@ export type RosterDesk = {
   readonly problem: RequestFailure | null;
   /** True while either write is outstanding. Both controls are closed on it. */
   readonly busy: boolean;
-  readonly add: (engagementId: string) => Promise<void>;
+  /**
+   * Answers whether the server accepted it, so the picker can forget the
+   * chosen engagement on that branch alone.
+   *
+   * `remove` answers nothing, and the asymmetry is the point rather than an
+   * omission: a removal is driven by a button on the row it removes, so there
+   * is no input holding a value that has already been spent.
+   */
+  readonly add: (engagementId: string) => Promise<boolean>;
   readonly remove: (engagementId: string) => Promise<void>;
 };
 
@@ -66,7 +88,7 @@ export function useRoster(venueId: string, shiftRoomId: string): RosterDesk {
 
   const add = useCallback(
     async (engagementId: string) => {
-      if (token === null || engagementId === "" || busy) return;
+      if (token === null || engagementId === "" || busy) return false;
 
       setBusy(true);
       setProblem(null);
@@ -77,6 +99,8 @@ export function useRoster(venueId: string, shiftRoomId: string): RosterDesk {
 
       if (result.ok) reload();
       else setProblem(result.failure);
+
+      return result.ok;
     },
     [api, token, venueId, shiftRoomId, busy, reload],
   );

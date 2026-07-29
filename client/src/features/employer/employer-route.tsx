@@ -249,6 +249,19 @@ function ShiftDeskSection({
  * typed", and `onSubmit`'s `null` check covers a value that will not parse —
  * `new Date("tonight").toISOString()` throws, so without it a non-conforming
  * input takes an exception out of this handler.
+ *
+ * **Neither of those is what stops a duplicate, and this form has nothing
+ * behind it that would.** Two shift rooms of one type over one term are
+ * legitimately creatable, so no constraint refuses the second and nothing on
+ * screen undoes it. Emptying the three inputs on success is therefore the only
+ * guard there is: the submit closes on `blank` a moment later for the same
+ * reason it was closed before anything was typed, and a manager who did not
+ * notice the new row appear below cannot click through it a second time.
+ *
+ * Cleared **on success, never on submit** — `room-view.tsx`'s rule, and here it
+ * matters more: a refused create is a `422` naming a field, and a form that
+ * emptied itself would leave the manager reading which of the two instants was
+ * wrong with neither of them still on screen.
  */
 function ShiftForm({
   types,
@@ -265,6 +278,16 @@ function ShiftForm({
   const fields = problem === null ? null : fieldProblems(problem);
   const offered = types.state.status === "ready" ? types.state.value : [];
   const blank = typeId === "" || startsAt === "" || endsAt === "";
+
+  async function create(shiftTypeId: string, from: string, to: string): Promise<void> {
+    const created = await desk.create({ shiftTypeId, startsAt: from, endsAt: to });
+
+    if (!created) return;
+
+    setTypeId("");
+    setStartsAt("");
+    setEndsAt("");
+  }
 
   return (
     <>
@@ -283,7 +306,7 @@ function ShiftForm({
 
           if (typeId === "" || from === null || to === null) return;
 
-          void desk.create({ shiftTypeId: typeId, startsAt: from, endsAt: to });
+          void create(typeId, from, to);
         }}
       >
         <label htmlFor="shift-type">Shift type</label>
@@ -413,6 +436,17 @@ function ShiftList({
  * The *labels* have no such hole: `render_roster_entry/1` projects `role_label`
  * off a preloaded engagement, so an entry this picker could not have produced is
  * still named on the list.
+ *
+ * **The picker forgets its choice once the add is accepted**, on that branch
+ * alone. `busy` covers two clicks on one outstanding request and nothing after
+ * it, so a picker that kept the selection re-enabled with the same person still
+ * named — and the second add is refused by `roster_entries_no_overlap` as R15's
+ * flat `404`, one sentence covering four conditions, which reads like the shift
+ * having gone away rather than like the person already being on it.
+ *
+ * A **refused** add keeps the choice, for `ShiftForm`'s reason: the remedy for
+ * a refusal is usually to choose somebody else, and a picker that reset itself
+ * would make the manager re-open the list to find out who they had just tried.
  */
 function RosterPanel({
   venueId,
@@ -428,6 +462,10 @@ function RosterPanel({
 
   const entries = roster.state.status === "ready" ? roster.state.value : [];
   const choosable = people.status === "ready" ? people.value : [];
+
+  async function add(engagementId: string): Promise<void> {
+    if (await roster.add(engagementId)) setChosen("");
+  }
 
   return (
     <section aria-label="Roster">
@@ -470,7 +508,7 @@ function RosterPanel({
 
             if (chosen === "") return;
 
-            void roster.add(chosen);
+            void add(chosen);
           }}
         >
           <label htmlFor="roster-engagement">Add somebody</label>

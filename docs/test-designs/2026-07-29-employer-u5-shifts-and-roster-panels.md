@@ -492,8 +492,10 @@ is jsdom against a fake transport.
 
 ## Revisions made during implementation
 
-Four. Each is a place this brief was wrong, kept above rather than corrected in place, because
-the gap between the brief and the tree is the only record that the gate found anything.
+Five. Each is a place this brief was wrong, kept above rather than corrected in place, because
+the gap between the brief and the tree is the only record that the gate found anything. The fifth
+was found in review of PR #63 rather than during implementation, and is appended rather than
+folded in for the same reason.
 
 ### 1. Row 20's guard is not reachable through this DOM, and the pair it belongs to is redundant
 
@@ -561,6 +563,97 @@ Decision 2 named `ListExtent` as moving to `src/api/types.ts` and it did. What t
 say is that `Unready` above is a second thing this unit generalised, and that
 `test-support/employer-harness.tsx` is a third. Neither is a wire shape and neither is disclosed
 as a regression, because no production behaviour depends on either.
+
+### 5. Both write forms kept their values after a *successful* write, and nothing above asked whether they should
+
+Found in review of PR #63, not by this brief. **Decision 8** enumerated three guard pairs and
+every one of them is about a write that is *outstanding* — two clicks landing on one request. None
+is about the click after the answer came back, and the acceptance criteria inherit the gap: row 17
+is *"two clicks create one shift"* and row 38 is *"two clicks remove once"*, both satisfied by a
+form that empties nothing.
+
+So on the tree as shipped: `desk.create` resolves, `creating` returns to `false`, `blank` is still
+`false` because the three inputs still hold what was typed, and the submit re-enables **with the
+same shift still described in it**. `roster.add` is identical — `busy` returns to `false` and
+`chosen` still names the engagement that was just rostered.
+
+**The two are not equally bad and the asymmetry is what shapes the fix.** The roster add has a
+guard underneath — `roster_entries_no_overlap`, with `Rosters.unrostered/3` in front of it — so a
+repeat stores nothing; what it produces is R15's flat `404`, one sentence covering four
+conditions, which a manager cannot tell from the shift room having gone away. **The shift create
+has no guard underneath at all.** Two shift rooms of one type over one term are legitimately
+creatable, so the second click answers `201`, a second room exists, and the only remedy on screen
+is to notice it in the list and un-create it by hand. In front of a live audience that is the
+worse of the two.
+
+**What shipped.** `ShiftDesk.create` and `RosterDesk.add` answer `Promise<boolean>` — whether the
+server accepted it — and `ShiftForm` and `RosterPanel` clear on that branch **alone**. This is
+`room-view.tsx`'s existing rule (*"Cleared on success, never on submit. Clearing on submit meant
+every refusal ate what the worker wrote"*) reaching the two forms that did not have it; the same
+shape is already in `conversation-view.tsx` and `profile-route.tsx`. A boolean rather than the
+failure, because the failure is already on `problem` and rendered by the same component — the
+caller cannot read it back off the hook, since it is state set after the promise settles.
+
+`RosterDesk.remove` deliberately keeps answering nothing: a removal is driven by a button on the
+row it removes, so there is no input holding a value that has already been spent.
+
+**Four new bodies, each reaching the positive state first.** *"The field is empty"* is satisfied
+by a field that was never filled, so each success body asserts the values are present, asserts
+they reached the wire, and only then asserts they cleared. Each has a refusal body beside it as
+its control, in the direction that is worse to get wrong: a `422` names the field that was not
+accepted, and a form that emptied itself on submit would hand the manager that sentence with
+nothing left on screen to correct.
+
+**Post-review mutation record.** Four new mutations, plus every existing guard that clearing could
+have made unreachable, re-run. Baseline before and after: **493 passed / 15 skipped**.
+
+| # | Mutation | Killed |
+|---|----------|--------|
+| 33 | `ShiftForm` does not clear on success | 1 — *empties the form once the shift is created* |
+| 34 | `ShiftForm` clears on submit rather than on success | 1 — *keeps what the manager typed when the create is refused* |
+| 35 | `RosterPanel` does not clear on success | 1 — *empties the picker once somebody is added* |
+| 36 | `RosterPanel` clears on submit rather than on success | 1 — *keeps the choice when the add is refused* |
+| 15 (re-run) | `useShiftDesk` loses its in-flight guard | **0**, unchanged |
+| 18 (re-run) | `useRoster.remove` loses its in-flight guard | **0**, unchanged |
+| 22a (re-run) | the create submit loses its blank-field `disabled` | **2**, was 1 |
+| 22b (re-run) | `onSubmit` loses its unparseable-instant guard | **0**, unchanged |
+| 23 (re-run) | the create submit loses its in-flight `disabled` | 1, unchanged |
+| 24 (re-run) | the removal button loses its in-flight `disabled` | 1, unchanged |
+| 37 | the **add** submit loses its `chosen === ""` `disabled` | 1, **was 0** — measured on both trees |
+| 38 | `useRoster.add` loses its `engagementId === ""` check | **0** |
+| 39 | the add form's `onSubmit` loses its `chosen === ""` check | **0** |
+
+**No guard lost reachability and one gained it.** Rows 37–39 are a *triple* — attribute, handler,
+hook — and *"does not add nobody"* is satisfied by any one of them, so all three were dead. The
+new success body asserts the submit closes again once the picker is emptied, which is what makes
+the attribute separately mutable: measured at **0 kills on the pre-change tree and 1 after**, with
+`git stash` used to take both numbers against the same mutation. Row 22a is the same effect on the
+create form, 1 → 2. The three zero-kills that remain are the three revision 1 and the original
+mutation record already named, unchanged and kept for their stated reasons.
+
+**One adjacent form is deliberately not changed, and this is the argument.** `OfferForm` has the
+same mechanical shape — `roleLabel` survives a successful issue — and it is left alone for two
+reasons that do not apply to the other two. Its result is a `role="status"` panel carrying the
+claim code and its warning, rendered directly below the form, so a manager cannot fail to notice
+that the offer succeeded; a new shift room is a row in a list further down. And a role label is a
+**reusable** value where a shift's term and a rostered engagement are **spent** ones: a venue
+hiring three runners issues three offers under one label, and a form that cleared itself would
+make them retype it each time. The cost of a second click there is already enumerated in
+`useOfferDesk`'s moduledoc — *"the one place this can lose a code the manager had not copied —
+deliberate"* — and is a decision about what an offer is rather than an oversight.
+
+**Post-review runs**, all five, `npm run verify` in full each time:
+
+| Check | Result |
+|---|---|
+| `npm run verify` (typecheck, lint, format, test, build) | **493 passed / 15 skipped** |
+| the same under `TZ=UTC` | 493 / 15 |
+| the same under `TZ=Pacific/Kiritimati` | 493 / 15 |
+| the same under `NODE_OPTIONS="--localstorage-file=$(mktemp)"` | 493 / 15 |
+| `TZ=Pacific/Kiritimati` **and** the localStorage file together | 493 / 15 |
+
+Four new bodies against the 489 the mutation record below was measured on. No Elixir file, no
+migration, no route and no `config/` moved; `mix` was not run.
 
 ## Mutation record
 

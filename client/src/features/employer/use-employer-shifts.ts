@@ -88,11 +88,21 @@ export type ShiftDesk = {
   readonly problem: RequestFailure | null;
   /** True while an answer is outstanding. The form is closed on it. */
   readonly creating: boolean;
+  /**
+   * Answers whether the server accepted it.
+   *
+   * The caller needs that and cannot derive it: `problem` is state this hook
+   * sets *after* the promise settles, so a form reading it back would be
+   * reading the previous render's answer. It is a boolean rather than the
+   * failure because the failure is already on `problem`, rendered by the same
+   * component — two ways to reach one refusal is the divergence this tree keeps
+   * finding.
+   */
   readonly create: (shift: {
     readonly shiftTypeId: string;
     readonly startsAt: string;
     readonly endsAt: string;
-  }) => Promise<void>;
+  }) => Promise<boolean>;
 };
 
 /**
@@ -109,6 +119,16 @@ export type ShiftDesk = {
  * `onCreated` re-reads the list rather than this hook appending to it: the
  * server decides which rooms are in the bounded page, and a client that
  * appended would show a room in a page the bound did not include.
+ *
+ * **The in-flight guard is not what stops a duplicate; clearing the form is.**
+ * `creating` covers two clicks landing on one outstanding request and nothing
+ * else — once the answer is back it is `false` again, and the values a manager
+ * typed are still in the three inputs. `ShiftForm` therefore empties them on
+ * the success branch alone, off this function's answer. That guard cannot be
+ * dropped in favour of a server-side one, because **there is none**: two shift
+ * rooms of one type over one term are legitimately creatable, so nothing
+ * downstream refuses the second, and the manager's remedy for one created by
+ * accident is to notice it in the list below and un-create it by hand.
  */
 export function useShiftDesk(venueId: string, onCreated: () => void): ShiftDesk {
   const { state, api } = useSession();
@@ -123,7 +143,7 @@ export function useShiftDesk(venueId: string, onCreated: () => void): ShiftDesk 
       readonly startsAt: string;
       readonly endsAt: string;
     }) => {
-      if (token === null || creating) return;
+      if (token === null || creating) return false;
 
       setCreating(true);
       setProblem(null);
@@ -134,6 +154,8 @@ export function useShiftDesk(venueId: string, onCreated: () => void): ShiftDesk 
 
       if (result.ok) onCreated();
       else setProblem(result.failure);
+
+      return result.ok;
     },
     [api, token, venueId, creating, onCreated],
   );
