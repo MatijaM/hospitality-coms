@@ -123,12 +123,15 @@ export type ShiftRoomListing = {
   /**
    * When the room stops accepting messages: `ends_at` plus the type's grace.
    *
-   * Rendered as a fact and **never compared against a clock here.**
+   * **Formatted, and never compared against a clock here** — the two are
+   * different things and only the second is forbidden.
    * `HospitalityComs.Clock` is offsettable and the demo moves it, while this
-   * browser's clock is real — so a client-side open/closed badge would be
-   * wrong during exactly the demo the offset exists for. Whether a room accepts
-   * a message is the server's answer to a send, which is where `SendBar`
-   * already gets it.
+   * browser's clock is real, so a client-side open/closed badge would be wrong
+   * during exactly the demo the offset exists for. Whether a room accepts a
+   * message is the server's answer to a send, which is where `SendBar` already
+   * gets it. None of that is an argument for showing somebody
+   * `2026-03-09T21:30:00Z`, which is what this used to do:
+   * `instantLabel` renders it the way the term beside it is already rendered.
    */
   readonly closesAt: string;
 };
@@ -240,11 +243,60 @@ const TIME_ONLY = new Intl.DateTimeFormat(undefined, {
 });
 
 /**
- * `9 Mar 13:00–21:00`, or the raw instants if either will not parse.
+ * The calendar day an instant falls on, as a string that is only ever compared
+ * with another one from this same formatter.
+ *
+ * **It is built exactly like the two above and that is the whole point.** All
+ * three pass `undefined` for the locale and name no `timeZone`, so all three
+ * resolve the same one — this device's. "Does this shift end on another day"
+ * is a question with a different answer in every timezone, and the only answer
+ * that is not a lie is the one taken in the timezone the label is *rendered*
+ * in. `getUTCDate` would ask it in UTC and `venues` carries a timezone that
+ * would ask it where the shift happens; a worker in Auckland reading a term
+ * that is one evening to them would be told it spans two days, or the reverse.
+ *
+ * The year is in there because two instants a year apart share a day and a
+ * month. Nothing in a shift term goes near that, and a comparison that is
+ * right by luck is one somebody has to re-derive later.
+ */
+const CALENDAR_DAY = new Intl.DateTimeFormat(undefined, {
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+});
+
+/**
+ * One instant, with its day: `9 Mar 21:30`, or the raw string if it will not
+ * parse.
+ *
+ * Exported because a shift room's `closesAt` is rendered on its own, beside
+ * the term this composes — and it is what `termLabel` writes an endpoint with
+ * whenever that endpoint's day has to be said out loud.
  *
  * The fallback is deliberate: an instant this client cannot read is still
  * something the worker can compare against another one, and a label reading
  * "Invalid Date" would be worse than the ISO string it replaced.
+ */
+export function instantLabel(value: string): string {
+  const instant = new Date(value);
+
+  return Number.isNaN(instant.getTime()) ? value : DAY_AND_TIME.format(instant);
+}
+
+/**
+ * `9 Mar 13:00–21:00`, or `9 Mar 23:00–10 Mar 07:00` when the term ends on
+ * another day, or the raw instants if either will not parse.
+ *
+ * **The second form is the common case, not the edge case.** This is a
+ * hospitality product and a late shift crossing midnight is the ordinary shape
+ * of the working day — the demo manifest's own live shift room is eight hours
+ * from an hour ago, so it is overnight whenever the manifest is seeded after
+ * about four in the afternoon. Writing the end as a time alone made that read
+ * `Kitchen · 9 Mar 23:00–07:00`, which says the room closes sixteen hours
+ * before it opens.
+ *
+ * Which day the *reader* is on is the question `CALENDAR_DAY` answers; see
+ * there for why it cannot be asked in UTC.
  */
 function termLabel(startsAt: string, endsAt: string): string {
   const start = new Date(startsAt);
@@ -254,7 +306,9 @@ function termLabel(startsAt: string, endsAt: string): string {
     return `${startsAt}–${endsAt}`;
   }
 
-  return `${DAY_AND_TIME.format(start)}–${TIME_ONLY.format(end)}`;
+  const sameDay = CALENDAR_DAY.format(start) === CALENDAR_DAY.format(end);
+
+  return `${DAY_AND_TIME.format(start)}–${sameDay ? TIME_ONLY.format(end) : DAY_AND_TIME.format(end)}`;
 }
 
 /**

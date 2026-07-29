@@ -68,7 +68,13 @@ import type {
   ShiftRoomListing,
   VenueRoomListing,
 } from "./room";
-import { normaliseRoomId, roomKey, roomKindLabel, shiftRoomLabel } from "./room";
+import {
+  instantLabel,
+  normaliseRoomId,
+  roomKey,
+  roomKindLabel,
+  shiftRoomLabel,
+} from "./room";
 import type { RoomStore } from "./room-store";
 import { addRoom, findRoom, removeRoom, setRoomBar } from "./room-store";
 import { RoomView } from "./room-view";
@@ -277,7 +283,17 @@ function VenueRoomItem({
                   >
                     Open {shiftRoomLabel(shift)}
                   </button>
-                  <time dateTime={shift.closesAt}>closes {shift.closesAt}</time>
+                  {/*
+                    The attribute keeps the instant a machine can read and the
+                    text is for the person, which is what `<time>` is for. Not
+                    comparing `closes_at` against this browser's clock is the
+                    rule (see `ShiftRoomListing`); not *formatting* it never
+                    was, and rendering it raw put `2026-03-09T21:30:00Z` on
+                    screen next to a term this client had already formatted.
+                  */}
+                  <time dateTime={shift.closesAt}>
+                    closes {instantLabel(shift.closesAt)}
+                  </time>
                 </li>
               ))}
             </ul>

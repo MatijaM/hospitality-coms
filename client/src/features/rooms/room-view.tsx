@@ -39,7 +39,7 @@ import { useState } from "react";
 
 import type { ChannelFieldError } from "../../socket/channel-failure";
 import type { RoomClosure, RoomEntry, RoomMessage, SendBar } from "./room";
-import { mergeMessages, roomKindLabel } from "./room";
+import { instantLabel, mergeMessages, roomKindLabel } from "./room";
 import type { RoomErrorCode } from "./refusal-message";
 import {
   barFromRefusal,
@@ -200,7 +200,15 @@ function Messages({
                 : shortId(message.authorEngagementId)}
             </strong>{" "}
             <span>{message.body}</span>{" "}
-            <time dateTime={message.sentAt}>{message.sentAt}</time>
+            {/*
+              Formatted for the same reason the shift room's `closes_at` is,
+              and this list is where it started mattering: until this unit a
+              room only showed what had arrived since it was opened, so every
+              timestamp here was minutes old. It now opens on a fetched
+              history, so the list carries instants from days ago — which is
+              exactly where a raw `2026-03-09T14:00:00Z` is least readable.
+            */}
+            <time dateTime={message.sentAt}>{instantLabel(message.sentAt)}</time>
           </li>
         ))}
       </ul>

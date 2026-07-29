@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import type * as RoomModule from "./room";
 import {
   isRoomId,
   mergeMessages,
@@ -12,6 +13,49 @@ import {
 } from "./room";
 
 const ID = "11111111-1111-4111-8111-111111111111";
+
+/**
+ * Runs against a copy of `room.ts` that resolved a named timezone.
+ *
+ * **Nothing in this file may format in the runner's timezone.** A cross-midnight
+ * test is a claim about which calendar day two instants fall on, and every one
+ * of them has a timezone in which it is false — so a fixture chosen against
+ * whatever machine happened to run it first is green here and red on CI, or
+ * green everywhere while asserting nothing. Each case below names the timezone
+ * it means, and two of them name the same instants twice to opposite effect.
+ *
+ * It re-imports rather than poking at the environment around the static import
+ * because `room.ts` builds its `Intl.DateTimeFormat`s once at module load —
+ * they are expensive and the label runs per room per render — so each one holds
+ * the timezone that was in force when the module first ran. Changing
+ * `process.env.TZ` afterwards moves `Intl`'s default for formatters built after
+ * the change and for none built before it.
+ *
+ * The locale is left alone: Node fixes it at startup and `LANG` will not move
+ * it, so no assertion below may depend on one. Each reads the rendering of an
+ * instant back out of `instantLabel` instead of spelling `9 Mar` itself.
+ */
+async function inTimeZone<T>(
+  timeZone: string,
+  ask: (room: typeof RoomModule) => T,
+): Promise<T> {
+  const before = process.env.TZ;
+
+  process.env.TZ = timeZone;
+  vi.resetModules();
+
+  try {
+    return ask(await import("./room"));
+  } finally {
+    if (before === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = before;
+    }
+
+    vi.resetModules();
+  }
+}
 
 describe("a room's topic", () => {
   it("is the one PersonSocket routes for its kind", () => {
@@ -131,6 +175,105 @@ describe("a shift room's label", () => {
 
     expect(shiftRoomLabel(broken)).toContain("whenever");
     expect(shiftRoomLabel(broken)).not.toContain("Invalid");
+  });
+
+  // 23:00 to 07:00 the next morning in UTC, and 02:00 to 10:00 the same morning
+  // three hours east of it. Both endpoints move together, so the term is eight
+  // hours either way and only the calendar disagrees.
+  const overnight = {
+    ...kitchen,
+    startsAt: "2026-03-09T23:00:00Z",
+    endsAt: "2026-03-10T07:00:00Z",
+    closesAt: "2026-03-10T07:30:00Z",
+  };
+
+  // The same trick pointed the other way: one evening in UTC, and an evening
+  // running into the next morning in Moscow.
+  const evening = {
+    ...kitchen,
+    startsAt: "2026-03-09T20:00:00Z",
+    endsAt: "2026-03-09T23:00:00Z",
+    closesAt: "2026-03-09T23:30:00Z",
+  };
+
+  it("says which day a term ends on when that is not the day it starts", async () => {
+    // The finding. A late shift crossing midnight is the ordinary shape of a
+    // hospitality working day, and the demo manifest's own live shift room is
+    // one whenever it is seeded after the afternoon — so writing the end as a
+    // time alone produced `Kitchen · 9 Mar 23:00–07:00`, which reads as a room
+    // that closes sixteen hours before it opens.
+    await inTimeZone("UTC", ({ instantLabel, shiftRoomLabel }) => {
+      const label = shiftRoomLabel(overnight);
+
+      // The start always carries its day, and asserting it here is what stops
+      // the assertion below passing on a label that formats nothing at all.
+      expect(label).toContain(instantLabel(overnight.startsAt));
+      expect(label).toContain(instantLabel(overnight.endsAt));
+    });
+  });
+
+  it("leaves the end a time alone when the term begins and ends on one day", async () => {
+    // The control for the test above: a rule that wrote the day out
+    // unconditionally would pass that one and lose the reason the term is short
+    // in the ordinary case.
+    await inTimeZone("UTC", ({ instantLabel, shiftRoomLabel }) => {
+      const label = shiftRoomLabel(evening);
+
+      expect(label).toContain(instantLabel(evening.startsAt));
+      expect(label).not.toContain(instantLabel(evening.endsAt));
+    });
+  });
+
+  it("asks which day in the timezone it renders in, so one term reads two ways", async () => {
+    // The subtlety, and the reason this label is composed on the client at all:
+    // "a different day" is a question about the reader, and these two rooms are
+    // the same eight and three hours in both columns. Answering in UTC — with
+    // `getUTCDate`, or by comparing the ISO strings' date halves — passes the
+    // first column and fails the second; answering in the venue's timezone
+    // fails both for a worker reading from anywhere else.
+    const asked = async (timeZone: string) =>
+      inTimeZone(timeZone, ({ instantLabel, shiftRoomLabel }) => ({
+        overnight: shiftRoomLabel(overnight).includes(instantLabel(overnight.endsAt)),
+        evening: shiftRoomLabel(evening).includes(instantLabel(evening.endsAt)),
+      }));
+
+    // 23:00–07:00 crosses; 20:00–23:00 does not.
+    expect(await asked("UTC")).toEqual({ overnight: true, evening: false });
+
+    // Three hours east both endpoints shift: 02:00–10:00 is one morning, and
+    // 23:00–02:00 is the one that now crosses.
+    expect(await asked("Europe/Moscow")).toEqual({ overnight: false, evening: true });
+  });
+});
+
+describe("one instant on its own", () => {
+  const room = {
+    shiftRoomId: "22222222-2222-4222-8222-222222222222",
+    venueId: ID,
+    shiftTypeName: "Kitchen",
+    startsAt: "2026-03-09T21:30:00Z",
+    endsAt: "2026-03-10T05:30:00Z",
+    closesAt: "2026-03-10T06:00:00Z",
+  };
+
+  it("is the same rendering a term gives that instant, rather than a second one", async () => {
+    // A shift room's `closes_at` is shown beside its term, so the two are one
+    // sentence or they are a formatted value next to an ISO string — which is
+    // what `rooms-route.tsx` used to put there.
+    await inTimeZone("UTC", ({ instantLabel, shiftRoomLabel }) => {
+      expect(instantLabel(room.closesAt)).not.toBe(room.closesAt);
+
+      expect(shiftRoomLabel({ ...room, startsAt: room.closesAt })).toContain(
+        instantLabel(room.closesAt),
+      );
+    });
+  });
+
+  it("hands back what it was given rather than rendering Invalid Date", async () => {
+    // Same fallback the term already has, and for the same reason.
+    await inTimeZone("UTC", ({ instantLabel }) => {
+      expect(instantLabel("whenever")).toBe("whenever");
+    });
   });
 });
 

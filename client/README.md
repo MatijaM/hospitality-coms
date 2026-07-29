@@ -422,6 +422,17 @@ type's name — `features/rooms/rooms-api.ts` owns the paths and the decoders.
 That is the browse list, and it is where a room is _found_. Nothing in it is a
 uuid prefix, which is what made the old layout read as broken.
 
+A shift room has no name of its own, so its label is the type's name plus the
+term — two Tuesdays of one shift type are otherwise two rooms with one name.
+**The term names the end's day whenever the end falls on another one**, because
+a late shift crossing midnight is the ordinary shape of a hospitality working
+day and `9 Mar 23:00–07:00` reads as a room that closes before it opens. Which
+day the end falls on is a question about the reader, so it is asked with an
+`Intl.DateTimeFormat` built exactly like the ones that render the label and
+therefore resolving the same timezone — not in UTC, and not in the venue's.
+`room.test.ts` pins that by asking the same two instants in two timezones and
+getting opposite answers.
+
 The **local** list is kept and is not a cache of it. It holds `barred`, the one
 thing on this surface that was _learned_ rather than fetched — nothing on the
 wire says in advance that a shift room is past its `closes_at` — and it is what
@@ -458,11 +469,18 @@ seeing none of each other's messages.
 
 A shift room past its `closes_at` still joins and still reads — U6 keeps
 readability and membership as separate questions, and KTD6b says no write
-withdraws access a period already earned. Only the send is refused, `gone`.
-Nothing on the wire carries `closes_at`, so the client finds out by being told
-once and **remembering**, and the composer stays disabled on the next render and
-after a reload. `forbidden` — off the roster — is the same shape and a different
-sentence.
+withdraws access a period already earned. Only the send is refused, `gone`. So
+the client finds out by being told once and **remembering**, and the composer
+stays disabled on the next render and after a reload. `forbidden` — off the
+roster — is the same shape and a different sentence.
+
+The shift-room list _does_ carry `closes_at` and the browse panel prints it, and
+that is not the same thing as knowing whether the room is open. **It is rendered
+and never compared**: `HospitalityComs.Clock` is offsettable and the demo moves
+it while this browser's clock is real, so a client-side open/closed badge would
+be wrong during exactly the demo the offset exists for. Rendering it raw was a
+separate mistake and is fixed — `2026-03-09T21:30:00Z` in front of a worker,
+beside a term this client had already formatted.
 
 Remembering it is a guess about the future and it can be wrong in both
 directions: an employer can move a `closes_at`, and a manager can re-roster

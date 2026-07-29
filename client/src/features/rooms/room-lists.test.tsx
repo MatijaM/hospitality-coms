@@ -42,7 +42,7 @@ import {
 } from "../../test-support/fake-api";
 import { fakeSocketFactory } from "../../test-support/fake-socket";
 import type { RoomEntry } from "./room";
-import { roomTopic } from "./room";
+import { instantLabel, roomTopic } from "./room";
 import { createMemoryRoomStore } from "./room-store";
 
 const VENUE_ID = "11111111-1111-4111-8111-111111111111";
@@ -234,6 +234,37 @@ describe("the list of shift rooms at a venue", () => {
     );
   });
 
+  it("writes when a room stops taking messages as a time, not as an instant", async () => {
+    // `closes_at` is deliberately never compared against this browser's clock:
+    // the demo moves the server's and not this one, so an open/closed badge
+    // here would be wrong during exactly the demo the offset exists for. That
+    // is an argument against comparing it and never was one against formatting
+    // it — rendered raw it put `2026-03-09T21:30:00Z` in front of a worker,
+    // beside a term this client had already formatted.
+    //
+    // No timezone is pinned here and none is needed: `instantLabel` is the
+    // rendering under test, so both sides of the comparison move together with
+    // whatever timezone the runner is in. What the label says in a *named* one
+    // is `room.test.ts`'s question.
+    renderRooms({ [VENUE_ROOMS]: twoVenueRooms, [SHIFT_ROOMS]: oneShiftRoom });
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /shift rooms at the anchor/i }),
+    );
+
+    const list = await screen.findByRole("list", { name: /shift rooms at the anchor/i });
+
+    expect(list.textContent).not.toContain("2026-03-09T21:30:00Z");
+    expect(list.textContent).toContain(`closes ${instantLabel("2026-03-09T21:30:00Z")}`);
+
+    // The instant itself stays where a machine reads it, which is what `<time>`
+    // is for.
+    expect(within(list).getByText(/^closes /)).toHaveAttribute(
+      "datetime",
+      "2026-03-09T21:30:00Z",
+    );
+  });
+
   it("opens a shift room from the label", async () => {
     const { socket } = renderRooms({
       [VENUE_ROOMS]: twoVenueRooms,
@@ -275,6 +306,26 @@ describe("a room's history", () => {
     });
 
     expect(messageBodies().join(" ")).toContain("also before");
+  });
+
+  it("writes when each message was sent as a time, not as an instant", async () => {
+    // The history is what made this matter. Until this unit a room showed only
+    // what had arrived since it was opened, so every timestamp in the list was
+    // minutes old; it now opens on a fetched page, which is where a raw
+    // `2026-03-09T14:00:00Z` is least readable and most of them.
+    const { socket } = renderRooms({
+      [VENUE_ROOMS]: twoVenueRooms,
+      [VENUE_HISTORY]: { messages: [message("a", "said before")], complete: true },
+    });
+
+    await open(socket, /open the anchor/i, roomTopic({ kind: "venue", id: VENUE_ID }));
+
+    await waitFor(() => {
+      expect(messageBodies().join(" ")).toContain("said before");
+    });
+
+    expect(messageBodies().join(" ")).not.toContain("2026-03-09T14:00:00Z");
+    expect(messageBodies().join(" ")).toContain(instantLabel("2026-03-09T14:00:00Z"));
   });
 
   it("shows a message once when the history and the stream overlap", async () => {
