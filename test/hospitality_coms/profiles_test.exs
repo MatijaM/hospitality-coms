@@ -1348,6 +1348,33 @@ defmodule HospitalityComs.ProfilesTest do
       assert %{role_label: [_message]} = errors_on(oversize)
     end
 
+    test "accept a 160-character label and organisation name, the bound engagements carry" do
+      # Issue #42's item 1. Both this module and `*_create_profiles.exs` said
+      # *"the same bound `engagements.role_label` carries"* and declared 120,
+      # while that column carries 160 and had since U5. The product call is 160,
+      # so the declaration moved to meet the sentence.
+      #
+      # **The 160 is written out rather than taken from
+      # `DeclaredEntry.max_label_length/0`, and that is what makes this test
+      # work.** Derived, it would pass under either half of the change being
+      # reverted; written out, each half alone fails it — revert the derivation
+      # and the changeset refuses, roll the widening migration back and the
+      # database refuses through `check_constraint/3`. The refusal test above is
+      # the standing example of the other shape: `max_label_length() + 1` moves
+      # with the constant and can detect nothing about its value.
+      worker = person()
+      at_bound = String.duplicate("x", 160)
+
+      assert {:ok, entry} =
+               Profiles.declare_entry(
+                 worker,
+                 declared(%{role_label: at_bound, organisation_name: at_bound})
+               )
+
+      assert entry.role_label == at_bound
+      assert entry.organisation_name == at_bound
+    end
+
     test "refuse an amendment by anybody else" do
       worker = person()
       stranger = person()

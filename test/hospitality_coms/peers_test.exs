@@ -77,6 +77,24 @@ defmodule HospitalityComs.PeersTest do
   end
 
   describe "visibility" do
+    test "the tail this file assumes is the tail Visibility declares" do
+      # Issue #42's item 6, and it is deliberately *not* the fix the issue
+      # proposed. Replacing `@tail_days` with `Visibility.tail_days/0` at the
+      # nine places this file uses it would make the three assertions that pin
+      # the tail — the boundary pair below, and the two `visible_until`
+      # comparisons — derive both of their sides from the module under test, so
+      # they would agree with themselves for any value including a wrong one.
+      # That is the shape `docs/solutions/test-failures/tests-that-certify-nothing.md`
+      # catalogues, and the shape `retention_sweeper_test.exs` keeps literal day
+      # counts to avoid.
+      #
+      # The file's own copy of the number is therefore correct and stays. What
+      # was missing is that the copy was *silent*: nothing said it had to equal
+      # the production one, so a change to `Visibility.@tail_days` failed six
+      # tests here and no line named the number. This is that line.
+      assert Visibility.tail_days() == @tail_days
+    end
+
     test "exists between two people engaged at one venue over overlapping terms" do
       %{first: first, second: second} = co_rostered(@now)
 

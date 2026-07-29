@@ -127,12 +127,47 @@ defmodule HospitalityComs.Workers.EngagementSweeper do
   # powerless notices. A socket that has been open for a day past its
   # engagement's upper bound is not a case worth keeping an unbounded scan for.
   #
-  # It must also stay comfortably *shorter* than `Oban.Plugins.Pruner`'s
-  # `max_age` in `config/config.exs`. The completed announcement is what stops
-  # the sweep re-announcing the same expiry every five minutes, and a pruner
-  # that removed it while the term was still inside this window would do exactly
-  # that.
+  # It must also stay *shorter* than `Oban.Plugins.Pruner`'s `max_age` in
+  # `config/config.exs`. The completed announcement is what stops the sweep
+  # re-announcing the same expiry every five minutes, and a pruner that removed
+  # it while the term was still inside this window would do exactly that.
+  #
+  # That ordering used to be this comment and nothing else (issue #42, item 2).
+  # It is checked below, at compile time, and the direction of the read is
+  # deliberate: `lib` reads `config`, never the reverse.
   @lookback_seconds 24 * 60 * 60
+
+  # `nil` means no pruner is configured, which *removes* the constraint rather
+  # than violating it: with nothing deleting the completed announcement, nothing
+  # can un-suppress the sweep. A plugin named as a bare atom takes Oban's own
+  # default, read from the struct rather than restated — 60 seconds, which this
+  # lookback does violate, so the difference matters.
+  @pruner_max_age_in_seconds :hospitality_coms
+                             |> Application.compile_env([Oban, :plugins], [])
+                             |> Enum.find_value(fn
+                               {Oban.Plugins.Pruner, opts} ->
+                                 Keyword.get(opts, :max_age, %Oban.Plugins.Pruner{}.max_age)
+
+                               Oban.Plugins.Pruner ->
+                                 %Oban.Plugins.Pruner{}.max_age
+
+                               _plugin ->
+                                 nil
+                             end)
+
+  if is_integer(@pruner_max_age_in_seconds) and
+       @lookback_seconds >= @pruner_max_age_in_seconds do
+    raise """
+    @lookback_seconds is #{@lookback_seconds} seconds, which is not shorter than \
+    Oban.Plugins.Pruner's max_age of #{@pruner_max_age_in_seconds} seconds in \
+    config/config.exs.
+
+    A completed ExpireEngagement job is what suppresses this sweep's identical \
+    insert. Pruning it while the term is still inside this window makes every \
+    tick re-announce every expiry in it. Shorten the lookback or lengthen \
+    retention; do not delete this check.
+    """
+  end
 
   @doc """
   How many expired engagements one run will look at.

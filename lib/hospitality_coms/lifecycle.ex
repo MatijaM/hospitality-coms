@@ -164,10 +164,15 @@ defmodule HospitalityComs.Lifecycle do
 
   Each trigger deletes at most `batch_size/0` rows, and a run whose total
   exceeds `ceiling/0` rolls **every** trigger back. The two numbers are a pair:
-  the default ceiling is deliberately above what four full batches can reach, so
-  it is a guard against a batch bound that is missing or wrong rather than a
-  throttle. A ceiling a correct run could hit would refuse the same rows for
-  ever and the sweep would never make progress again.
+  the default ceiling is deliberately above what a full batch per trigger can
+  reach, so it is a guard against a batch bound that is missing or wrong rather
+  than a throttle. A ceiling a correct run could hit would refuse the same rows
+  for ever and the sweep would never make progress again.
+
+  That ordering is checked at compile time below, over
+  `RetentionRun.triggers/0` rather than over the number four — which used to be
+  written out in prose here, again lower down, and once more in
+  `config/config.exs`, none of which a fifth trigger would have disturbed.
 
   Either way a `HospitalityComs.Lifecycle.RetentionRun` is written, carrying the
   instant the sweep *used* and the four counts. On the ordinary path it is
@@ -248,12 +253,38 @@ defmodule HospitalityComs.Lifecycle do
   # stops finishing.
   @default_batch_size 500
 
-  # Four triggers times `@default_batch_size` is 2000, so a correctly configured
-  # run cannot reach this. That is deliberate. The ceiling is the guard that
-  # fires when a batch bound is missing or a later trigger is added without one;
-  # a ceiling an ordinary run could hit would roll back the same rows on every
-  # tick and the sweep would never make progress again.
+  # One full batch per trigger cannot reach this, so a correctly configured run
+  # cannot either. That is deliberate. The ceiling is the guard that fires when a
+  # batch bound is missing or a later trigger is added without one; a ceiling an
+  # ordinary run could hit would roll back the same rows on every tick and the
+  # sweep would never make progress again.
   @default_ceiling 5_000
+
+  # The ordering above, checked rather than described (issue #42, item 4). Both
+  # numbers stay declared because neither derives from the other — the ceiling is
+  # constrained from below and nothing says by how much — which is PR #41's rule
+  # for `@unconfirmed_retention_days` and the reason that one raises too.
+  #
+  # The multiplier is read from `RetentionRun.triggers/0` rather than written as
+  # four. "Four" was a prose literal in three places, and a fifth trigger would
+  # have invalidated every one of them silently; a trigger has to have a column
+  # on the run record to be counted at all, so that list is the honest source.
+  # The remote call is also what puts this module in `RetentionRun`'s
+  # compile-time dependency set, so adding a trigger recompiles this file.
+  @trigger_count length(RetentionRun.triggers())
+
+  if @default_batch_size * @trigger_count >= @default_ceiling do
+    raise """
+    @default_ceiling is #{@default_ceiling}, which #{@trigger_count} triggers of \
+    @default_batch_size #{@default_batch_size} can reach \
+    (#{@default_batch_size * @trigger_count}).
+
+    The ceiling is a guard against a missing batch bound, not a throttle. One an \
+    ordinary run can hit rolls the same rows back on every tick and the sweep \
+    never makes progress again. Raise the ceiling or lower the batch size; do \
+    not delete this check.
+    """
+  end
 
   # How long a `people` row that never confirmed an address survives (issue
   # #15). Chosen against a constraint rather than picked: it must exceed every

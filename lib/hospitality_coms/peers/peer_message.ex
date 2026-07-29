@@ -45,7 +45,12 @@ defmodule HospitalityComs.Peers.PeerMessage do
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Peers.Connection
 
-  # Mirrored from `*_create_peer_graph.exs`, which mirrors `room_messages`.
+  # The number `peer_messages_body_within_bound` in `*_create_peer_graph.exs`
+  # enforces, which was in turn written to match `room_messages`. The first of
+  # those is a pair that must agree and is checked by reading the CHECK back out
+  # in `test/hospitality_coms/constant_agreement_test.exs`; the second is a
+  # resemblance nothing depends on, deliberately left as one rather than derived
+  # from `HospitalityComs.Rooms.RoomMessage` (issue #42, item 5).
   @max_body_length 4000
 
   @primary_key {:id, :binary_id, autogenerate: true}

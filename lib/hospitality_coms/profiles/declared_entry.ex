@@ -43,6 +43,7 @@ defmodule HospitalityComs.Profiles.DeclaredEntry do
   import Ecto.Changeset
 
   alias HospitalityComs.Accounts.Person
+  alias HospitalityComs.Engagements.Invitation
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
@@ -74,7 +75,15 @@ defmodule HospitalityComs.Profiles.DeclaredEntry do
 
   # The same bound `engagements.role_label` carries, so a declared entry and an
   # attested one render in the same width.
-  @max_label_length 120
+  #
+  # **Read rather than restated, because a restatement of it was wrong for two
+  # units.** This said 120 under that exact sentence while the column it names
+  # carried 160 (issue #42, item 1). The relation is an equality, so there is
+  # one declaration and this reads it — the shape `Engagement` already uses for
+  # the same number. The database half of the pair is a migration literal that
+  # cannot be derived, and `test/hospitality_coms/constant_agreement_test.exs`
+  # reads it back out of `pg_constraint` to close that side.
+  @max_label_length Invitation.max_label_length()
 
   @castable [:role_label, :organisation_name, :starts_at, :ends_at]
 

@@ -70,8 +70,10 @@ which is a second declaration bought to avoid a one-line migration.
   bound is only reachable at all after this migration, and `mix ecto.rollback` in the test suite
   runs against a database whose `declared_entries` rows the sandbox has already rolled back.
 - **Affected callers or surfaces:** `Profiles.declare_entry/2` and `Profiles.amend_declared_entry/3`
-  are the only writers; `HospitalityComsWeb.ProfileChannel` renders. No reader has a width
-  assumption in code — the rendering claim is about a UI that does not exist yet.
+  are the only writers, and **nothing in `lib/hospitality_coms_web/` calls `HospitalityComs.Profiles`
+  at all** — measured; U9 added no transport surface. So no reader has a width assumption in code,
+  and the "render in the same width" clause the bound is named for is about a UI that does not exist
+  yet.
 - **Evidence and remaining uncertainty:** measured against `pg_constraint` above. The uncertainty is
   the product call, and the issue records it as made: 160.
 - **Safer alternative, if available:** narrow `engagements.role_label` to 120 instead. Rejected —
@@ -386,3 +388,95 @@ Compile-time, proved by build failure rather than by a test:
 | Regression protection | 4/5 | six existing files named by path; the widening's `down` is the one edge nothing exercises, and it is documented rather than tested because reaching it needs a row the tree cannot hold |
 | Falsifiability | 5/5 | every row names a mutation, and the four compile-time relations are proved by build failure rather than by assertion |
 | Risk of a vacuous pass | 4/5 | the file's central hazard — a parser that answers `nil` — is closed by an explicit control; the residual risk is that rows 1–9 all pass under a coordinated two-place change, which row 10 is there to catch and catches only for the three anchors |
+
+## Revisions made during implementation
+
+Recorded rather than silently applied, because the gate exists to be departed from explicitly.
+
+### 1. PR #55 merged mid-run, so the predicted rebase is already in the base
+
+The brief warned that PR #55 touched `config/config.exs` in a different section and that a rebase
+should be expected. It merged as `9eb7ea4` while this unit was working, and an external process in
+the checkout pulled `main` — which briefly left this unit's first commit sitting on the local `main`
+branch. The branch was repointed at that commit and `main` reset to `origin/main`, so the history is
+what it should have been and the base already contains #55. No conflict arose: the two edits are 90
+lines apart in the same file.
+
+### 2. Item 3's premise is half wrong, and the half that is right is worse than stated
+
+The issue says of the fourteen-day horizon: *"Raising the module constant leaves the suite green
+while the database silently refuses codes the changeset accepts."* Measured, both clauses need
+correcting and they point in opposite directions.
+
+**Raising it does not leave the suite green.** `Invitation.@max_code_validity_in_days` at 21 fails
+one existing test — `engagements_test.exs:203`, *"accepts a claim code good for exactly the maximum,
+which is the control"* — because that test builds a code at the module's limit and the database
+refuses it. What it reports is `match (=) failed` against a 40-line changeset dump. It detects the
+drift and names nothing about it, which is a different complaint from the one the issue makes.
+
+**Lowering it does leave the suite green — completely.** At 7 days, `engagements_test.exs` is 89/89
+while the changeset refuses codes the database accepts, because every test in that file derives its
+input from the constant and moves with it. The new test is the only thing in the tree that fails.
+That is the sharper case and it is the one the brief's row 5 now carries evidence for; the issue
+named the weaker direction.
+
+### 3. `mix test` re-migrates, so a rollback cannot be used as a mutation
+
+`mix.exs` aliases `test:` to `["ecto.create --quiet", "ecto.migrate --quiet", "test"]`. So
+`mix ecto.rollback` followed by `mix test` proves nothing — the run re-applies the migration before
+the first test starts, and every assertion passes. The brief's row 15 mutation had to be done by
+rolling back *and* editing the migration's own literal to 120, so the re-migration puts the old
+bound back. Worth writing down: any future attempt to mutate the schema half of one of these pairs
+hits the same trap, and it fails green.
+
+### 4. The trigger list is a function body, not a module attribute
+
+The brief said `RetentionRun` would gain `@triggers` plus `triggers/0`. It gained `triggers/0`
+alone, returning the list inline. A module attribute read by exactly one function is a second name
+for the same thing, and Credo's `--strict` pass has opinions about the resulting file. Nothing about
+the mechanism changes: `Lifecycle` still calls it at compile time, and the compile-time dependency
+that makes a fifth trigger recompile `lifecycle.ex` is created by the remote call rather than by the
+attribute.
+
+### 5. One extra control was added that the brief did not plan
+
+`the reader raises when a definition is not the shape it is being read as` — the length parser
+pointed at the interval constraint. Rows 11 and 12 cover a missing constraint and a constant-valued
+reader; neither covers a regex that silently stops matching the shape it is aimed at, which is the
+most likely way this file rots as constraint definitions change. Measured: replacing the parser with
+a constant kills six of the twelve tests, this one among them.
+
+## Mutation record
+
+Every behavioural test proved load-bearing, and every compile-time relation proved by build failure.
+Baseline `mix test` at the branch point: **1108/1112**, four `PostgresRolesTest` failures naming
+`hospitality_coms_dev` (issue #20's condition, from a developer's local database, not this branch).
+Final: **1122/1126**, the same four.
+
+### Build failures — the four compile-time relations
+
+| # | Mutation | Result |
+|---|---|---|
+| B1 | `EngagementSweeper.@lookback_seconds` → 8 days | build fails: *"@lookback_seconds is 691200 seconds, which is not shorter than Oban.Plugins.Pruner's max_age of 604800"* |
+| B2 | `config/config.exs` pruner `max_age` → 12 hours | build fails: *"…not shorter than … max_age of 43200 seconds"*. **This is the one that matters** — B1 alone would pass with the config side hard-coded, so B2 is what proves `Application.compile_env/3` reads the file. Re-run under `MIX_ENV=prod` and `MIX_ENV=test`: fails in both, so `testing: :manual` does not skip it and neither does a production build |
+| B3 | `Lifecycle.@default_ceiling` → 1_500 | build fails: *"@default_ceiling is 1500, which 4 triggers of @default_batch_size 500 can reach (2000)"* |
+| B4 | `@default_ceiling` → 2_100 (builds, 2000 < 2100), then a fifth atom added to `RetentionRun.triggers/0` | build fails: *"…which 5 triggers … can reach (2500)"*. **The control for B3** — it proves the multiplier comes from `RetentionRun` and not from a literal four |
+
+### Test failures
+
+| # | Mutation | Kills |
+|---|---|---|
+| M1 | `Invitation.@max_code_validity_in_days` 14 → 21 | 1 new (`the database refuses exactly the codes the changeset refuses`) + 1 existing, which reports a changeset dump |
+| M1b | …14 → 7 | 1 new. `engagements_test.exs` is **89/89** — the divergence is invisible to everything else in the tree |
+| M2 | `Invitation.@max_label_length` 160 → 200 | 3 new (both `declared_entries` rows and the `invitations` row) |
+| M3 | `RoomMessage.@max_body_length` 4000 → 8000 | 2 new — the body-bound row **and** the retained-copy ordering, which is item 5's sharpest instance |
+| M4 | `PeerMessage.@max_body_length` → 8000 | 1 new |
+| M5 | `CorrectionRequest.@max_body_length` → 8000 | 1 new |
+| M6 | `DeclaredEntry` derivation reverted to a literal 120 | 2 new + `profiles_test.exs`'s 160-character acceptance |
+| M7 | the widening migration's literal reverted to 120 and re-applied (the database half alone) | 3 new — the two `declared_entries` rows **and the anchor row**, which is the only proof the anchor detects anything — plus `profiles_test.exs`'s acceptance. Together with M6 this shows **each half of item 1's change is load-bearing on its own** |
+| M8 | `Visibility.@tail_days` 30 → 45 | 10 in `peers_test.exs`, exactly one of which names the number. That ratio is the finding: the file already detected the change and could not say what it was |
+| M9 | the constraint reader replaced by a constant `160` | 6 of 12, including both reader controls |
+| M10 | the reader answers a definition instead of raising on a missing constraint | 1 — the vacuity control, and only it, which is what a control for an unreachable path should look like |
+| M11 | `config/test.exs` given `ceiling: 1_000` | 1 (`an ordinary run cannot reach the ceiling`) — the runtime half the compile-time raise cannot see |
+
+The migration's `down` ran four times during M7 and restored 120 each time; `up` restored 160.
