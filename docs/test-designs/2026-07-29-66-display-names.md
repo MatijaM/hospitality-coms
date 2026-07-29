@@ -395,3 +395,120 @@ no employer read — and is, which is the first controller test in the tree that
 
 Recorded rather than silently applied, because the gate exists to be departed from explicitly. The
 sections above are not edited to agree with what shipped.
+
+1. **Decision 2's "the send path pays nothing" is wrong, and the way it is wrong is the unit's
+   sharpest finding.** The brief said the send would take the name from the scope, because "the
+   author is the scope's person by construction". It is — but
+   `HospitalityComsWeb.ChannelAuth.person_scope/1` builds `%Person{id: person_id}` and nothing else:
+   the socket deliberately caches the id and the token digest and no `Person` struct, so
+   `scope.person.display_name` is `nil` on both channels and correct over HTTP. **There is no test
+   position from which those two look different**, which is why the brief did not catch it and why
+   `RoomChannel.rendered/1` heading on `is_binary(name)` is load-bearing rather than defensive —
+   that guard is what turned a `null` on the wire into a crash the suite could see.
+
+   Both sends now read the row back through `Records.message/1 |> with_author_display_name/1`, which
+   is the *same* query the history read uses, so a message cannot have one shape on the send reply
+   and another on the read. It costs one primary-key lookup plus two joins per send. Caching the
+   name on the socket was the alternative and is worse twice over: an identifying value on a struct
+   a crash report inspects, and a mutable one, so a rename would go on broadcasting the old name to
+   the whole room until the next join. **Measured: mutation M5 — the scope-based version — kills 13
+   tests, every one of them a channel send.**
+
+2. **`Person.display_name_changeset/3`'s `validate_length` and its `check_constraint` declaration
+   are a redundant pair, and this is measured rather than argued.** Removing the validation kills
+   **0**; removing the declaration kills **0**; removing both kills **2**. Either alone answers with
+   the same changeset error, so neither is individually load-bearing at the changeset. What *is*
+   load-bearing is the CHECK in the database: dropping both constraints from `people` kills **5**,
+   including `person_test.exs`'s "refuse the update_all that erasure itself uses", which no
+   changeset can reach. That is the tree's existing "two guards, redundant and measured as such"
+   shape (`EmployerController`'s `@term_fields`, `Rosters.unrostered/3`), and it is recorded so
+   neither is read as covered by the other.
+
+3. **The brief's row 3 wanted a `display_name_test.exs`; the tests went into `accounts_test.exs`
+   instead**, under a "the names a person can be given" block. A separate file for one module with
+   three zero-arity functions is a file nobody opens, and the properties being asserted are about
+   what *registration* produces, which is `Accounts`' business.
+
+4. **Row 33's control found nothing new and is kept anyway.** The brief predicted that a column
+   grant on `display_name` specifically needed exercising. It does not add a mechanism —
+   `Zones.employer_privileges/1` quantifies over the table — but the assertion is the difference
+   between "the sweep would catch it" and "the sweep catches it", which is what the issue asked to
+   verify rather than assume. Mutation M17 (asking `has_table_privilege` alone) kills **9**,
+   including that row.
+
+5. **One client mutation killed nothing and produced a test.** `ApiClient.changeDisplayName` sending
+   `{displayName}` where the server casts `{display_name}` killed **0**, because every surface test
+   fakes that method and nothing exercised the real request. Three tests were added to
+   `client.test.ts` pinning the path, the method, the body against a literal and the 422's `fields`;
+   the same mutation now kills 1, as do the wrong path and the wrong success status. This is the
+   twenty-second "reads as coverage and provides none" shape this project has found, and the first
+   one caught by mutation before review rather than after.
+
+6. **`SessionBar`'s address kept an element of its own.** Splitting the sentence around `<strong>`
+   made `worker@example.com` a bare text node, which `findByText` does not match — nine existing
+   assertions in `app.test.tsx` would have gone red for a reason that has nothing to do with what
+   they assert. The claim each makes is unchanged, so the markup moved rather than the assertions.
+   Mutation C10, which drops the address entirely, kills **9**.
+
+7. **The refusal on the rename form renders the server's per-field sentence**, not
+   `failure-message.ts`'s generic "That was not accepted". That file names `fields` as the one
+   exception to rendering this client's own copy, and "why" here is either "can't be blank" or a
+   character bound — neither of which the generic line says. `room-view.tsx`'s and
+   `conversation-view.tsx`'s `Object.values(failure.fields).flat()` is the spelling reused.
+
+8. **Rows do not map one-to-one onto test bodies**, as every brief since U8 has recorded. Forty-two
+   rows became **28** new Elixir bodies across nine files (one new: `person_controller_test.exs`)
+   and **13** new client bodies across four files (one new: `session-bar.test.tsx`).
+
+9. **Baseline arithmetic.** Elixir **1199/1203** before, **1241/1245** after — the same four
+   `PostgresRolesTest` failures naming `hospitality_coms_dev` (issue #20). Client **493 passed / 15
+   skipped** before, **509 / 15** after, identical under
+   `NODE_OPTIONS="--localstorage-file=$(mktemp)"`.
+
+## Mutation record
+
+Thirty-four mutations, each applied to a clean tree, measured against the narrowest file that could
+answer, then restored. Every new behavioural test is killed by at least one.
+
+| # | Mutation | Tests killed |
+|---|----------|--------------|
+| M1 | `Records.pseudonymise/3` stops overwriting `display_name` | **5** |
+| M2 | `DisplayName.generate/0` returns the erased constant | 3 |
+| M2b | the erased constant is added to the name list | 1 |
+| M3 | the author join gains an activeness predicate (the client-side-roll reading) | **3** |
+| M4 | the read path drops `with_author_display_name/1` | 10 |
+| M5 | the send takes the name off the scope rather than re-reading it | **13** |
+| M6 | `RoomChannel.rendered/1` drops the name | 3 |
+| M7 | `RoomChannel.rendered/1` drops the engagement id and keeps the name | 5 |
+| M8 | `PeerChannel.rendered_peer/1` drops the name | 1 |
+| M9 | `Records.visible_peers/2` selects the role label as the name | 2 |
+| M10 | `display_name_changeset/3` stops trimming | 2 |
+| M11 | `display_name_changeset/3` stops bounding the length | **0** |
+| M11b | `display_name_changeset/3` stops declaring the two CHECKs | **0** |
+| M11c | neither guard in the changeset | 2 |
+| M12 | both database CHECKs dropped from `people` | 5 |
+| M13 | `DisplayName.max_length/0` moves to 80 | 1 |
+| M14 | a body naming no `display_name` answers 422 rather than 400 | 3 |
+| M15 | `PersonController.rendered/1` drops the name | 6 |
+| M16 | `Accounts.update_display_name/2` loses its erased clause | 1 |
+| M17 | the privilege sweep asks `has_table_privilege` alone | 9 |
+| M18 | `SessionController` re-spells the person instead of calling `rendered/1` | 1 |
+| C1 | `decodePerson` falls back instead of refusing a missing name | 1 |
+| C2 | `decodeRoomMessage` falls back | 1 |
+| C3 | `decodePeer` falls back | 1 |
+| C4 | a room's attribution drops the name | 2 |
+| C5 | a room's attribution drops the engagement id | 2 |
+| C6 | the peer list drops the name | 1 |
+| C7 | the bar renders what was typed rather than what the server answered | 2 |
+| C8 | `rename` writes the row and leaves the session's person alone | 2 |
+| C9 | the client trims before sending | 1 |
+| C10 | the bar drops the address | 9 |
+| C11 | the request body uses `displayName` rather than `display_name` | 0 → **1** |
+| C12 | the request PATCHes the wrong path | 1 |
+| C13 | the rename accepts a status other than 200 | 1 |
+
+**M5, M3 and C11 are the three worth reading twice.** M5 is a defect that is invisible over HTTP and
+total on both channels, and it was the first implementation. M3 is the whole of Decision 2: joining
+through the venue room's current roll satisfies every other assertion in the file and produces no
+name for exactly the messages a room keeps history for. C11 killed nothing, which is how the gap it
+names was found.
