@@ -310,4 +310,91 @@ go over a real request.
 
 Recorded rather than silently applied, because the gate exists to be departed from explicitly.
 
+### 1. Row 2 *is* killed by a mutation. The brief was wrong about which one.
+
+The brief said the magic-link test "is killed by no mutation of this diff" and listed that as an
+honest gap. **Measured, it is killed by M3** — adding `"token"` to the allowlist — which is a
+one-word edit somebody would plausibly make while chasing a log line. What is true is the narrower
+claim: *deleting this configuration entirely* does not kill it, because Phoenix's own default
+covers that one parameter. The two are different statements and only the second one holds.
+
+The residue is worth keeping in mind. Row 2's value is that it pins a **live bearer credential**
+end to end over a real redemption; its mutation kill comes from the allowlist, not from the fact
+that the credential is real.
+
+### 2. A *sufficiently complete* denylist passes both behavioural tests, and only the shape pin sees it
+
+M2 replaced the allowlist with `["password", "token", "email", "claim_code", "code", "body"]` — the
+denylist somebody would write if they read this issue and reached for the other shape. It kills
+three tests and **leaves both HTTP tests green**, because it names every parameter they use.
+
+That is not a weakness in the tests; it is the finding restated. The behavioural tests prove *these
+parameters are filtered*. Nothing behavioural can prove *the shape fails closed*, because the
+difference between the two shapes is only visible on a parameter nobody has written a rule for —
+which is, by construction, a parameter no test can name. **Row 1, the shape pin, is the only
+assertion in the file that distinguishes them.** The brief filed it as "a change-detector, proves
+nothing about behaviour on its own"; that is right, and it undersold why it has to be there.
+
+### 3. The absence is asserted against the parameter *line*, not the whole capture
+
+The brief's rows 2 and 5 both said "absent from the log". Implementation asserts `refute
+parameters(log) =~ email` — against the dispatch line alone — and the reason is measured:
+**`HospitalityComs.Repo` prints its own bound parameters at `:debug`**, so one `POST /api/log-in`
+puts the address into three SQL statements in the same capture:
+
+```
+SELECT p0."id", p0."email", … FROM "people" AS p0 WHERE (p0."email" = $1) ["person226@example.com"]
+SELECT TRUE FROM "people" AS p0 WHERE (p0."email" = $1) LIMIT 1  ["person226@example.com"]
+INSERT INTO "people" ("inserted_at","updated_at","email","id") VALUES … ["person226@example.com", …]
+```
+
+`refute log =~ email` over the whole capture is therefore **false**, and would have been written as
+a failing test rather than a discovered limitation. `filter_parameters` governs none of that, so
+the assertion is scoped to what the mechanism actually controls, and the residue is written into
+`AGENTS.md` so nobody reads a filtered parameter line as a promise about the log as a whole.
+
+The token test keeps `refute log =~ token` over the **whole** capture, and the asymmetry is real
+rather than an oversight: `people_tokens` stores the SHA-256 digest, so what reaches the SQL line
+is `<<157, 146, 56, …>>` and not the credential. Measured both ways.
+
+### 4. `@filtered` carries nine names, not five
+
+The brief listed five. The file also asserts `secret`, `authorization` and `otp` — names from
+`AGENTS.md`'s convention list that no route accepts — precisely because the allowlist covers
+parameters that do not exist yet, and a sample drawn only from what exists cannot show that.
+
+## Mutation record
+
+Six mutations plus one trap demonstration, each applied to a clean tree, measured against
+`test/hospitality_coms_web/parameter_filter_test.exs`, then restored. Every one of the seven tests
+is killed by at least one mutation.
+
+| # | Mutation | Killed | Which |
+|---|---|---|---|
+| 1 | the whole `filter_parameters` block deleted — Phoenix's shipped default applies | 4 | shape pin, filters-what-it-does-not-name, nested, **email over HTTP** |
+| 2 | replaced by an equivalent **denylist** naming today's sensitive parameters | 3 | shape pin, filters-what-it-does-not-name, nested |
+| 3 | `"token"` added to the allowlist | 3 | shape pin, filters-what-it-does-not-name, **token over HTTP** |
+| 4 | `"venue_id"` removed from the allowlist | 4 | shape pin, keeps-verbatim, **both HTTP controls** |
+| 5 | the allowlist emptied to `{:keep, []}` — redact everything | 4 | shape pin, keeps-verbatim, both HTTP controls |
+| 6 | `with_debug_log/1` stops lowering the primary `Logger` level | 2 | both HTTP tests |
+
+**Mutation 5 is the one that proves the control is a control.** `{:keep, []}` filters every
+parameter in the tree and still passes "filters every parameter it does not name" — the assertion a
+reader would call the coverage. Only "keeps every parameter it does name, verbatim" separates a
+filter that works from one that has stopped discriminating.
+
+**Mutation 6 is the trap, and it was measured directly rather than argued.** A throwaway file
+holding the obvious shape —
+
+```elixir
+{_c, log} = with_log(fn -> post(conn, ~p"/api/log-in", %{"email" => email}) end)
+refute log =~ email
+```
+
+— was run twice: once against this branch, and once against the tree with the configuration
+**deleted**, i.e. with the bug present and the address printing in full. **It passed both times.**
+That is the twenty-second instance of `tests-that-certify-nothing.md`'s generative shape, caught
+before it was written rather than after, and it is why every capture in the file reads a value out
+of the log before asserting anything is missing from it.
+
 ## Revisions made after review
