@@ -58,6 +58,20 @@ defmodule HospitalityComsWeb.Router do
     get "/venue-rooms/:venue_id/messages", RoomController, :venue_room_messages
     get "/venues/:venue_id/shift-rooms", RoomController, :shift_rooms
     get "/shift-rooms/:shift_room_id/messages", RoomController, :shift_room_messages
+
+    # The employer's half, and it is on this same pipeline rather than one of
+    # its own. There is no employer credential: a session is a person session
+    # plus a venue, and the venue is a path parameter, so a pipeline would have
+    # to know which venue before the router had parsed one.
+    # `HospitalityComsWeb.EmployerAuth` resolves the acting grant inside the
+    # action instead, against the database, on every request.
+    #
+    # `/employer/venues` is not `/venues`: the person side has no venue
+    # collection (`HospitalityComsWeb.RoomController` says why), and these are
+    # the venues this session may *act for*, which is a different set from the
+    # venues it is engaged at.
+    get "/employer/venues", EmployerController, :venues
+    get "/employer/venues/:venue_id/engagements", EmployerController, :engagements
   end
 
   # The mailbox preview is how the magic link is read during development, since

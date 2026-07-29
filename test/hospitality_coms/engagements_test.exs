@@ -72,6 +72,7 @@ defmodule HospitalityComs.EngagementsTest do
   alias HospitalityComs.Engagements.Records
   alias HospitalityComs.Profiles.AttestedEntry
   alias HospitalityComs.Repo
+  alias HospitalityComs.Rooms
   alias HospitalityComs.Venues
   alias HospitalityComs.Workers.ExpireEngagement
 
@@ -1406,6 +1407,179 @@ defmodule HospitalityComs.EngagementsTest do
     end
   end
 
+  describe "list_managed_venues/1" do
+    @describetag :managed_venues
+
+    test "answers the venue an engagement holding a live grant names" do
+      # The control for every refusal below. `fetch_grant_holding_engagement/2`
+      # asks this question of one venue; this asks it of all of them, which is
+      # what a picker needs before it has a venue to name.
+      {employer, creation} = scoped_venue_fixture(@now)
+      manager = person_scope_fixture(@now)
+
+      engagement_fixture(employer, manager, %{
+        starts_at: @now,
+        ends_at: @in_a_month,
+        grant_id: creation.grant.id
+      })
+
+      assert [venue] = Engagements.list_managed_venues(manager)
+      assert venue.id == creation.venue.id
+      assert venue.name == creation.venue.name
+    end
+
+    test "still answers the venue when the manager has suspended its venue room" do
+      # **OQ1, and the reason this function exists rather than
+      # `Rooms.list_venue_rooms/1` being reused.** That list subtracts
+      # suspensions and `fetch_grant_holding_engagement/2` does not, so a
+      # manager who used the person-side opt-out would keep full authority over
+      # the venue and vanish from their own picker — with no other way in, and
+      # nothing failing anywhere else to say so. That is the coupling KTD18
+      # exists to prevent.
+      {employer, creation} = scoped_venue_fixture(@now)
+      manager = person_scope_fixture(@now)
+
+      engagement_fixture(employer, manager, %{
+        starts_at: @now,
+        ends_at: @in_a_month,
+        grant_id: creation.grant.id
+      })
+
+      {:ok, _suspension} = Rooms.suspend_venue_room(manager, creation.venue.id)
+
+      assert [venue] = Engagements.list_managed_venues(manager)
+      assert venue.id == creation.venue.id
+
+      # **The control.** Without it a fixture whose suspension silently did
+      # nothing satisfies the assertion above, and the whole decision is
+      # untested. The venue room's list is the one that must drop the venue at
+      # this same instant.
+      assert Rooms.list_venue_rooms(manager) == []
+    end
+
+    test "leaves out a venue where the person is engaged and holds no grant" do
+      # Ana at Harbour: a worker, not a manager. The control is in the same
+      # call — the venue she does manage comes back, so a read answering `[]`
+      # for everybody would fail.
+      {harbour, harbour_creation} = scoped_venue_fixture(@now)
+      {kolektiv, kolektiv_creation} = scoped_venue_fixture(@now)
+      ana = person_scope_fixture(@now)
+
+      engagement_fixture(harbour, ana, %{starts_at: @now, ends_at: @in_a_month})
+
+      engagement_fixture(kolektiv, ana, %{
+        starts_at: @now,
+        ends_at: @in_a_month,
+        grant_id: kolektiv_creation.grant.id
+      })
+
+      assert [venue] = Engagements.list_managed_venues(ana)
+      assert venue.id == kolektiv_creation.venue.id
+      refute venue.id == harbour_creation.venue.id
+    end
+
+    test "drops the venue once the grant is revoked, the engagement untouched" do
+      # What changed is `employer_grants`, not the bridge. A second grant is
+      # issued first because `revoke_grant/2` refuses a venue's last live one.
+      {employer, _creation} = scoped_venue_fixture(@now)
+      manager = person_scope_fixture(@now)
+
+      {:ok, held} = Venues.issue_grant(employer)
+
+      engagement =
+        engagement_fixture(employer, manager, %{
+          starts_at: @now,
+          ends_at: @in_a_month,
+          grant_id: held.id
+        })
+
+      # The control: present before the revocation.
+      assert [_venue] = Engagements.list_managed_venues(manager)
+
+      assert {:ok, _revoked} = Venues.revoke_grant(employer, held.id)
+
+      assert Engagements.list_managed_venues(manager) == []
+      assert Repo.get!(Engagement, engagement.id).grant_id == held.id
+    end
+
+    test "leaves out a term that has not opened, and includes it once the instant passes" do
+      # Derived, with nothing having run. The second half is what makes the
+      # first an assertion about `active_at/2` rather than about a read that
+      # returns nothing.
+      {employer, creation} = scoped_venue_fixture(@now)
+      person = person_fixture(@now)
+      opens = DateTime.add(@now, 1, :day)
+
+      engagement_fixture(employer, PersonScope.for_person(person, @now), %{
+        starts_at: opens,
+        ends_at: @in_a_month,
+        grant_id: creation.grant.id
+      })
+
+      assert Engagements.list_managed_venues(PersonScope.for_person(person, @now)) == []
+
+      later = DateTime.add(opens, 1, :hour)
+      assert [venue] = Engagements.list_managed_venues(PersonScope.for_person(person, later))
+      assert venue.id == creation.venue.id
+    end
+
+    test "leaves out a term that has closed" do
+      {employer, creation} = scoped_venue_fixture(@now)
+      person = person_fixture(@now)
+
+      engagement_fixture(employer, PersonScope.for_person(person, @now), %{
+        starts_at: @now,
+        ends_at: @in_a_week,
+        grant_id: creation.grant.id
+      })
+
+      assert [_venue] = Engagements.list_managed_venues(PersonScope.for_person(person, @now))
+
+      after_the_term = DateTime.add(@in_a_week, 1, :hour)
+
+      assert Engagements.list_managed_venues(PersonScope.for_person(person, after_the_term)) == []
+    end
+
+    test "orders by name, so a picker renders a list somebody can read" do
+      manager = person_scope_fixture(@now)
+
+      first = managed_venue_named(manager, "u5-venue-aaa-#{System.unique_integer([:positive])}")
+      last = managed_venue_named(manager, "u5-venue-zzz-#{System.unique_integer([:positive])}")
+
+      assert Enum.map(Engagements.list_managed_venues(manager), & &1.id) == [first.id, last.id]
+    end
+
+    test "is per person: somebody else's authority answers nothing for this one" do
+      # Measured: without this row, dropping `of_person/2` from the query kills
+      # no test in this file. Every other case here happens to have nobody else
+      # managing the venue in question.
+      {employer, creation} = scoped_venue_fixture(@now)
+      manager = person_scope_fixture(@now)
+      bystander = person_scope_fixture(@now)
+
+      engagement_fixture(employer, manager, %{
+        starts_at: @now,
+        ends_at: @in_a_month,
+        grant_id: creation.grant.id
+      })
+
+      assert [_venue] = Engagements.list_managed_venues(manager)
+      assert Engagements.list_managed_venues(bystander) == []
+    end
+
+    test "refuses an employer scope and an anonymous person scope by function clause" do
+      {employer, _creation} = scoped_venue_fixture(@now)
+
+      assert_raise FunctionClauseError, fn ->
+        Engagements.list_managed_venues(scope_of(:employer, employer))
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        Engagements.list_managed_venues(PersonScope.for_person(nil, @now))
+      end
+    end
+  end
+
   describe "the bridge's row-level security" do
     # `HospitalityComs.BoundaryTest` asserts the policy exists and is not
     # `FORCE`d; what it cannot assert is the behaviour, because populating the
@@ -1574,6 +1748,24 @@ defmodule HospitalityComs.EngagementsTest do
   defp active_ids_at(venue, grant, instant) do
     {:ok, engagements} = Engagements.list_engagements(employer_scope_at(venue, grant, instant))
     Enum.map(engagements, & &1.id)
+  end
+
+  # A venue with a name this test chose, and `manager` holding its founding
+  # grant. `venue_fixture/1` names venues by a counter, which is fine everywhere
+  # except the one assertion that is about the ordering.
+  defp managed_venue_named(%PersonScope{} = manager, name) do
+    {:ok, creation} =
+      Venues.create_venue(manager, %{name: name, timezone: "Europe/Zagreb"})
+
+    employer = employer_scope_at(creation.venue, creation.grant, @now)
+
+    engagement_fixture(employer, manager, %{
+      starts_at: @now,
+      ends_at: @in_a_month,
+      grant_id: creation.grant.id
+    })
+
+    creation.venue
   end
 
   defp venue_founding_grant_id(venue_id) do

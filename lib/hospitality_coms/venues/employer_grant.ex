@@ -152,16 +152,30 @@ defmodule HospitalityComs.Venues.EmployerGrant do
   end
 
   @doc """
-  Grants of one venue that are live at `instant`.
+  Grants that are live at `instant`, at every venue.
 
   Half-open: a grant revoked at exactly `instant` is not live, matching the
   convention every period in this application follows.
+
+  **The venue-free form is the one the predicate lives in**, and `live_at/2` is
+  it plus a venue filter. Every per-venue caller wants `live_at/2`; this arity
+  exists for the one question that has no venue to name —
+  `HospitalityComs.Engagements.list_managed_venues/1` asks which venues a person
+  may act for, and cannot pass a venue in to find out. Splitting it this way is
+  what keeps "live" spelled once rather than twice.
+  """
+  @spec live_at(DateTime.t()) :: Ecto.Query.t()
+  def live_at(%DateTime{} = instant) do
+    from grant in __MODULE__,
+      where: grant.granted_at <= ^instant,
+      where: is_nil(grant.revoked_at) or grant.revoked_at > ^instant
+  end
+
+  @doc """
+  Grants of one venue that are live at `instant`.
   """
   @spec live_at(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
   def live_at(venue_id, %DateTime{} = instant) when is_binary(venue_id) do
-    from grant in __MODULE__,
-      where: grant.venue_id == ^venue_id,
-      where: grant.granted_at <= ^instant,
-      where: is_nil(grant.revoked_at) or grant.revoked_at > ^instant
+    from grant in live_at(instant), where: grant.venue_id == ^venue_id
   end
 end
