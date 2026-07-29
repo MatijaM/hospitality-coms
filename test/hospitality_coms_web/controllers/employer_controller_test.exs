@@ -1,8 +1,9 @@
 defmodule HospitalityComsWeb.EmployerControllerTest do
   @moduledoc """
-  The employer's first two HTTP reads, and the resolver every later one copies.
+  The employer's HTTP surface: two reads, the offer that starts the handshake,
+  and the resolver every later route copies.
 
-  Four things are asserted here and they answer different questions.
+  Five things are asserted here and they answer different questions.
 
   **That the rendered engagement names no human.** `Engagement` structs carry
   `person_id` — the globally stable cross-venue key, and a disclosure
@@ -37,6 +38,16 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
   authority and must keep appearing in their own picker;
   `HospitalityComs.EngagementsTest` carries the context half with its control.
 
+  **That an offer discloses its code once and its digest never**, that its three
+  instants default from the request's instant, and that the fourteen-day bound
+  on a code's life is exercised **from both sides**. A bound tested from one
+  side is satisfied by no bound at all. The digest has the same two-pin shape
+  `person_id` has — an exact key set, plus `Invitation.__schema__(:fields)`
+  beside it — and one more that nothing else here needs: the returned code is
+  hashed and compared against the stored digest, because "the response carries a
+  plaintext code" and "the response carries a string" are otherwise the same
+  green.
+
   ## Why this file is not sandboxed
 
   `HospitalityComsWeb.RoomControllerTest`'s reason, and here it is mandatory
@@ -63,6 +74,8 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Clock
   alias HospitalityComs.Engagements.Engagement
+  alias HospitalityComs.Engagements.Invitation
+  alias HospitalityComs.Repo
   alias HospitalityComs.Rooms
   alias HospitalityComs.Venues
   alias HospitalityComsWeb.EmployerAuth
@@ -73,11 +86,33 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
   @now HospitalityComs.EngagementsFixtures.fixed_instant()
   @term_ends DateTime.add(@now, 90, :day)
 
+  # Every instant column in `invitations` is second-precision, so a response
+  # compared against a *computed* value has to be compared against a truncated
+  # one. The reads above compare against values read back off a struct and never
+  # meet this.
+  @issued_at DateTime.truncate(@now, :second)
+
   # The literals R18 pins against. Written out here rather than derived from the
   # controller, because a key set read from the thing under test asserts only
   # that it equals itself.
   @venue_keys ~w(venue_id name)
   @engagement_keys ~w(engagement_id role_label starts_at ends_at)
+  @issued_keys ~w(invitation claim_code)
+  @invitation_keys ~w(invitation_id role_label starts_at ends_at code_expires_at)
+
+  # KTD-E5's three durations and the bound they sit inside, written out here
+  # rather than read from `HospitalityComsWeb.EmployerController`'s attributes
+  # or from `Invitation.max_code_validity_in_days/0`. A test that reads the
+  # constant it pins asserts only that the constant equals itself — and issue
+  # #42 is a live sweep of constant pairs held together by prose, of which "the
+  # default is inside the bound" would be one more.
+  #
+  # `engagements_test.exs` cannot do this: its both-sides tests derive their
+  # input from `max_code_validity_in_days/0` and therefore move with it, which
+  # that function's own docstring says.
+  @default_term_in_days 90
+  @default_code_validity_in_days 7
+  @code_validity_bound_in_days 14
 
   setup do
     real_connections()
@@ -249,6 +284,201 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
     end
   end
 
+  ## The offer
+
+  describe "POST /api/employer/venues/:venue_id/invitations" do
+    test "issues an offer from a role label alone and returns the code once", %{conn: conn} do
+      # AE1, R1, R3. The exact key sets are what fail when a field is *added*,
+      # which is the direction `claim_code_digest` would arrive from; the
+      # `__schema__` line beside them is what stops an empty render passing for
+      # a redacted one.
+      %{person: person, venue: venue} = manager()
+
+      body = issue(conn, person, venue, %{"role_label" => "Runner"})
+
+      assert body |> Map.keys() |> Enum.sort() == Enum.sort(@issued_keys)
+      assert %{"invitation" => invitation, "claim_code" => code} = body
+      assert invitation |> Map.keys() |> Enum.sort() == Enum.sort(@invitation_keys)
+      assert invitation["role_label"] == "Runner"
+      assert is_binary(code) and code != ""
+
+      assert :claim_code_digest in Invitation.__schema__(:fields)
+    end
+
+    test "returns the credential itself, and the row keeps only its digest", %{conn: conn} do
+      # The pin nothing else provides. An exact key set says a `claim_code` key
+      # exists; only this says the value in it is the thing that redeems the
+      # offer, and that what was stored is not.
+      %{person: person, venue: venue} = manager()
+
+      %{"invitation" => invitation, "claim_code" => code} =
+        issue(conn, person, venue, %{"role_label" => "Runner"})
+
+      row = Repo.get!(Invitation, invitation["invitation_id"])
+
+      assert row.claim_code_digest == Invitation.digest(code)
+      refute row.claim_code_digest == code
+    end
+
+    test "defaults the three instants from the request's instant", %{conn: conn} do
+      # KTD-E5. A crude form cannot ask for three date-times and a client that
+      # computed them would be a second clock — `Clock.Offset` moves this
+      # server's instant and would not move a browser's.
+      %{person: person, venue: venue} = manager()
+
+      %{"invitation" => invitation} = issue(conn, person, venue, %{"role_label" => "Runner"})
+
+      assert invitation["starts_at"] == DateTime.to_iso8601(@issued_at)
+
+      assert invitation["ends_at"] ==
+               DateTime.to_iso8601(DateTime.add(@issued_at, @default_term_in_days, :day))
+
+      assert invitation["code_expires_at"] ==
+               DateTime.to_iso8601(DateTime.add(@issued_at, @default_code_validity_in_days, :day))
+    end
+
+    test "puts the defaulted expiry strictly inside the bound and strictly after issue",
+         %{conn: conn} do
+      # The seven and the fourteen are independent constants (issue #42), and
+      # this is the only relationship asserted between them: a checkable one
+      # rather than a sentence in a moduledoc.
+      %{person: person, venue: venue} = manager()
+
+      %{"invitation" => invitation} = issue(conn, person, venue, %{"role_label" => "Runner"})
+
+      {:ok, expires_at, 0} = DateTime.from_iso8601(invitation["code_expires_at"])
+      bound = DateTime.add(@issued_at, @code_validity_bound_in_days, :day)
+
+      assert DateTime.compare(expires_at, @issued_at) == :gt
+      assert DateTime.compare(expires_at, bound) == :lt
+    end
+
+    test "lets the body override all three instants", %{conn: conn} do
+      %{person: person, venue: venue} = manager()
+
+      starts_at = DateTime.add(@issued_at, 2, :day)
+      ends_at = DateTime.add(@issued_at, 20, :day)
+      code_expires_at = DateTime.add(@issued_at, 3, :day)
+
+      %{"invitation" => invitation} =
+        issue(conn, person, venue, %{
+          "role_label" => "Runner",
+          "starts_at" => DateTime.to_iso8601(starts_at),
+          "ends_at" => DateTime.to_iso8601(ends_at),
+          "code_expires_at" => DateTime.to_iso8601(code_expires_at)
+        })
+
+      assert invitation["starts_at"] == DateTime.to_iso8601(starts_at)
+      assert invitation["ends_at"] == DateTime.to_iso8601(ends_at)
+      assert invitation["code_expires_at"] == DateTime.to_iso8601(code_expires_at)
+    end
+
+    test "accepts an expiry exactly fourteen days out and refuses one second later",
+         %{conn: conn} do
+      # **Both directions**, which is the point: a bound exercised from one side
+      # only is `docs/solutions/test-failures/tests-that-certify-nothing.md`'s
+      # shape, and a route with no bound at all passes the accepting half.
+      #
+      # This pins the **changeset's** bound. `invitations_code_expiry_within_bound`
+      # is a separate declaration of the same number, item 3 of issue #42, and is
+      # `constant_agreement_test.exs`'s; nothing here covers it.
+      %{person: person, venue: venue} = manager()
+      bound = DateTime.add(@issued_at, @code_validity_bound_in_days, :day)
+
+      %{"invitation" => accepted} =
+        issue(conn, person, venue, %{
+          "role_label" => "Runner",
+          "code_expires_at" => DateTime.to_iso8601(bound)
+        })
+
+      assert accepted["code_expires_at"] == DateTime.to_iso8601(bound)
+
+      refused =
+        refused_offer(conn, person, venue, %{
+          "role_label" => "Runner",
+          "code_expires_at" => DateTime.to_iso8601(DateTime.add(bound, 1, :second))
+        })
+
+      assert %{"error" => %{"code" => "unprocessable_entity", "fields" => fields}} = refused
+
+      assert "must be within #{@code_validity_bound_in_days} day(s) of issue" in fields[
+               "code_expires_at"
+             ]
+    end
+
+    test "refuses a term whose end does not follow its start", %{conn: conn} do
+      %{person: person, venue: venue} = manager()
+
+      refused =
+        refused_offer(conn, person, venue, %{
+          "role_label" => "Runner",
+          "starts_at" => DateTime.to_iso8601(DateTime.add(@issued_at, 2, :day)),
+          "ends_at" => DateTime.to_iso8601(@issued_at)
+        })
+
+      assert %{"error" => %{"code" => "unprocessable_entity", "fields" => fields}} = refused
+      assert "must be after the start" in fields["ends_at"]
+    end
+
+    test "refuses an offer naming no role", %{conn: conn} do
+      %{person: person, venue: venue} = manager()
+
+      refused = refused_offer(conn, person, venue, %{})
+
+      assert %{"error" => %{"code" => "unprocessable_entity", "fields" => fields}} = refused
+      assert "can't be blank" in fields["role_label"]
+    end
+
+    test "confers nothing when the body names a grant", %{conn: conn} do
+      # The crude form offers no way to make another manager, and a field the
+      # form does not offer must not be castable from the body anyway. Four
+      # fields are taken off it and `grant_id` is not one of them.
+      %{person: person, venue: venue, employer: employer, grant: grant} = manager()
+
+      %{"invitation" => invitation} =
+        issue(conn, person, venue, %{"role_label" => "Runner", "grant_id" => grant.id})
+
+      assert Repo.get!(Invitation, invitation["invitation_id"]).grant_id == nil
+
+      # Control: the field is real and this grant is conferrable, so the `nil`
+      # above is the route declining to cast it rather than conferral being
+      # broken everywhere.
+      %{invitation: conferred} = invitation_fixture(employer, %{grant_id: grant.id})
+      assert conferred.grant_id == grant.id
+    end
+
+    test "answers a venue it cannot act for and a malformed id identically", %{conn: conn} do
+      # R17 on a write route, asserted by equality rather than by two matches.
+      # The control is the third request: the *same session*, at the venue it
+      # does manage, answers `201`.
+      %{worker: worker, venue: venue} = manager()
+      elsewhere = manager_for(worker)
+      offer = %{"role_label" => "Runner"}
+
+      refused = refused_offer(conn, worker, venue, offer, 404)
+
+      malformed =
+        json_post(conn, worker, "/api/employer/venues/not-a-uuid/invitations", offer, 404)
+
+      assert refused == malformed
+      assert %{"error" => %{"code" => "not_found"}} = refused
+
+      assert %{"invitation" => _issued} = issue(conn, worker, elsewhere, offer)
+    end
+
+    test "refuses without a bearer token, and answers with one", %{conn: conn} do
+      # The second half is the control: a route that refused everything would
+      # satisfy the first alone.
+      %{person: person, venue: venue} = manager()
+      path = "/api/employer/venues/#{venue.id}/invitations"
+
+      assert %{"error" => %{"code" => "unauthorized"}} =
+               conn |> post(path, %{"role_label" => "Runner"}) |> json_response(401)
+
+      assert %{"invitation" => _issued} = issue(conn, person, venue, %{"role_label" => "Runner"})
+    end
+  end
+
   ## The resolver itself
 
   describe "the acting grant is resolved on every call" do
@@ -321,6 +551,18 @@ defmodule HospitalityComsWeb.EmployerControllerTest do
 
   defp json_get(conn, person, path, status \\ 200) do
     conn |> with_session(person) |> get(path) |> json_response(status)
+  end
+
+  defp json_post(conn, person, path, params, status) do
+    conn |> with_session(person) |> post(path, params) |> json_response(status)
+  end
+
+  defp issue(conn, person, venue, offer) do
+    json_post(conn, person, "/api/employer/venues/#{venue.id}/invitations", offer, 201)
+  end
+
+  defp refused_offer(conn, person, venue, offer, status \\ 422) do
+    json_post(conn, person, "/api/employer/venues/#{venue.id}/invitations", offer, status)
   end
 
   defp refusal(conn, person, venue_id) do
