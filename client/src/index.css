@@ -89,6 +89,35 @@ label {
   color: var(--muted);
 }
 
+/* A `fieldset` is not a `form` and got none of the rule above it, so its labels
+   and inputs flowed inline and wrapped wherever they fit — a label landing
+   beside the *previous* field's input, which reads as the wrong pairing. Two
+   columns puts each label next to the field it names, in source order. */
+fieldset {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 1rem 0;
+  padding: 0.5rem 1rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+}
+
+/* Anything that is not a label spans both columns unless it is a field: a
+   button has no label to sit beside, and a legend is the box's caption. */
+fieldset > legend {
+  grid-column: 1 / -1;
+}
+
+fieldset > button {
+  /* The global rule adds a top margin for a button that follows prose. In a
+     grid the row gap already spaces it, so the two compound. */
+  margin-top: 0;
+  grid-column: 2;
+  justify-self: start;
+}
+
 input,
 select {
   font: inherit;
@@ -206,6 +235,51 @@ code {
 [aria-label="Your rooms"] button + button {
   background: transparent;
   border-color: var(--line);
+  color: var(--muted);
+}
+
+/* Every list whose rows carry a control, stacked rather than laid out in a row.
+   Their labels name the thing they act on — a venue's whole name, a shift's
+   type and both ends of its term — so side by side they are wider than the list
+   holding them and wrap into the next row, which reads as the control belonging
+   to the wrong entry. Smaller than a form's submit for the same reason: these
+   are navigation, not the page's action.
+
+   `[aria-label="Your rooms"]` above is deliberately not in this set — it is a
+   row of two controls over one short bookmark and fits. */
+[aria-label="Rooms you are in"],
+[aria-label="Venues you can act for"],
+[aria-label="People here now"],
+[aria-label="Shifts at this venue"],
+[aria-label="On this shift"] {
+  list-style: none;
+  padding-left: 0;
+}
+
+[aria-label="Rooms you are in"] li,
+[aria-label="Venues you can act for"] li,
+[aria-label="People here now"] li,
+[aria-label="Shifts at this venue"] li,
+[aria-label="On this shift"] li {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
+  margin-bottom: 0.9rem;
+}
+
+[aria-label="Rooms you are in"] button,
+[aria-label="Venues you can act for"] button,
+[aria-label="Shifts at this venue"] button,
+[aria-label="On this shift"] button {
+  margin-top: 0;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+/* When a shift closes is a fact about the row above it, not a second heading. */
+[aria-label="Shifts at this venue"] span {
+  font-size: 0.8rem;
   color: var(--muted);
 }
 
