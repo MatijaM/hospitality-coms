@@ -429,6 +429,7 @@ defmodule HospitalityComsWeb.PeerChannel do
   defp rendered_peer(%Visibility{} = visibility) do
     %{
       person_id: visibility.person_id,
+      display_name: visibility.display_name,
       venue_id: visibility.venue_id,
       venue_name: visibility.venue_name,
       role_label: visibility.role_label,

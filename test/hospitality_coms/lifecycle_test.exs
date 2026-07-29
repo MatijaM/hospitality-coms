@@ -185,13 +185,19 @@ defmodule HospitalityComs.LifecycleTest do
       assert DateTime.compare(at, @now) == :eq
     end
 
-    test "changes those two columns and leaves every other one alone" do
-      # KTD15's whole claim is that the row *stays*, and the test above is a
-      # pattern match on two fields of a five-column table — so `confirmed_at`,
-      # `inserted_at` and `id` were unconstrained. Measured: a `pseudonymise/2`
-      # that also nulled `confirmed_at` passed eighty-eight tests. This is the
-      # `Map.keys/1` control U9 wrote for `VisibleEntry`, pointed at the row
-      # erasure is about.
+    test "changes exactly those columns and leaves every other one alone" do
+      # KTD15's whole claim is that the row *stays*, and the test above it is a
+      # pattern match on two fields of a six-column table — so `confirmed_at`,
+      # `display_name`, `inserted_at` and `id` were unconstrained. Measured: a
+      # `pseudonymise/3` that also nulled `confirmed_at` passed eighty-eight
+      # tests. This is the `Map.keys/1` control U9 wrote for `VisibleEntry`,
+      # pointed at the row erasure is about.
+      #
+      # `display_name` joined the list in #66 and is the reason this assertion
+      # is worth having twice over: a readable name left behind is an
+      # identifying value surviving erasure. Measured again there — dropping
+      # `display_name` from `Records.pseudonymise/3` fails **this test and this
+      # test only** out of the whole suite.
       %{person: person} = engaged()
 
       # Confirmed by hand rather than through a magic link, because a null
@@ -199,17 +205,43 @@ defmodule HospitalityComs.LifecycleTest do
       # again for exactly the reason the count comparison was: nothing changed.
       confirm(person.person.id)
 
+      # And named by hand for the same reason, one column over. The generator
+      # picks at random from sixty-four characters, so a fixture that happened
+      # to draw the erased name would leave `display_name` out of `changed`
+      # and out of this assertion — a field that was already the target value is
+      # invisible to a diff.
+      {:ok, _named} = Accounts.update_display_name(person, "Wendy Darling")
+
       later = DateTime.add(@now, 1, :hour)
       before = person_row(person.person.id)
+      refute before.display_name == Lifecycle.erased_display_name()
 
       assert {:ok, _} = Lifecycle.erase_person(person_at(person, later))
 
       erased = person_row(person.person.id)
       changed = for {field, value} <- before, Map.fetch!(erased, field) != value, do: field
 
-      assert Enum.sort(changed) == [:email, :erased_at, :updated_at]
+      assert Enum.sort(changed) == [:display_name, :email, :erased_at, :updated_at]
       assert erased.email == nil
+      assert erased.display_name == Lifecycle.erased_display_name()
       assert %DateTime{} = erased.confirmed_at
+    end
+
+    test "and the name it leaves is not the label it leaves on the engagements" do
+      # The two constants are deliberately separate and no relation is asserted
+      # between them (#42's rule). This is what says so, and it is also the
+      # control that stops row 12 above being satisfied by reading the wrong
+      # one: `pseudonymise/3` handed `@erased_label` instead of
+      # `@erased_display_name` passes every assertion in the test above.
+      %{person: person, engagement: engagement} = engaged()
+
+      assert {:ok, _} = Lifecycle.erase_person(person_at(person, @now))
+
+      assert Repo.get!(Person, person.person.id).display_name ==
+               Lifecycle.erased_display_name()
+
+      assert Repo.get!(Engagement, engagement.id).role_label == Lifecycle.erased_label()
+      refute Lifecycle.erased_display_name() == Lifecycle.erased_label()
     end
 
     test "lets two erased people coexist on the partial unique index" do

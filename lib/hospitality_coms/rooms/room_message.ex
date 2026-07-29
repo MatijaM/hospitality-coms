@@ -27,6 +27,27 @@ defmodule HospitalityComs.Rooms.RoomMessage do
   nothing else — the row is the same row, and KTD16's two retention clocks are a
   stamped column U10 adds, not a second table.
 
+  ## The author's name is joined, never stored
+
+  `author_display_name` is a **virtual** field (#66), filled by
+  `HospitalityComs.Rooms.Records.with_author_display_name/1` on every read and
+  from the sender's own scope on the write. Three reasons it is not a column:
+
+    * a stored copy is a denormalised name that a rename never reaches, so the
+      room would show what somebody used to be called;
+    * a stored copy is a *person's name* written into an employer-zone row,
+      which is KTD2 broken — `room_messages` would become a second crossing;
+    * erasure would then have to rewrite a number of rows proportional to
+      **messages**, which is the unbounded write KTD15 put the label on the
+      engagement to avoid.
+
+  Joining is what makes an erased author's history render under
+  `HospitalityComs.Lifecycle.erased_display_name/0` with nothing having visited
+  these rows, and it is what makes a message from a **closed** engagement carry
+  a name at all — the join reaches `engagements` and then `people` with no
+  activeness predicate anywhere, which a client-side join against the venue
+  room's current roll cannot do.
+
   ## Bodies are retained even when their author is erased
 
   KTD15c: erasure is *identifier* erasure. Deleting message bodies would destroy
@@ -62,6 +83,9 @@ defmodule HospitalityComs.Rooms.RoomMessage do
     belongs_to :shift_room, ShiftRoom
     belongs_to :author_engagement, Engagement
 
+    # Joined on every read, never stored. See the moduledoc.
+    field :author_display_name, :string, virtual: true
+
     timestamps(type: :utc_datetime)
   end
 
@@ -77,6 +101,7 @@ defmodule HospitalityComs.Rooms.RoomMessage do
           body: String.t() | nil,
           sent_at: DateTime.t() | nil,
           delete_after: DateTime.t() | nil,
+          author_display_name: String.t() | nil,
           inserted_at: DateTime.t() | nil,
           updated_at: DateTime.t() | nil
         }

@@ -28,6 +28,7 @@ defmodule HospitalityComs.PeersTest do
   import HospitalityComs.EngagementsFixtures
   import HospitalityComs.PeersFixtures
 
+  alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.EmployerScope
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.EmployerRepo
@@ -296,6 +297,7 @@ defmodule HospitalityComs.PeersTest do
       assert peer.venue_id == venue_id
       assert peer.venue_name =~ venue_prefix()
       assert peer.role_label == "Head Chef"
+      assert peer.display_name == second.person.display_name
       # Second precision, because the engagement bounds these are derived from
       # are `:utc_datetime` like everything else in the schema.
       assert peer.visible_from == DateTime.truncate(@now, :second)
@@ -315,6 +317,23 @@ defmodule HospitalityComs.PeersTest do
 
       refute peer |> Map.from_struct() |> Map.values() |> Enum.member?(second.person.email)
       refute :email in (peer |> Map.from_struct() |> Map.keys())
+    end
+
+    test "carries the counterpart's display name and exactly these fields" do
+      # #66. A display name is strictly less identifying than the `person_id`
+      # already here, and it is what makes the list readable — but it arrives
+      # next to the assertion above, which is the one somebody would be tempted
+      # to relax while adding a field. The exact key set is what fails when a
+      # field is *added*, in either direction.
+      %{first: first, second: second} = co_rostered(@now)
+      {:ok, _renamed} = Accounts.update_display_name(second, "Wendy Darling")
+
+      assert [%Visibility{} = peer] = Peers.list_visible_peers(first)
+      assert peer.display_name == "Wendy Darling"
+
+      assert peer |> Map.from_struct() |> Map.keys() |> Enum.sort() ==
+               ~w(display_name person_id role_label venue_id venue_name visible_from
+                  visible_until)a
     end
 
     test "gives one entry per venue when the same pair worked at two of them" do
@@ -1260,6 +1279,7 @@ defmodule HospitalityComs.PeersTest do
         venue_id: Ecto.UUID.generate(),
         venue_name: "irrelevant",
         role_label: "irrelevant",
+        display_name: "irrelevant",
         own_starts_at: own_from,
         own_ends_at: own_to,
         peer_starts_at: peer_from,

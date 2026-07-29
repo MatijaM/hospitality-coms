@@ -40,7 +40,7 @@ defmodule HospitalityComs.ConstantAgreementTest do
 
   ## The one deliberate literal
 
-  `the three anchors the database holds` writes 160, 14 and 4000 out by hand.
+  `the four anchors the database holds` writes 160, 14, 4000 and 60 out by hand.
   Every other assertion compares the database against a module, so a change made
   in *both* places passes all of them; the anchor test is the one somebody has
   to edit on purpose. It is the same manoeuvre
@@ -51,6 +51,7 @@ defmodule HospitalityComs.ConstantAgreementTest do
 
   use HospitalityComs.DataCase, async: true
 
+  alias HospitalityComs.Accounts.DisplayName
   alias HospitalityComs.Engagements.Invitation
   alias HospitalityComs.Lifecycle
   alias HospitalityComs.Lifecycle.RetentionRun
@@ -119,6 +120,17 @@ defmodule HospitalityComs.ConstantAgreementTest do
                CorrectionRequest.max_body_length()
     end
 
+    test "a display name's bound is the one its changeset enforces" do
+      # #66. `people_display_name_within_bound` is reached with **no changeset
+      # in front of it** on the one write that matters:
+      # `Lifecycle.Records.pseudonymise/3` is an `update_all`, so
+      # `Person.display_name_changeset/3`'s `validate_length` is not consulted
+      # on the erasure path at all. That is `retained_message_copies`' situation
+      # by another route, and it is why the CHECK exists rather than being a
+      # second copy of a validation.
+      assert length_bound("people_display_name_within_bound") == DisplayName.max_length()
+    end
+
     test "a retained copy can hold any message it is a copy of" do
       # Item 5's sharpest instance, and the only body-length relation that is
       # real rather than claimed. `Lifecycle.RetainedMessageCopy` has no length
@@ -136,7 +148,7 @@ defmodule HospitalityComs.ConstantAgreementTest do
   end
 
   describe "the numbers themselves" do
-    test "the three anchors the database holds are 160, 14 and 4000" do
+    test "the four anchors the database holds are 160, 14, 4000 and 60" do
       # The one assertion in this file that does not derive either side from a
       # module. Everything above compares the database against Elixir, so a
       # change made in both places at once passes all of it; this is the line
@@ -146,6 +158,7 @@ defmodule HospitalityComs.ConstantAgreementTest do
       assert length_bound("declared_entries_role_label_within_bound") == 160
       assert interval_days("invitations_code_expiry_within_bound") == 14
       assert length_bound("room_messages_body_within_bound") == 4000
+      assert length_bound("people_display_name_within_bound") == 60
     end
   end
 

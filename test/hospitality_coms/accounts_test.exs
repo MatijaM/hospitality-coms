@@ -16,9 +16,11 @@ defmodule HospitalityComs.AccountsTest do
   import HospitalityComs.AccountsFixtures
 
   alias HospitalityComs.Accounts
+  alias HospitalityComs.Accounts.DisplayName
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Accounts.PersonToken
+  alias HospitalityComs.Lifecycle
 
   @now ~U[2026-03-01 12:00:00.000000Z]
 
@@ -99,6 +101,129 @@ defmodule HospitalityComs.AccountsTest do
       assert person.inserted_at == stamped_at
       assert person.updated_at == stamped_at
       assert %Person{inserted_at: ^stamped_at} = Repo.get!(Person, person.id)
+    end
+
+    test "gives them a display name drawn from the list" do
+      # #66. The name is *given*, so every path that makes a person has one and
+      # no fixture has to remember it — this is the door they all come through.
+      {:ok, person} = Accounts.register_person(anonymous_scope(@now), valid_person_attributes())
+
+      assert person.display_name in DisplayName.all()
+      assert Repo.get!(Person, person.id).display_name == person.display_name
+    end
+
+    test "…and not the name erasure leaves behind" do
+      # The control for the test above, and it protects a test one file over.
+      # `lifecycle_test.exs` asserts that erasure *changes* `display_name`; a
+      # generator that could produce the erased name would make that assertion
+      # vacuous for whichever fixture drew it, at random, roughly never — which
+      # is worse than never, because it is a flake nobody can reproduce.
+      refute Lifecycle.erased_display_name() in DisplayName.all()
+    end
+
+    test "ignores a display name somebody tries to register with" do
+      # It is given, not asked for. `registration_changeset/4` casts `:email`
+      # alone and `put_change`s the name, so the door that creates a person
+      # cannot be told what to call them.
+      {:ok, person} =
+        Accounts.register_person(
+          anonymous_scope(@now),
+          valid_person_attributes(%{display_name: "Somebody Real"})
+        )
+
+      refute person.display_name == "Somebody Real"
+      assert person.display_name in DisplayName.all()
+    end
+  end
+
+  describe "the names a person can be given" do
+    test "are all non-blank and within the bound the database enforces" do
+      # A registration that drew a name the CHECK refuses would raise
+      # `Postgrex.Error` out of the log-in door for one person in sixty-four.
+      for name <- DisplayName.all() do
+        assert String.trim(name) != ""
+        assert String.length(name) <= DisplayName.max_length()
+      end
+    end
+
+    test "hold no duplicate" do
+      assert Enum.uniq(DisplayName.all()) == DisplayName.all()
+    end
+
+    test "and generate/0 answers one of them" do
+      # The control for both tests above: a list nothing draws from certifies
+      # nothing about what a registration produces.
+      for _attempt <- 1..50 do
+        assert DisplayName.generate() in DisplayName.all()
+      end
+    end
+  end
+
+  describe "update_display_name/2" do
+    test "changes the name the person is shown under" do
+      scope = person_scope_fixture(person_fixture(), @now)
+
+      assert {:ok, %Person{display_name: "Wendy Darling"}} =
+               Accounts.update_display_name(scope, "Wendy Darling")
+
+      assert Repo.get!(Person, scope.person.id).display_name == "Wendy Darling"
+    end
+
+    test "trims what it is given" do
+      scope = person_scope_fixture(person_fixture(), @now)
+
+      assert {:ok, %Person{display_name: "Puck"}} =
+               Accounts.update_display_name(scope, "  Puck  ")
+    end
+
+    test "refuses a name that is only whitespace" do
+      # The control for the trim: without it this is four characters and passes.
+      scope = person_scope_fixture(person_fixture(), @now)
+
+      assert {:error, changeset} = Accounts.update_display_name(scope, "    ")
+      assert %{display_name: ["can't be blank"]} = errors_on(changeset)
+    end
+
+    test "accepts a name at exactly the bound and refuses one past it" do
+      scope = person_scope_fixture(person_fixture(), @now)
+      at_bound = String.duplicate("a", DisplayName.max_length())
+
+      assert {:ok, %Person{}} = Accounts.update_display_name(scope, at_bound)
+
+      assert {:error, changeset} = Accounts.update_display_name(scope, at_bound <> "a")
+      assert %{display_name: [message]} = errors_on(changeset)
+      assert message =~ "at most #{DisplayName.max_length()}"
+    end
+
+    test "stamps updated_at from the scope's instant" do
+      scope = person_scope_fixture(person_fixture(), @now)
+      later = DateTime.add(@now, 3, :hour)
+
+      assert {:ok, person} =
+               Accounts.update_display_name(%{scope | now: later}, "Prospero")
+
+      assert person.updated_at == DateTime.truncate(later, :second)
+    end
+
+    test "refuses an erased person" do
+      # Unreachable through the API — erasure deletes every token the person
+      # holds, so no authenticator can produce this scope — and asserted because
+      # KTD15's "nothing identifying is left" must rest on a rule rather than on
+      # the absence of a caller. Without the second clause this succeeds and
+      # undoes the overwrite `Lifecycle` just wrote.
+      person = person_fixture()
+      scope = person_scope_fixture(person, @now)
+
+      assert {:ok, _erasure} = Lifecycle.erase_person(scope)
+      erased = Repo.get!(Person, person.id)
+
+      assert {:error, :erased} =
+               Accounts.update_display_name(
+                 person_scope_fixture(erased, @now),
+                 "Somebody Real"
+               )
+
+      assert Repo.get!(Person, person.id).display_name == Lifecycle.erased_display_name()
     end
   end
 

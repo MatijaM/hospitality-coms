@@ -41,7 +41,12 @@ defmodule HospitalityComsWeb.Router do
   scope "/api", HospitalityComsWeb do
     pipe_through [:api, :authenticated_person]
 
-    get "/me", SessionController, :show
+    # The session's own person. `PATCH` is the only write in this API that
+    # changes a `people` row, and `HospitalityComsWeb.PersonController` says why
+    # it is here rather than on `/profile`, which has no transport at all.
+    get "/me", PersonController, :show
+    patch "/me", PersonController, :update
+
     delete "/log-out", SessionController, :delete
 
     # U12's person-side reads. Fetch-once lists, not streams: two of them are

@@ -250,21 +250,31 @@ defmodule HospitalityComs.Lifecycle.Records do
   end
 
   @doc """
-  Nulls the address and stamps `erased_at`, in one statement.
+  Nulls the address, overwrites the display name, and stamps `erased_at`, in one
+  statement.
 
   There is no `Person` changeset for this, deliberately.
-  `HospitalityComs.Accounts.Person`'s moduledoc says why: the pair is held in
-  opposition by `people_erased_email_removed` and
+  `HospitalityComs.Accounts.Person`'s moduledoc says why: the address pair is
+  held in opposition by `people_erased_email_removed` and
   `people_present_email_required`, which are database constraints precisely so
   the guarantee survives being reached from a context that is not `Accounts`.
+
+  **The name is overwritten rather than removed**, and it is the reason
+  `people_display_name_present` and `people_display_name_within_bound` exist:
+  this statement is the one write in the tree that reaches that column with no
+  changeset in front of it, so a validation would not be consulted here at all.
+  `name` is a parameter rather than a literal for `reduce_labels/3`'s reason —
+  the constant lives in `HospitalityComs.Lifecycle` beside the label, where a
+  reader looking for what erasure leaves finds both.
   """
-  @spec pseudonymise(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
-  def pseudonymise(person_id, %DateTime{} = instant) when is_binary(person_id) do
+  @spec pseudonymise(Ecto.UUID.t(), String.t(), DateTime.t()) :: Ecto.Query.t()
+  def pseudonymise(person_id, name, %DateTime{} = instant)
+      when is_binary(person_id) and is_binary(name) do
     stamped = DateTime.truncate(instant, :second)
 
     from person in Person,
       where: person.id == ^person_id,
-      update: [set: [email: nil, erased_at: ^stamped, updated_at: ^stamped]],
+      update: [set: [email: nil, display_name: ^name, erased_at: ^stamped, updated_at: ^stamped]],
       select: person
   end
 

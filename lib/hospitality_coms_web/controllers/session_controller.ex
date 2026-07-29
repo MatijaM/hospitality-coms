@@ -18,6 +18,12 @@ defmodule HospitalityComsWeb.SessionController do
   Redemption answers `401` for an invalid, expired, or already-used link. The
   three are indistinguishable from outside on purpose; from inside they are the
   same fact, which is that no live row matches.
+
+  `GET /api/me` used to be here and is now
+  `HospitalityComsWeb.PersonController.show/2`, which says why: this module is
+  about the session, and what that route answers with is a person. The
+  redemption reply still carries one, and it calls `PersonController.rendered/1`
+  rather than spelling it a second time.
   """
 
   use HospitalityComsWeb, :controller
@@ -28,6 +34,7 @@ defmodule HospitalityComsWeb.SessionController do
   alias HospitalityComs.Accounts.PersonToken
   alias HospitalityComsWeb.ErrorEnvelope
   alias HospitalityComsWeb.PersonAuth
+  alias HospitalityComsWeb.PersonController
 
   @doc """
   Requests a magic link, registering the person if the address is new.
@@ -54,15 +61,6 @@ defmodule HospitalityComsWeb.SessionController do
   end
 
   def confirm(conn, _params), do: reject(conn, :bad_request, "token is required")
-
-  @doc """
-  Returns the person the request's API token belongs to.
-  """
-  @spec show(Plug.Conn.t(), map()) :: Plug.Conn.t()
-  def show(conn, _params) do
-    %PersonScope{person: person} = conn.assigns.current_scope
-    json(conn, %{person: render_person(person)})
-  end
 
   @doc """
   Ends the session the request's API token stands for.
@@ -127,7 +125,7 @@ defmodule HospitalityComsWeb.SessionController do
 
     conn
     |> put_status(:created)
-    |> json(%{token: PersonAuth.encode_token(token), person: render_person(person)})
+    |> json(%{token: PersonAuth.encode_token(token), person: PersonController.rendered(person)})
   end
 
   defp issue_or_reject(conn, {:error, _reason}, %PersonScope{}) do
@@ -140,11 +138,6 @@ defmodule HospitalityComsWeb.SessionController do
     conn
     |> put_status(status)
     |> json(ErrorEnvelope.new(status, message))
-  end
-
-  @spec render_person(Person.t()) :: %{id: Ecto.UUID.t(), email: String.t() | nil}
-  defp render_person(%Person{} = person) do
-    %{id: person.id, email: person.email}
   end
 
   # The link is followed by a human in a mail client, so it points at whatever

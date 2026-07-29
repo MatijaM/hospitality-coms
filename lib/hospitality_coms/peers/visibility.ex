@@ -87,20 +87,45 @@ defmodule HospitalityComs.Peers.Visibility do
   is defined.
   """
 
-  @enforce_keys [:person_id, :venue_id, :venue_name, :role_label, :visible_from, :visible_until]
-  defstruct [:person_id, :venue_id, :venue_name, :role_label, :visible_from, :visible_until]
+  @enforce_keys [
+    :person_id,
+    :display_name,
+    :venue_id,
+    :venue_name,
+    :role_label,
+    :visible_from,
+    :visible_until
+  ]
+  defstruct [
+    :person_id,
+    :display_name,
+    :venue_id,
+    :venue_name,
+    :role_label,
+    :visible_from,
+    :visible_until
+  ]
 
   @typedoc """
   One counterpart, at one venue, over one interval.
 
   `person_id` is theirs, not the viewer's; `role_label` is the employer-authored
   label on *their* engagement at the shared venue, which is what the viewer can
-  already read off the venue room's roll (KTD15b). There is no email address
-  here and there will not be one — it is the only other identifying column
-  `people` has, and a peer list is not the place to hand it out.
+  already read off the venue room's roll (KTD15b).
+
+  `display_name` is theirs too, and it is on this list deliberately (#66): it is
+  strictly **less** identifying than the `person_id` already beside it, it is
+  what makes a list of counterparts readable at all, and its audience is exactly
+  the audience the venue room's roll already discloses to.
+
+  There is no email address here and there will not be one — it is the only
+  other identifying column `people` has, `HospitalityComs.PeersTest` asserts its
+  absence by value *and* by key name, and a new field beside it is precisely the
+  change that would tempt somebody to relax that assertion.
   """
   @type t() :: %__MODULE__{
           person_id: Ecto.UUID.t(),
+          display_name: String.t(),
           venue_id: Ecto.UUID.t(),
           venue_name: String.t(),
           role_label: String.t(),
@@ -116,6 +141,7 @@ defmodule HospitalityComs.Peers.Visibility do
   """
   @type endpoints() :: %{
           person_id: Ecto.UUID.t(),
+          display_name: String.t(),
           venue_id: Ecto.UUID.t(),
           venue_name: String.t(),
           role_label: String.t(),
@@ -164,6 +190,7 @@ defmodule HospitalityComs.Peers.Visibility do
   def new(%{} = endpoints) do
     %__MODULE__{
       person_id: endpoints.person_id,
+      display_name: endpoints.display_name,
       venue_id: endpoints.venue_id,
       venue_name: endpoints.venue_name,
       role_label: endpoints.role_label,

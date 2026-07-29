@@ -170,8 +170,8 @@ defmodule HospitalityComs.TestDatabaseGuardTest do
   defp probe_person(email) do
     Repo.query!(
       """
-      INSERT INTO people (id, email, inserted_at, updated_at)
-      VALUES (gen_random_uuid(), $1, now(), now())
+      INSERT INTO people (id, email, display_name, inserted_at, updated_at)
+      VALUES (gen_random_uuid(), $1, 'Captain Nemo', now(), now())
       """,
       [email]
     )

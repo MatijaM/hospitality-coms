@@ -293,6 +293,17 @@ defmodule HospitalityComs.BoundaryTest do
       assert {"people", "SELECT"} in Zones.employer_privileges(Repo)
     end
 
+    test "are reported for a column grant on the display name" do
+      # #66 added the first new column to `people` since U2, and its whole
+      # employer-side argument is "the existing sweep already proves this with
+      # no new rule". This is the assertion that verifies rather than assumes
+      # it: the sweep quantifies over the *table*, so the claim is that a grant
+      # on a column it has never heard of is still reported.
+      Repo.query!("GRANT SELECT (display_name) ON people TO employer_role")
+
+      assert {"people", "SELECT"} in Zones.employer_privileges(Repo)
+    end
+
     test "are reported for a column grant on a write privilege too" do
       Repo.query!("GRANT UPDATE (email) ON people TO employer_role")
 
@@ -2831,7 +2842,7 @@ defmodule HospitalityComs.BoundaryTest do
     joined = %{at | microsecond: {123_456, 6}}
 
     Repo.query!(
-      "INSERT INTO people (id, email, inserted_at, updated_at) VALUES ($1, 'bt-retention@example.com', $2, $2)",
+      "INSERT INTO people (id, email, display_name, inserted_at, updated_at) VALUES ($1, 'bt-retention@example.com', 'Captain Nemo', $2, $2)",
       [ids.person, at]
     )
 

@@ -173,6 +173,27 @@ defmodule HospitalityComsWeb.VenueRoomChannelTest do
       assert [%RoomMessage{body: "behind on tables 4 and 7"}] = Repo.all(RoomMessage)
     end
 
+    test "names the author on the reply and on the broadcast, with the same key set" do
+      # `RoomChannel.rendered/1` is the single spelling of a message and this is
+      # the transport half of it (#66). The reply and the broadcast are asserted
+      # to have the **same key set** rather than each having the key, because
+      # one shape for one entity is the claim — U8's `sent_at`/`at` split is the
+      # defect this prevents, and it survived a fix once already (#31).
+      %{venue: venue, person: person, socket: socket} = engaged()
+      {:ok, _reply, channel} = subscribe_and_join(socket, topic(venue), %{})
+
+      ref = push(channel, "send", %{"body" => "who has the pass?"})
+
+      assert_reply ref, :ok, sent
+      assert sent.author_display_name == person.person.display_name
+      assert_broadcast "message", broadcast
+      assert broadcast.author_display_name == person.person.display_name
+      assert Enum.sort(Map.keys(broadcast)) == Enum.sort(Map.keys(sent))
+
+      assert Enum.sort(Map.keys(sent)) ==
+               ~w(author_display_name author_engagement_id body id sent_at)a
+    end
+
     test "carries no person id on the wire" do
       # KTD2 and KTD15b at the transport. Attribution is the engagement, which
       # is venue-local by construction and is what a message row already holds.

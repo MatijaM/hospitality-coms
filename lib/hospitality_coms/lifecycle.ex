@@ -44,6 +44,16 @@ defmodule HospitalityComs.Lifecycle do
   moment — hold the pair in opposition from the database rather than from a
   changeset this context could forget to use.
 
+  **That same statement overwrites `display_name` with `erased_display_name/0`**
+  (#66). The address is the only column `people` holds that must be *absent*
+  afterwards; the name has to be *replaced*, because a room keeps full history
+  and a message with no author's name renders as nothing. Two identifying
+  columns, two different remedies, one statement. Nothing holds this one in
+  opposition to `erased_at` from the database and
+  `HospitalityComs.Accounts.Person`'s moduledoc says why; what does hold it is
+  `HospitalityComs.LifecycleTest`'s field-by-field comparison of the whole
+  person row across an erasure, which fails on a column this statement forgets.
+
   What it *does* delete is bounded and enumerated: auth tokens, the erasing
   party's own peer messages, their declared entries, the disclosure rows that
   hand one of their own entries *over* to a named peer, their retained
@@ -240,6 +250,18 @@ defmodule HospitalityComs.Lifecycle do
   # a person rather than as a tombstone.
   @erased_label "Former team member"
 
+  # The name an erased person is shown under, written by `pseudonymise/3` in the
+  # same statement that nulls the address (#66). A readable name left behind is
+  # an identifying value surviving erasure, which is KTD15 broken outright.
+  #
+  # A **separate constant** from `@erased_label` above, and no relation is
+  # asserted between the two. One is what an employer wrote about a job and the
+  # other is what a person called themselves; they are the same length of string
+  # and different kinds of fact, and a linking sentence between two values
+  # nothing checks is how `HospitalityComs.Profiles.DeclaredEntry` came to state
+  # a wrong bound for the life of a unit (issue #42).
+  @erased_display_name "Former colleague"
+
   # Shift history and venue-room history, thirty days past the clock that starts
   # them. The worker's own copy of the same words lives three times as long, and
   # the gap is the whole of KTD16's argument for physically separate rows: one
@@ -374,6 +396,12 @@ defmodule HospitalityComs.Lifecycle do
   def erased_label, do: @erased_label
 
   @doc """
+  The display name an erased person's row is overwritten with.
+  """
+  @spec erased_display_name() :: String.t()
+  def erased_display_name, do: @erased_display_name
+
+  @doc """
   How long shift and venue-room history outlive the clock that starts them.
   """
   @spec history_retention_days() :: pos_integer()
@@ -502,7 +530,8 @@ defmodule HospitalityComs.Lifecycle do
 
   @spec pseudonymise(Ecto.Repo.t(), Ecto.UUID.t(), DateTime.t()) :: {:ok, Person.t()}
   defp pseudonymise(repo, person_id, now) do
-    {1, [%Person{} = person]} = repo.update_all(Records.pseudonymise(person_id, now), [])
+    query = Records.pseudonymise(person_id, @erased_display_name, now)
+    {1, [%Person{} = person]} = repo.update_all(query, [])
     {:ok, person}
   end
 
