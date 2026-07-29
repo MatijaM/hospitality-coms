@@ -270,7 +270,7 @@ defmodule HospitalityComsWeb.ChannelAuth do
   Called from `join/3` only, which is why it takes the session's cost.
 
   **The second half now lives in `HospitalityComsWeb.EmployerAuth`**, because
-  U12's employer routes need the same question asked of a conn, where the
+  the employer routes need the same question asked of a conn, where the
   session is already resolved and the `:no_session` arm does not exist. What
   stayed here is the socket-shaped half — deriving the session from the token
   digest — and what moved is the transport-free part,
