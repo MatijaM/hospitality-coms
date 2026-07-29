@@ -131,6 +131,7 @@ defmodule HospitalityComs.Engagements do
   alias HospitalityComs.Repo
   alias HospitalityComs.Venues
   alias HospitalityComs.Venues.EmployerGrant
+  alias HospitalityComs.Venues.Venue
   alias HospitalityComs.Workers.ExpireEngagement
 
   @typedoc """
@@ -538,6 +539,42 @@ defmodule HospitalityComs.Engagements do
   @spec holder_or_refuse(Engagement.t() | nil) :: {:ok, Engagement.t()} | {:error, :no_grant}
   defp holder_or_refuse(nil), do: {:error, :no_grant}
   defp holder_or_refuse(%Engagement{} = engagement), do: {:ok, engagement}
+
+  @doc """
+  The venues this person may act for at their scope's instant, by name.
+
+  `fetch_grant_holding_engagement/2` asked without a venue. A client cannot name
+  a venue before it has this list, so the two questions cannot be the same
+  function, and the answer is the venue rather than the engagement because
+  nothing downstream needs the bridge row — the resolver reads it again per
+  request anyway.
+
+  Person-scoped and run through `HospitalityComs.Repo`, for
+  `fetch_grant_holding_engagement/2`'s reason: it reads a person's own
+  engagements by `person_id` and then asks `employer_grants` whether the
+  authority each names is live, and no session on either side holds the
+  privileges for both halves.
+
+  **Suspensions are not consulted, and that is the whole reason this exists
+  rather than `HospitalityComs.Rooms.list_venue_rooms/1` being reused.** That
+  list returns `{venue_id, name}` for every venue a person is engaged at and
+  looks like a free answer, but it subtracts suspensions and employer authority
+  never does (KTD18). So a manager who used the person-side venue-room opt-out
+  would keep full authority over the venue and disappear from their own picker,
+  with no other way in and nothing failing anywhere to say so. The two lists
+  differ deliberately; `HospitalityComs.EngagementsTest` pins the difference
+  with the suspended manager appearing here and absent there.
+
+  Refuses an employer scope by function clause — asking which venues a *person*
+  may act for is asking where they work — and an anonymous person scope too,
+  because answering `[]` would make "nobody" and "somebody with nothing" the
+  same answer.
+  """
+  @spec list_managed_venues(PersonScope.t()) :: [Venue.t()]
+  def list_managed_venues(%PersonScope{person: %Person{id: person_id}, now: now})
+      when is_binary(person_id) do
+    person_id |> Records.managed_venues(now) |> Repo.all()
+  end
 
   @doc """
   Every engagement this person has ever held, active or not.

@@ -92,8 +92,7 @@ defmodule HospitalityComsWeb.ChannelAuth do
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Clock
-  alias HospitalityComs.Engagements
-  alias HospitalityComs.Engagements.Engagement
+  alias HospitalityComsWeb.EmployerAuth
   alias HospitalityComsWeb.EntityId
   alias HospitalityComsWeb.PersonAuth
   alias Phoenix.Socket
@@ -269,25 +268,21 @@ defmodule HospitalityComsWeb.ChannelAuth do
   from the channel topic, never from the credential.
 
   Called from `join/3` only, which is why it takes the session's cost.
+
+  **The second half now lives in `HospitalityComsWeb.EmployerAuth`**, because
+  U12's employer routes need the same question asked of a conn, where the
+  session is already resolved and the `:no_session` arm does not exist. What
+  stayed here is the socket-shaped half — deriving the session from the token
+  digest — and what moved is the transport-free part,
+  `(PersonScope, venue_id) -> {:ok, EmployerScope} | {:error, :no_grant}`. Same
+  signature, same behaviour, one spelling; `EntityId`'s extraction is the
+  precedent and `employer_venue_channel_test.exs` is the regression proof.
   """
   @spec employer_scope(Socket.t(), Ecto.UUID.t()) ::
           {:ok, EmployerScope.t()} | {:error, :no_grant | :no_session}
   def employer_scope(%Socket{} = socket, venue_id) when is_binary(venue_id) do
     with {:ok, scope} <- join_scope(socket) do
-      scope
-      |> Engagements.fetch_grant_holding_engagement(venue_id)
-      |> acting_scope(venue_id, scope.now)
+      EmployerAuth.employer_scope(scope, venue_id)
     end
   end
-
-  @spec acting_scope(
-          {:ok, Engagement.t()} | {:error, :no_grant},
-          Ecto.UUID.t(),
-          DateTime.t()
-        ) :: {:ok, EmployerScope.t()} | {:error, :no_grant}
-  defp acting_scope({:ok, %Engagement{grant_id: grant_id}}, venue_id, now) do
-    {:ok, EmployerScope.for_grant(venue_id, grant_id, now)}
-  end
-
-  defp acting_scope({:error, :no_grant} = refusal, _venue_id, _now), do: refusal
 end

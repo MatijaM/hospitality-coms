@@ -49,6 +49,7 @@ defmodule HospitalityComs.Engagements.Records do
   alias HospitalityComs.Engagements.Invitation
   alias HospitalityComs.Profiles.AttestedEntry
   alias HospitalityComs.Venues.EmployerGrant
+  alias HospitalityComs.Venues.Venue
 
   ## Engagements
 
@@ -184,6 +185,22 @@ defmodule HospitalityComs.Engagements.Records do
   end
 
   @doc """
+  The ids of every grant that is live at `instant`, at any venue.
+
+  The venue-free half of `live_grant_ids/2`, and it exists for the one caller
+  with no venue to name: `managed_venues/2` is asking *which* venues, so it
+  cannot filter by one on the way in. Safe without the venue filter because
+  `engagements.grant_id` references `employer_grants (id, venue_id)` as a
+  composite key, so a grant an engagement names always belongs to that
+  engagement's venue — the tenancy is in the foreign key rather than in this
+  predicate.
+  """
+  @spec live_grant_ids(DateTime.t()) :: Ecto.Query.t()
+  def live_grant_ids(%DateTime{} = instant) do
+    instant |> EmployerGrant.live_at() |> select([grant], grant.id)
+  end
+
+  @doc """
   The ids of a venue's grants that are live at `instant`.
 
   A projection of `HospitalityComs.Venues.EmployerGrant.live_at/2` rather than a
@@ -212,6 +229,61 @@ defmodule HospitalityComs.Engagements.Records do
     live_grants = live_grant_ids(venue_id, instant)
 
     from engagement in queryable, where: engagement.grant_id in subquery(live_grants)
+  end
+
+  @doc """
+  Engagements holding an authority that is live at `instant`, at whatever venue
+  the engagement belongs to.
+
+  `holding_live_grant/3` without the venue, and the same subquery-in-`where`
+  shape for the same reason. The venue is not lost by leaving it out: the
+  composite foreign key `engagements (grant_id, venue_id) -> employer_grants
+  (id, venue_id)` is what carries it, so a grant live at *another* venue cannot
+  be named by an engagement here.
+  """
+  @spec holding_any_live_grant(Ecto.Queryable.t(), DateTime.t()) :: Ecto.Query.t()
+  def holding_any_live_grant(queryable, %DateTime{} = instant) do
+    live_grants = live_grant_ids(instant)
+
+    from engagement in queryable, where: engagement.grant_id in subquery(live_grants)
+  end
+
+  @doc """
+  The venues one person may act for at `instant`, by name.
+
+  An engagement of theirs that is active at `instant` and carries a grant the
+  venue has not revoked. It is `fetch_grant_holding_engagement/2`'s question
+  asked without a venue, which is what a picker needs — it has no venue to name
+  until this has answered.
+
+  **Suspensions are deliberately not consulted, and that is the decision this
+  query exists to record.** `HospitalityComs.Rooms.Records.venues_of_person/2`
+  answers a nearly identical-looking question and composes `unsuspended/2`,
+  because it is asking which venue *rooms* somebody is in. Employer authority
+  never consults suspensions (KTD18), so reusing that list would drop a manager
+  who used the person-side venue-room opt-out out of their own picker while
+  leaving every other employer surface working for them — a venue reachable by
+  nobody, failing nowhere. Do not add the filter.
+
+  Ordered by name with `id` breaking ties, for `venues_of_person/2`'s reason:
+  the name is what a client renders and `id` is random on a `binary_id` schema.
+
+  Deduplicated by construction. `venue.id in subquery(...)` is a set membership,
+  so a person with two grant-holding engagements at one venue still names it
+  once — where a join would list it twice.
+  """
+  @spec managed_venues(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  def managed_venues(person_id, %DateTime{} = instant) when is_binary(person_id) do
+    venue_ids =
+      Engagement
+      |> of_person(person_id)
+      |> active_at(instant)
+      |> holding_any_live_grant(instant)
+      |> select([engagement], engagement.venue_id)
+
+    from venue in Venue,
+      where: venue.id in subquery(venue_ids),
+      order_by: [asc: venue.name, asc: venue.id]
   end
 
   @doc """
