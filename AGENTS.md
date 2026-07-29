@@ -307,11 +307,43 @@ Every new system action must be observable. The codebase provides automatic logg
 
 
 
+### Request and channel parameters are filtered by an allowlist
+
+`config :phoenix, :filter_parameters` in `config/config.exs` is `{:keep, [...]}` — an
+**allowlist**. Every inbound parameter whose name is not on that list prints as `[FILTERED]`
+in the four places `Phoenix.Logger` prints a parameter map: the HTTP dispatch line (`:debug`),
+a socket connect (`:info`), a channel join (`:info`) and a channel `handle_in` (`:debug`).
+Two of those are `:info`, so they reach production logs.
+
+**A new parameter is filtered by default and you do not have to remember anything.** That is
+the whole reason for the shape: a denylist fails open and silently, which is how the default
+`filter_parameters` went unnoticed protecting `password`, a field U2 deleted from this
+application (issue #53). Adding a name to the allowlist is a deliberate act, and
+`test/hospitality_coms_web/parameter_filter_test.exs` pins the list so a widening cannot pass
+unreviewed. Names are matched at every depth of the params tree, so keep them specific.
+
 ### Avoid these key names in curated params
 
-Free-text user input is dangerous in logs. These key names are auto-redacted via `@sensitive_key_fragments`: anything containing `token`, `secret`, `key`, `signature`, `credential`, `password`, `cookie`, `authorization`, `otp`, `pin`, `verification`, `dob`, `birth`, `phone`, `address`, `email`, `first_name`/`firstname`, `last_name`/`lastname`, `full_name`/`fullname`, `reason`, `note`.
+**This is a naming convention, not a mechanism** — nothing redacts a `Logger` call you write
+by hand, and the allowlist above reaches inbound parameters only. (An earlier version of this
+document claimed these names were "auto-redacted via `@sensitive_key_fragments`". No such
+module attribute has ever existed in this tree.)
 
-If you need an observable enum value (e.g., a structured cancellation type), use a non-redacted name: `reason_code`, `decline_type`, `*_id`.
+Free-text user input is dangerous in logs. Treat these as names not to log: anything containing
+`token`, `secret`, `key`, `signature`, `credential`, `password`, `cookie`, `authorization`,
+`otp`, `pin`, `verification`, `dob`, `birth`, `phone`, `address`, `email`,
+`first_name`/`firstname`, `last_name`/`lastname`, `full_name`/`fullname`, `reason`, `note`.
+
+If you need an observable enum value (e.g., a structured cancellation type), use a name from the
+other set: `reason_code`, `decline_type`, `*_id`. The curated calls in `lib/` already do —
+`Rooms`, `Peers` and `Engagements` all log `reason_code=` and `*_id=`, and
+`Accounts.PersonNotifier` says in a comment that the recipient address is deliberately left out.
+
+**`HospitalityComs.Repo`'s own query log is outside all of this.** Ecto prints statements and
+their bound parameters at `:debug`, so in `:dev` an email address or a message body appears in
+the SQL line whatever the parameter filter says. Left on deliberately — it is the main
+debugging affordance in development — but do not read a filtered parameter line as a promise
+that the value is absent from the log as a whole.
 
 
 ## Dialyzer

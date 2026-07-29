@@ -136,6 +136,71 @@ config :logger, :default_formatter,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
+# What `Phoenix.Logger` may print out of a parameter map, and it is an
+# **allowlist**: `{:keep, names}` inverts the filter, so every parameter not
+# named below is `"[FILTERED]"`.
+#
+# Until issue #53 this was set nowhere, so Phoenix's own default applied — and
+# that default is `["password", "token"]`, from `deps/phoenix/mix.exs`'s
+# application environment, *not* the `["password"]` its moduledoc still claims.
+# It covered `POST /api/log-in/token` by coincidence of spelling and covered
+# nothing else: `email` printed in full, and `claim_code`, the one secret an
+# invitation has, would have printed the moment the employer view added it.
+#
+# **The shape is the decision, not the list.** A denylist fails open and
+# silently — a parameter nobody added a fragment for prints, nothing goes red,
+# and you find out by reading a terminal. That is precisely how a filter
+# protecting `password` survived four units after U2 deleted passwords from
+# this application. An allowlist fails closed and visibly: the new parameter
+# reads `[FILTERED]` where somebody wanted a value, and the fix is one name.
+# The set of sensitive names is open and grows with the product; the set of
+# names this API needs to read back is small, closed, and almost entirely
+# `*_id`, so enumerating that side is the only version that stays true.
+#
+# **It is not only the HTTP dispatch line.** `Phoenix.Logger.filter_values/1`
+# serves four sites, and two of them log at `:info`, which `config/prod.exs`
+# does write:
+#
+#   * HTTP router dispatch — `:debug`
+#   * socket connect — `:info`
+#   * channel join — `:info`
+#   * channel `handle_in` — `:debug`, and its params carry `body`, the free
+#     text of every venue-room, shift-room and peer message
+#
+# A join payload is client-supplied and every `join/3` here ignores it, so
+# nothing bounds what arrives there. The allowlist covers all four without
+# anyone deciding to; a denylist written against `POST` bodies reaches one.
+#
+# Each name earns its place: six are ids or a closed enum (`extent` is
+# `"all" | "recent"`), which `AGENTS.md` names as the spellings to reach for,
+# and `vsn` is the serializer version the sockets carry — the one parameter
+# that prints in production, where filtering it would make a failed connection
+# harder to read for no gain. **Adding a name is a deliberate act**, and
+# `test/hospitality_coms_web/parameter_filter_test.exs` pins the list so that
+# widening it cannot pass unreviewed.
+#
+# Note for whoever adds one: `keep_values/2` tests membership at every depth,
+# not only at the top, so a kept name is kept wherever it appears in the params
+# tree. Keep the names specific — `"id"` would be a bad entry for that reason.
+#
+# **Scope, stated honestly.** This does not reach `HospitalityComs.Repo`'s own
+# query log, which prints bound parameters at `:debug` and therefore prints
+# email addresses and message bodies in development. That is a separate
+# decision — turning it off costs the main debugging affordance in `:dev` — and
+# is not made here.
+config :phoenix,
+       :filter_parameters,
+       {:keep,
+        [
+          "connection_id",
+          "extent",
+          "person_id",
+          "request_id",
+          "shift_room_id",
+          "venue_id",
+          "vsn"
+        ]}
+
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"
