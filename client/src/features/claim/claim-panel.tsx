@@ -34,9 +34,9 @@ import { useState } from "react";
 import { Link } from "react-router";
 
 import type { RequestFailure } from "../../api/errors";
+import { instantLabel, termLabel } from "../../app/instant";
 import { SessionBar } from "../../app/session-bar";
 import { useSession } from "../../session/session-context";
-import { instantLabel, termLabel } from "../rooms/room";
 import type { ClaimedEngagement } from "./claim";
 import { isSubmittable } from "./claim";
 import { claimInvitation } from "./claim-api";

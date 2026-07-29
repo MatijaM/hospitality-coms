@@ -24,7 +24,7 @@
  * papering over it.
  */
 
-import { instantLabel, termLabel } from "../rooms/room";
+import { instantLabel, termLabel } from "../../app/instant";
 
 /** `%{venue_id:, name:}` — one venue this session may act for. */
 export type ManagedVenue = {
@@ -79,9 +79,10 @@ export type IssuedOffer = {
  * them as one string is what stops the engagement id becoming the way a row is
  * recognised.
  *
- * `termLabel` is the rooms surface's, deliberately reused: a term rendered one
- * way beside a shift room and another way beside an engagement would be one
- * product speaking twice.
+ * `termLabel` is `src/app/instant.ts`'s, deliberately shared: a term rendered
+ * one way beside a shift room and another way beside an engagement would be one
+ * product speaking twice. It was the rooms surface's until this surface became
+ * its second caller, which is what moved it.
  */
 export function engagementLabel(engagement: VenueEngagement): string {
   return `${engagement.roleLabel} · ${termLabel(engagement.startsAt, engagement.endsAt)}`;

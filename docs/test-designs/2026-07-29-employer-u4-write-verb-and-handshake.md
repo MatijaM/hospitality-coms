@@ -527,6 +527,66 @@ only that a body naming one is not sent — because a test for the absence of a 
 ever whether or not anything prevents it. And nothing pins `KNOWN_ERROR_CODES`' contents; the rule
 is that `errors.ts` does not change, which a diff shows.
 
+## Revisions made after review
+
+Greptile left two findings on PR #61 and both were valid. The first is this file, and the block
+at the top is the response to it. The second is below.
+
+**Finding 2 — the cross-feature import was due in this unit and was deferred.** `termLabel` and
+`instantLabel` were imported from `features/rooms/room.ts` into `employer-route.tsx`,
+`claim-panel.tsx` and `employer.ts`. `room.ts`'s own moduledoc named the condition for moving
+them — *"the move belongs to whichever unit adds the caller after U4's two"* — and U4 added both
+callers, so by the rule the code itself states the move was owed here. Decision 5 above records
+it as debt; this records paying it.
+
+**Where it landed and why there.** `src/app/instant.ts`, beside `failure-message.ts` and
+`use-fetched.ts` — the two other things every surface shares and no surface owns. Not
+`src/api/`, because nothing there may know how anything is displayed, and the whole argument for
+client-side formatting is that display is where the timezone question gets its only honest
+answer. Not a directory of its own, which `src/socket/topic-id.ts`'s precedent argues against:
+that file sits in `src/socket/` because a topic suffix is the only thing it is for, not in a
+`shared/` bucket.
+
+**`room.ts` re-exports both under the same names, so no rooms file changed** — production or
+test. That is `use-room-lists.ts`'s manoeuvre for `Loaded`, made in this same unit. The
+alternative was updating `rooms-route.tsx`, `room-view.tsx`, `room-lists.test.tsx` and
+`room.test.ts`, the last of which destructures `instantLabel` off a dynamically re-imported
+`./room` inside its timezone helper — so updating it would have meant editing the one test whose
+meaning is hardest to preserve, for no gain. The re-export is documented as a shim rather than a
+second home.
+
+**The formatting behaviour is unchanged, and it is measured rather than asserted.**
+
+| Check | Result |
+|---|---|
+| `npm run verify` | 439 passed / 15 skipped, unchanged |
+| Whole suite under `TZ=UTC` | 439 / 15 |
+| Whole suite under `TZ=Pacific/Kiritimati` | 439 / 15 |
+| All 28 mutations above, re-run after the move | **identical counts, mutation for mutation** |
+
+Three further mutations against the hoisted module, each run under both timezones:
+
+| # | Mutation | Killed |
+|---|----------|--------|
+| A | the day comparison is made in UTC (ISO date halves) rather than the reader's zone | 1 under each TZ — *"asks which day in the timezone it renders in, so one term reads two ways"* |
+| B | `CALENDAR_DAY` names `timeZone: "UTC"` | 1 under each TZ, the same body |
+| C | the three formatters are built per call rather than at module load | **0 under each TZ** |
+
+A and B are the check the move was at risk of losing, and it survived: the matrix still catches a
+UTC comparison from either direction, in both zones.
+
+**C is a finding and the moduledoc was corrected for it.** The hoisted module first claimed the
+tests depend on the module-load construction. They do not: `inTimeZone` leaves `process.env.TZ`
+set for the duration of its callback, so formatters built lazily inside the functions resolve the
+same zone and the matrix stays green. Building once is a performance property held by a paragraph
+and by nothing else, and `instant.ts` now says that rather than the stronger thing. It is the
+fifth guard in this unit that no mutation reaches — the four in the section above, and this.
+
+**No test's meaning changed.** Two test files had one import line rewritten each
+(`employer-route.test.tsx`, `claim-panel.test.tsx`, both from `../rooms/room` to
+`../../app/instant`); no assertion, fixture or body was touched, and the mutation table is what
+proves it rather than the diff.
+
 ## What is not verified
 
 **Two real browser windows.** R19 asks for the surface to be reachable in a browser without a

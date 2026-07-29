@@ -31,6 +31,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../../api/client";
 import type { RequestFailure } from "../../api/errors";
 import { App } from "../../app/app";
+import { instantLabel, termLabel } from "../../app/instant";
 import { SessionProvider } from "../../session/session-context";
 import { createMemoryTokenStore } from "../../session/token-store";
 import {
@@ -40,7 +41,6 @@ import {
   somePerson,
   writesTo,
 } from "../../test-support/fake-api";
-import { instantLabel, termLabel } from "../rooms/room";
 import { createMemoryRoomStore } from "../rooms/room-store";
 
 const HARBOUR = "11111111-1111-4111-8111-111111111111";

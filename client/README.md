@@ -241,8 +241,9 @@ src/features/peers/   the directory, requests, conversations, the disconnect
 src/features/profile/ the record, the disclosure ledger, corrections, a peer's record
 src/features/employer/ the venue picker, the venue's people, the offer and its code
 src/features/claim/   the worker's half of the handshake: one code, one engagement
-src/app/              routes, the landing page that tabs three of them, and two
-                      pieces of shared plumbing — `use-fetched.ts` and `session-bar.tsx`
+src/app/              routes, the landing page that tabs three of them, and three
+                      pieces of shared plumbing — `use-fetched.ts`, `session-bar.tsx`
+                      and `instant.ts`
 src/test-support/     fakes shared by the tests above the client and the socket
 ```
 
@@ -256,6 +257,22 @@ renderer at all.
 out of `HomeRoute` verbatim when U4 added two full pages of its own. Hospitality
 is a shared-terminal industry, and a log-out that only exists on the page the
 session opened on is one somebody has to navigate back to.
+
+`src/app/instant.ts` holds `instantLabel` and `termLabel` — one instant, and a
+term whose end carries its day only when the term crosses one. Both were
+`room.ts`'s, and that file recorded the condition for moving them: _"the move
+belongs to whichever unit adds the caller after U4's two."_ U4 added both, so it
+is that unit; the move landed one commit behind the code that owed it, and
+`docs/test-designs/2026-07-29-employer-u4-write-verb-and-handshake.md` says why.
+`room.ts` re-exports both under the same names, so no rooms file changed.
+
+**"Another day" is decided in the reader's timezone, by a formatter built at
+module load**, which is why `features/rooms/room.test.ts` sets `process.env.TZ`,
+calls `vi.resetModules()` and re-imports. A term of 23:00–07:00 crosses midnight
+in UTC and does not three hours east; a comparison made in UTC, or in the
+venue's zone, is wrong for somebody reading from anywhere else. The matrix
+covers both directions and kills a UTC comparison under `TZ=UTC` and
+`TZ=Pacific/Kiritimati` alike, measured.
 
 `src/socket/topic-id.ts` is the one rule for turning a string into a topic
 suffix — 36 bytes then a uuid cast, lowercased. It was written in `room.ts` and

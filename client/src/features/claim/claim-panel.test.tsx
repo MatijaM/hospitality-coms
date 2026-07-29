@@ -26,10 +26,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../../api/client";
 import type { RequestFailure } from "../../api/errors";
 import { App } from "../../app/app";
+import { instantLabel, termLabel } from "../../app/instant";
 import { SessionProvider } from "../../session/session-context";
 import { createMemoryTokenStore } from "../../session/token-store";
 import { createFakeApi, ok, somePerson, writesTo } from "../../test-support/fake-api";
-import { instantLabel, termLabel } from "../rooms/room";
 import { createMemoryRoomStore } from "../rooms/room-store";
 
 const CLAIM = "POST /api/claims";
