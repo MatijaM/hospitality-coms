@@ -1,12 +1,17 @@
 /**
- * ⚠️ NOTHING ON THE SERVER EMITS ANY OF THIS YET. ⚠️
+ * `HospitalityComsWeb.ProfileChannel` answers all of this (#70).
  *
  * This file is the whole of what the profile surface asks a Phoenix channel
- * for, and **no channel in `lib/hospitality_coms_web/` answers a single one of
- * these events today.** It is the one clearly-marked place the other three
- * slices of U12 did not need, and it exists so that whoever puts U9 on the
- * transport has an exact list to satisfy rather than a surface to reverse
- * engineer.
+ * for. It was written *before* any channel answered it — the one clearly-marked
+ * place the other three slices of U12 did not need — so that whoever put U9 on
+ * the transport had an exact list to satisfy rather than a surface to reverse
+ * engineer. That happened in #70, and **not one line under `client/` changed**,
+ * which is the strongest thing that can be said for a contract written ahead of
+ * its implementation.
+ *
+ * It stays the specification rather than becoming a record of one. The channel
+ * is tested against these payloads; where the two disagree, this file is right
+ * and the channel is wrong.
  *
  * Measured against the tree at `3063e9c`, which is U9 merged:
  *

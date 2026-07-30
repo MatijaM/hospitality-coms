@@ -13,6 +13,18 @@ defmodule HospitalityComsWeb.EmployerSocket do
       no route to one — `__channel__("peer:" <> person_id)` is `nil` for every
       id, and the refusal happens in Phoenix's dispatch with no application code
       running. AE1's "the transport has no route to the topic", literally.
+    * **No `"profile:*"`.** A profile is person-zone data: `attested_entries`,
+      `declared_entries` and `attested_entry_disclosures` are person zone,
+      `employer_role` holds nothing on any of them, and the *only* employer read
+      of an attested entry is through `employer_visible_attested_entries`
+      (KTD3), which resolves its venue from
+      `app_current_employer_id()` and belongs on
+      `HospitalityComsWeb.EmployerVenueChannel` if it is ever put on a
+      transport. A worker's own record, and the ledger of what they have chosen
+      to conceal, must not be reachable from a session scoped to a venue —
+      `WHERE audience_venue_id = <me> AND disclosed = false` is the list of
+      workers concealing something, which discloses strictly more than the
+      entries do.
     * **No `"venue_room:*"` and no `"shift_room:*"`.** Room conversation is
       worker-facing. `employer_role` holds no privilege at all on
       `room_messages` (U6), a manager reads their venue's room through their own

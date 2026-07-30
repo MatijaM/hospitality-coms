@@ -198,15 +198,16 @@ defmodule HospitalityComsWeb.SocketsTest do
     end
 
     test "is refused on every topic the two sockets route" do
-      # One socket, four channels, one credential. A re-derivation on the venue
-      # room alone would leave three ways in.
+      # One socket, five channels, one credential. A re-derivation on the venue
+      # room alone would leave four ways in.
       %{venue: venue, room: room, socket: socket, employer_socket: employer, raw_token: raw} =
         engaged_manager()
 
       assert {:ok, _venue, _a} = subscribe_and_join(socket, venue_topic(venue), %{})
       assert {:ok, _shift, _b} = subscribe_and_join(socket, shift_topic(room), %{})
       assert {:ok, _peer, _c} = subscribe_and_join(socket, peer_topic(socket), %{})
-      assert {:ok, _emp, _d} = subscribe_and_join(employer, employer_topic(venue), %{})
+      assert {:ok, _profile, _d} = subscribe_and_join(socket, profile_topic(socket), %{})
+      assert {:ok, _emp, _e} = subscribe_and_join(employer, employer_topic(venue), %{})
 
       assert {:ok, _deleted} =
                Accounts.delete_person_session_token(PersonScope.for_person(nil, @now), raw)
@@ -214,6 +215,7 @@ defmodule HospitalityComsWeb.SocketsTest do
       assert {:error, _venue_refusal} = join(socket, venue_topic(venue), %{})
       assert {:error, _shift_refusal} = join(socket, shift_topic(room), %{})
       assert {:error, _peer_refusal} = join(socket, peer_topic(socket), %{})
+      assert {:error, _profile_refusal} = join(socket, profile_topic(socket), %{})
       assert {:error, _employer_refusal} = join(employer, employer_topic(venue), %{})
     end
 
@@ -224,7 +226,8 @@ defmodule HospitalityComsWeb.SocketsTest do
       assert {:ok, _venue, _a} = subscribe_and_join(socket, venue_topic(venue), %{})
       assert {:ok, _shift, _b} = subscribe_and_join(socket, shift_topic(room), %{})
       assert {:ok, _peer, _c} = subscribe_and_join(socket, peer_topic(socket), %{})
-      assert {:ok, _emp, _d} = subscribe_and_join(employer, employer_topic(venue), %{})
+      assert {:ok, _profile, _d} = subscribe_and_join(socket, profile_topic(socket), %{})
+      assert {:ok, _emp, _e} = subscribe_and_join(employer, employer_topic(venue), %{})
     end
   end
 
@@ -298,6 +301,23 @@ defmodule HospitalityComsWeb.SocketsTest do
                PersonSocket.__channel__("shift_room:" <> room_id)
     end
 
+    test "has no profile topic in it either" do
+      # A profile is person-zone data: `employer_role` holds no privilege on
+      # `attested_entries`, `declared_entries` or `attested_entry_disclosures`,
+      # and the only employer read of an attested entry is through the
+      # owner-privileged view (KTD3). The ledger is the sharpest of the three —
+      # "which of my workers is concealing something" discloses strictly more
+      # than the concealed entries do — so a route here would be a boundary
+      # change rather than a feature.
+      person_id = Ecto.UUID.generate()
+
+      assert EmployerSocket.__channel__("profile:" <> person_id) == nil
+      assert EmployerSocket.__channel__("profile") == nil
+
+      assert {HospitalityComsWeb.ProfileChannel, _opts} =
+               PersonSocket.__channel__("profile:" <> person_id)
+    end
+
     test "refuses a join to a peer topic as an unmatched topic" do
       # What a client sees. The dispatch has no entry, so nothing in
       # `HospitalityComsWeb` runs — no scope is built and no query is issued.
@@ -364,6 +384,21 @@ defmodule HospitalityComsWeb.SocketsTest do
                subscribe_and_join(socket, "peer:" <> person.id, %{})
     end
 
+    test "joins the profile topic, which is #70's reported symptom" do
+      # `PersonSocket` routed `venue_room:*`, `shift_room:*` and `peer:*` and
+      # never `profile:*`, so opening the Profile tab logged
+      # `Ignoring unmatched topic "profile:<uuid>"` and the surface rendered
+      # empty — which on this surface is also a claim about somebody's working
+      # life. The control is the `nil` above; this is the half that says the
+      # route exists.
+      person = person_fixture(@now)
+      {:ok, socket} = connect(PersonSocket, %{}, auth(session_token(person, @now)))
+
+      assert {:ok, reply, channel} = subscribe_and_join(socket, "profile:" <> person.id, %{})
+      assert reply.person_id == person.id
+      assert channel.topic == "profile:" <> person.id
+    end
+
     test "has no employer venue topic" do
       # The partition is two-way at the transport as well as in
       # `HospitalityComs.PubSub`.
@@ -377,6 +412,12 @@ defmodule HospitalityComsWeb.SocketsTest do
   # derived from the socket rather than passed in — a literal here would be a
   # second place the suffix rule is written.
   defp peer_topic(socket), do: Peers.topic(socket.assigns.person_id)
+
+  # The profile topic is the person's too, and it is derived from the socket for
+  # the same reason: a literal here would be a second place the suffix rule is
+  # written. `HospitalityComs.Profiles` publishes nothing, so unlike
+  # `Peers.topic/1` there is no context function to borrow.
+  defp profile_topic(socket), do: "profile:" <> socket.assigns.person_id
 
   defp venue_topic(venue), do: "venue_room:" <> venue.id
   defp shift_topic(room), do: "shift_room:" <> room.id
