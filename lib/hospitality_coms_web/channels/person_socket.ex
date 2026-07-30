@@ -1,7 +1,7 @@
 defmodule HospitalityComsWeb.PersonSocket do
   @moduledoc """
-  The worker's transport: venue rooms, shift rooms, and one multiplexed peer
-  channel.
+  The worker's transport: venue rooms, shift rooms, one multiplexed peer
+  channel, and the worker's own record.
 
   ## Two socket modules, and this is the one with peer topics (KTD9)
 
@@ -32,6 +32,21 @@ defmodule HospitalityComsWeb.PersonSocket do
   `HospitalityComsWeb.PeerChannel` matches the suffix against the joining
   session's own person and refuses anything else.
 
+  ## `"profile:*"` is the fourth entry, and it is keyed on the person too
+
+  `HospitalityComsWeb.ProfileChannel` carries the whole of U9 — the worker's own
+  attested and declared entries, their correction requests, their disclosure
+  ledger, and one peer's record at a time — and its suffix is checked the same
+  way, with the repeated variable in `admitted/3`. It is the surface where
+  getting that wrong is worst: a peer topic leaks a conversation, and this one
+  leaks every term somebody has served plus the list of what they chose to
+  conceal.
+
+  **It carries no server pushes**, because `HospitalityComs.Profiles` broadcasts
+  nothing. That makes it request/reply with a join lifecycle, which is HTTP's
+  shape; the argument for it being here anyway, and the three announcements that
+  would justify it staying, are in that channel's own moduledoc.
+
   ## The credential is a header, and the id is a session (KTD7)
 
   `auth_token: true` in `HospitalityComsWeb.Endpoint` puts the token on the
@@ -56,6 +71,7 @@ defmodule HospitalityComsWeb.PersonSocket do
   channel "venue_room:*", HospitalityComsWeb.VenueRoomChannel
   channel "shift_room:*", HospitalityComsWeb.ShiftRoomChannel
   channel "peer:*", HospitalityComsWeb.PeerChannel
+  channel "profile:*", HospitalityComsWeb.ProfileChannel
 
   @doc """
   Authenticates the session token the transport carried.
