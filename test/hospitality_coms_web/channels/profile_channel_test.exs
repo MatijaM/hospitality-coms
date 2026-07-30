@@ -30,10 +30,13 @@ defmodule HospitalityComsWeb.ProfileChannelTest do
 
   use HospitalityComsWeb.ChannelCase
 
+  alias HospitalityComs.Accounts
+  alias HospitalityComs.Engagements
   alias HospitalityComs.EngagementsFixtures
   alias HospitalityComs.Peers
   alias HospitalityComs.PeersFixtures
   alias HospitalityComs.Profiles
+  alias HospitalityComs.Rooms
   alias HospitalityComsWeb.PersonSocket
 
   @now HospitalityComs.EngagementsFixtures.fixed_instant()
@@ -52,6 +55,13 @@ defmodule HospitalityComsWeb.ProfileChannelTest do
                       resolved_at venue_id)a
   @disclosure_keys ~w(audience_id audience_kind decided_at disclosed disclosure_id
                       engagement_id)a
+  # #73's picker. A venue listed **as itself** is `venue_id`/`name`, which is
+  # `EmployerController.render_venue/1` and `RoomController.render_venue_room/1`
+  # and both client decoders; `venue_name` is what a venue named *inside another
+  # entity* is called, which `@entry_keys` above does and this is not.
+  @audience_keys ~w(people venues)a
+  @venue_audience_keys ~w(name venue_id)a
+  @person_audience_keys ~w(display_name person_id)a
 
   describe "joining a profile surface" do
     test "replies with the person and the standing incompleteness notice" do
@@ -599,6 +609,156 @@ defmodule HospitalityComsWeb.ProfileChannelTest do
       ref = push(channel, "peer_profile", %{"person_id" => subject.person.id})
       assert_reply ref, :error, refusal
       assert refusal.error.code == "not_found"
+    end
+  end
+
+  describe "the audience picker" do
+    # #73. `set_disclosure` names an audience that is a venue **or** a person,
+    # and until this event nothing on the surface could say which venues or
+    # which people one might be — so the control made the worker type a raw
+    # uuid.
+
+    test "answers the venues this worker holds an engagement at and the people who can see them" do
+      %{worker: worker, here: here} = concealable()
+      colleague = person()
+      engage(here, colleague, @now, days(30))
+      {:ok, _renamed} = Accounts.update_display_name(colleague, "Captain Nemo")
+
+      channel = joined(worker)
+
+      ref = push(channel, "list_audiences", %{})
+      assert_reply ref, :ok, audiences
+
+      assert keys(audiences) == @audience_keys
+      assert [venue] = audiences.venues
+      assert [person] = audiences.people
+
+      assert keys(venue) == @venue_audience_keys
+      assert venue.venue_id == here.venue.id
+      assert venue.name == here.venue.name
+
+      assert keys(person) == @person_audience_keys
+      assert person.person_id == colleague.person.id
+      assert person.display_name == "Captain Nemo"
+    end
+
+    test "offers a venue this worker manages nothing at, and one they are suspended from" do
+      # The two lists this is *not*. `Engagements.list_managed_venues/1` needs a
+      # live grant, so an ordinary worker's picker would be empty at the venue
+      # that can actually read their record; `Rooms.list_venue_rooms/1`
+      # subtracts suspensions, which are a person-side venue-room opt-out that
+      # the employer view has never heard of (KTD18).
+      %{worker: worker, here: here} = concealable()
+      {:ok, _suspension} = Rooms.suspend_venue_room(worker, here.venue.id)
+
+      channel = joined(worker)
+
+      ref = push(channel, "list_audiences", %{})
+      assert_reply ref, :ok, audiences
+
+      assert [%{venue_id: venue_id}] = audiences.venues
+      assert venue_id == here.venue.id
+
+      # The two controls, at the same instant: the venue is genuinely
+      # ungoverned by this worker and genuinely out of their room list.
+      assert Engagements.list_managed_venues(worker) == []
+      assert Rooms.list_venue_rooms(worker) == []
+    end
+
+    test "offers a connected peer whose visibility has lapsed" do
+      # The half that makes the picker able to reach the remedy it exists for:
+      # the person a worker most wants to take an entry away from is one who is
+      # connected and no longer co-rostered, because a connection outlives the
+      # visibility that produced it and `fetch_peer_profile/2` admits them.
+      %{first: worker, second: peer} =
+        PeersFixtures.co_rostered(@now, %{
+          first: %{starts_at: days(-100), ends_at: days(-90)},
+          second: %{starts_at: days(-100), ends_at: days(-90)}
+        })
+
+      {:ok, _renamed} = Accounts.update_display_name(peer, "Captain Nemo")
+
+      # Formed while they could still see each other; asked long after, which is
+      # the state this row is about.
+      PeersFixtures.connection_fixture(
+        PeersFixtures.person_at(worker, days(-95)),
+        PeersFixtures.person_at(peer, days(-95))
+      )
+
+      refute Peers.visible?(worker, peer.person.id)
+      assert Peers.connected?(worker, peer.person.id)
+
+      channel = joined(worker)
+
+      ref = push(channel, "list_audiences", %{})
+      assert_reply ref, :ok, audiences
+
+      # No venue: the term is long over, which is the same instant that lapsed
+      # the visibility. The person is here anyway.
+      assert audiences.venues == []
+      assert [%{person_id: person_id, display_name: "Captain Nemo"}] = audiences.people
+      assert person_id == peer.person.id
+    end
+
+    test "offers a stranger's venue in neither list" do
+      # The control for both rows above: a picker that answered everything
+      # satisfies each of them completely.
+      %{worker: worker, here: here} = concealable()
+      %{first: stranger} = PeersFixtures.co_rostered(@now)
+
+      channel = joined(worker)
+
+      ref = push(channel, "list_audiences", %{})
+      assert_reply ref, :ok, audiences
+
+      assert Enum.map(audiences.venues, & &1.venue_id) == [here.venue.id]
+      refute Enum.any?(audiences.people, &(&1.person_id == stranger.person.id))
+    end
+
+    test "hands back ids `set_disclosure` accepts, of both kinds, and survives Jason" do
+      # A picker whose ids the write refuses is not a picker. Both kinds, in one
+      # test, because the pair is what `Disclosure.audience/0` is.
+      #
+      # The `Jason` round trip is the assertion `assert_reply` cannot make: it
+      # reads the Elixir term, so a struct on the reply passes every key set
+      # above and raises inside the serializer the first time a browser asks.
+      %{worker: worker, here: here, entry_engagement: engagement} = concealable()
+      colleague = person()
+      engage(here, colleague, @now, days(30))
+
+      channel = joined(worker)
+
+      ref = push(channel, "list_audiences", %{})
+      assert_reply ref, :ok, audiences
+
+      wire = round_trip(audiences)
+      assert Map.keys(wire) |> Enum.sort() == ~w(people venues)
+      assert [%{"venue_id" => wire_venue_id, "name" => _}] = wire["venues"]
+      assert [%{"person_id" => wire_person_id, "display_name" => _}] = wire["people"]
+
+      ref =
+        push(channel, "set_disclosure", %{
+          "engagement_id" => engagement.id,
+          "audience_kind" => "venue",
+          "audience_id" => wire_venue_id,
+          "disclosed" => false
+        })
+
+      assert_reply ref, :ok, hidden_from_venue
+      assert hidden_from_venue.audience_kind == :venue
+      assert hidden_from_venue.audience_id == here.venue.id
+
+      ref =
+        push(channel, "set_disclosure", %{
+          "engagement_id" => engagement.id,
+          "audience_kind" => "person",
+          "audience_id" => wire_person_id,
+          "disclosed" => false
+        })
+
+      assert_reply ref, :ok, hidden_from_person
+      assert hidden_from_person.audience_kind == :person
+      assert hidden_from_person.audience_id == colleague.person.id
     end
   end
 

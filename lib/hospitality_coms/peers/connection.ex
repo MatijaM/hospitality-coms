@@ -37,6 +37,28 @@ defmodule HospitalityComs.Peers.Connection do
   `:stale` would be a worse answer than `:already_disconnected`; optimistic
   locking is for a repeatable mutation, which this is not.
 
+  ## The pair's names are joined, and deliberately not preloaded
+
+  `person_a_display_name` and `person_b_display_name` are **virtual** fields,
+  filled by `HospitalityComs.Peers.Records.with_pair/1` on the reads that render
+  a conversation and on the rows `accept_request/2` and `disconnect/2` read back.
+  `HospitalityComs.Peers.Conversation` picks the counterpart's through
+  `counterpart_display_name/2`.
+
+  `preload: [:person_a, :person_b]` is one word and is the wrong word. It loads
+  whole `%HospitalityComs.Accounts.Person{}` structs, and the only other
+  identifying column `people` has is `email` — `HospitalityComs.PeersTest`
+  asserts the peer surface discloses no address by value *and* by key name, and
+  a `Person` struct inside a conversation is exactly the direction that
+  assertion exists to catch. The join selects `display_name` and nothing else.
+
+  Neither the join nor this module filters on activeness or on `erased_at`. A
+  connection is permanent (R13), so a name that lapsed when co-rostering did
+  would blank the heading of a conversation two people are still having; and an
+  erased counterpart already has a name, because
+  `HospitalityComs.Lifecycle.erase_person/1` writes
+  `erased_display_name/0` in the statement that nulls the address.
+
   ## Nothing deletes a closed connection
 
   The messages hang off it, and after a disconnect each party still reads their
@@ -56,6 +78,11 @@ defmodule HospitalityComs.Peers.Connection do
     field :connected_at, :utc_datetime
     field :disconnected_at, :utc_datetime
 
+    # Joined on the read that loaded this row, never stored, and never through
+    # the two `belongs_to` associations below. See "The pair's names are joined".
+    field :person_a_display_name, :string, virtual: true
+    field :person_b_display_name, :string, virtual: true
+
     belongs_to :request, ConnectionRequest
     belongs_to :person_a, Person
     belongs_to :person_b, Person
@@ -73,6 +100,8 @@ defmodule HospitalityComs.Peers.Connection do
           person_a: Person.t() | Ecto.Association.NotLoaded.t() | nil,
           person_b_id: Ecto.UUID.t() | nil,
           person_b: Person.t() | Ecto.Association.NotLoaded.t() | nil,
+          person_a_display_name: String.t() | nil,
+          person_b_display_name: String.t() | nil,
           disconnected_by_id: Ecto.UUID.t() | nil,
           disconnected_by: Person.t() | Ecto.Association.NotLoaded.t() | nil,
           connected_at: DateTime.t() | nil,
@@ -141,6 +170,32 @@ defmodule HospitalityComs.Peers.Connection do
   @spec counterpart(t(), Ecto.UUID.t()) :: Ecto.UUID.t()
   def counterpart(%__MODULE__{person_a_id: person_id, person_b_id: other}, person_id), do: other
   def counterpart(%__MODULE__{person_b_id: person_id, person_a_id: other}, person_id), do: other
+
+  @doc """
+  The display name of the party who is not `person_id`.
+
+  `counterpart/2`'s shape with the guard that
+  `HospitalityComsWeb.RoomChannel.rendered/1` uses: it matches on the name being
+  a binary, so a connection read by a path that did not compose
+  `HospitalityComs.Peers.Records.with_pair/1` is a `FunctionClauseError` here
+  rather than a `null` on the wire and an `undefined` in a heading.
+
+  Raises `FunctionClauseError` for a non-party too, for `counterpart/2`'s reason.
+  """
+  @spec counterpart_display_name(t(), Ecto.UUID.t()) :: String.t()
+  def counterpart_display_name(
+        %__MODULE__{person_a_id: person_id, person_b_display_name: name},
+        person_id
+      )
+      when is_binary(name),
+      do: name
+
+  def counterpart_display_name(
+        %__MODULE__{person_b_id: person_id, person_a_display_name: name},
+        person_id
+      )
+      when is_binary(name),
+      do: name
 
   @doc """
   Both people this connection is between, in the order the row stores them.

@@ -1580,6 +1580,116 @@ defmodule HospitalityComs.EngagementsTest do
     end
   end
 
+  describe "list_engaged_venues/1" do
+    # #73's audience picker. `list_managed_venues/1` above is where somebody may
+    # **act**; this is where somebody **works**, and the difference is one
+    # filter. The predicate is the employer view's own —
+    # `employer_visible_attested_entries` resolves a worker through
+    # `viewer.starts_at <= now AND viewer.ends_at > now` — so a venue is offered
+    # as an audience exactly while it can read the record.
+
+    test "answers a venue where the person holds no grant at all" do
+      # The whole difference from `list_managed_venues/1`, and the mutation it
+      # refuses is reusing that function: an ordinary worker holds no grant
+      # anywhere, so their picker would be empty at every venue that can
+      # actually read their record.
+      {employer, creation} = scoped_venue_fixture(@now)
+      worker = person_scope_fixture(@now)
+
+      engagement_fixture(employer, worker, %{starts_at: @now, ends_at: @in_a_month})
+
+      assert [venue] = Engagements.list_engaged_venues(worker)
+      assert venue.id == creation.venue.id
+      assert venue.name == creation.venue.name
+
+      # The control that says the fixture really withheld the authority.
+      assert Engagements.list_managed_venues(worker) == []
+    end
+
+    test "still answers the venue when the person has suspended its venue room" do
+      # KTD18, reached from the audience side. A suspension is a person-side
+      # venue-room opt-out and the venue's employer door is untouched by it, so
+      # `Rooms.list_venue_rooms/1` — which looks like a free answer here — would
+      # take a suspended worker's own venue out of their own picker.
+      {employer, creation} = scoped_venue_fixture(@now)
+      worker = person_scope_fixture(@now)
+
+      engagement_fixture(employer, worker, %{starts_at: @now, ends_at: @in_a_month})
+      {:ok, _suspension} = Rooms.suspend_venue_room(worker, creation.venue.id)
+
+      assert [venue] = Engagements.list_engaged_venues(worker)
+      assert venue.id == creation.venue.id
+
+      # **The control**, in the shape `list_managed_venues/1`'s own suspension
+      # test uses: without it a suspension that silently did nothing satisfies
+      # the assertion above and the decision is untested.
+      assert Rooms.list_venue_rooms(worker) == []
+    end
+
+    test "leaves out a term that has closed and one that has not opened" do
+      # `active_at/2`, which is what stops the picker offering a venue that
+      # cannot see the worker. Both halves, because a read that answered
+      # nothing satisfies either one alone — the middle assertion is the
+      # control.
+      {employer, creation} = scoped_venue_fixture(@now)
+      person = person_fixture(@now)
+      opens = DateTime.add(@now, 1, :day)
+      closes = DateTime.add(opens, 7, :day)
+
+      engagement_fixture(employer, PersonScope.for_person(person, @now), %{
+        starts_at: opens,
+        ends_at: closes
+      })
+
+      assert Engagements.list_engaged_venues(PersonScope.for_person(person, @now)) == []
+
+      inside = DateTime.add(opens, 1, :hour)
+      assert [venue] = Engagements.list_engaged_venues(PersonScope.for_person(person, inside))
+      assert venue.id == creation.venue.id
+
+      after_the_term = DateTime.add(closes, 1, :hour)
+
+      assert Engagements.list_engaged_venues(PersonScope.for_person(person, after_the_term)) == []
+    end
+
+    test "orders by name, so a picker renders a list somebody can read" do
+      # `id` is random on a `binary_id` schema, so an unordered read passes this
+      # about half the time. Two venues named at the ends of the alphabet.
+      #
+      # **The deduplication `venues_named_by/1` provides is unreachable here and
+      # that is a fact about the schema rather than a gap in this test.** Two
+      # engagements for one person at one venue cannot both be active at one
+      # instant — `engagements_no_overlap` refuses the second — so the set
+      # membership is belt to that brace. It applies equally to
+      # `list_managed_venues/1`, whose docstring makes the same claim.
+      worker = person_scope_fixture(@now)
+      alphabetically_first = engaged_venue_named(worker, "u5-venue-aaa-#{unique()}")
+      alphabetically_last = engaged_venue_named(worker, "u5-venue-zzz-#{unique()}")
+
+      assert Enum.map(Engagements.list_engaged_venues(worker), & &1.id) ==
+               [alphabetically_first.id, alphabetically_last.id]
+    end
+
+    test "is per person, and refuses an employer or anonymous scope by function clause" do
+      {employer, _creation} = scoped_venue_fixture(@now)
+      worker = person_scope_fixture(@now)
+      bystander = person_scope_fixture(@now)
+
+      engagement_fixture(employer, worker, %{starts_at: @now, ends_at: @in_a_month})
+
+      assert [_venue] = Engagements.list_engaged_venues(worker)
+      assert Engagements.list_engaged_venues(bystander) == []
+
+      assert_raise FunctionClauseError, fn ->
+        Engagements.list_engaged_venues(scope_of(:employer, employer))
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        Engagements.list_engaged_venues(PersonScope.for_person(nil, @now))
+      end
+    end
+  end
+
   describe "the bridge's row-level security" do
     # `HospitalityComs.BoundaryTest` asserts the policy exists and is not
     # `FORCE`d; what it cannot assert is the behaviour, because populating the
@@ -1767,6 +1877,21 @@ defmodule HospitalityComs.EngagementsTest do
 
     creation.venue
   end
+
+  # `managed_venue_named/2` without the grant, which is the whole of what
+  # `list_engaged_venues/1` differs by: the founding grant stays with the
+  # venue's creator and the worker is engaged under none.
+  defp engaged_venue_named(%PersonScope{} = worker, name) do
+    founder = person_scope_fixture(@now)
+    {:ok, creation} = Venues.create_venue(founder, %{name: name, timezone: "Europe/Zagreb"})
+    employer = employer_scope_at(creation.venue, creation.grant, @now)
+
+    engagement_fixture(employer, worker, %{starts_at: @now, ends_at: @in_a_month})
+
+    creation.venue
+  end
+
+  defp unique, do: System.unique_integer([:positive])
 
   defp venue_founding_grant_id(venue_id) do
     Repo.one!(

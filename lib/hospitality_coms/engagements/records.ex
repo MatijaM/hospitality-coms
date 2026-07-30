@@ -274,13 +274,63 @@ defmodule HospitalityComs.Engagements.Records do
   """
   @spec managed_venues(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
   def managed_venues(person_id, %DateTime{} = instant) when is_binary(person_id) do
-    venue_ids =
-      Engagement
-      |> of_person(person_id)
-      |> active_at(instant)
-      |> holding_any_live_grant(instant)
-      |> select([engagement], engagement.venue_id)
+    Engagement
+    |> of_person(person_id)
+    |> active_at(instant)
+    |> holding_any_live_grant(instant)
+    |> select([engagement], engagement.venue_id)
+    |> venues_named_by()
+  end
 
+  @doc """
+  The venues one person holds an engagement at, at `instant`, by name.
+
+  `managed_venues/2` **with the grant filter dropped and nothing else changed**,
+  which is the whole of the difference: this is where somebody *works*, and that
+  is where somebody may *act*. An ordinary worker holds no grant anywhere and
+  every venue they work at is on this list.
+
+  The caller is #73's disclosure audience picker, and the predicate is the
+  employer view's own. `employer_visible_attested_entries` resolves a worker
+  through `viewer.starts_at <= now AND viewer.ends_at > now` — the worker's
+  engagement at the asking venue must be **active at the instant** — which is
+  `active_at/2` and not a second spelling of activeness. So a venue is offered
+  as an audience exactly while it can read the record.
+
+  **Consequence, on the record:** a venue whose term has ended is not on the
+  list, because it cannot read the record either. A decision already taken about
+  it stays in the ledger, still appears in
+  `HospitalityComs.Profiles.list_disclosures/1`, and applies again if the worker
+  returns.
+
+  **Suspensions are not consulted**, for `managed_venues/2`'s reason and one
+  more: a suspension is a person-side venue-room opt-out, and a venue reads a
+  worker's record through a view that has never heard of
+  `venue_room_suspensions`. `HospitalityComs.Rooms.list_venue_rooms/1` looks
+  like a free answer here and would take a suspended worker's own venue out of
+  their own picker.
+  """
+  @spec engaged_venues(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  def engaged_venues(person_id, %DateTime{} = instant) when is_binary(person_id) do
+    Engagement
+    |> of_person(person_id)
+    |> active_at(instant)
+    |> select([engagement], engagement.venue_id)
+    |> venues_named_by()
+  end
+
+  # The venues a set of engagement rows names, ordered and deduplicated once
+  # rather than at each of the two callers.
+  #
+  # Ordered by name with `id` breaking ties, for
+  # `HospitalityComs.Rooms.Records.venues_of_person/2`'s reason: the name is what
+  # a client renders and `id` is random on a `binary_id` schema.
+  #
+  # Deduplicated by construction. `venue.id in subquery(...)` is a set
+  # membership, so a person with two engagements at one venue still names it
+  # once — where a join would list it twice.
+  @spec venues_named_by(Ecto.Query.t()) :: Ecto.Query.t()
+  defp venues_named_by(venue_ids) do
     from venue in Venue,
       where: venue.id in subquery(venue_ids),
       order_by: [asc: venue.name, asc: venue.id]

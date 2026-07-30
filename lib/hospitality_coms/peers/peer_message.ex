@@ -30,6 +30,32 @@ defmodule HospitalityComs.Peers.PeerMessage do
   There is no retention column. KTD16's four triggers are U10's, and a peer
   conversation is not one of them.
 
+  ## The author's name is joined, never stored
+
+  `author_display_name` is a **virtual** field, filled by
+  `HospitalityComs.Peers.Records.with_author/1` on every read and on the row the
+  send reads back — `HospitalityComs.Rooms.RoomMessage`'s shape and its first two
+  reasons, one of which does not transfer:
+
+    * a stored copy is denormalised, so a rename never reaches it and the
+      conversation shows what used to be true;
+    * erasure would have to rewrite a number of rows proportional to
+      **messages**. `HospitalityComs.Lifecycle.erase_person/1` overwrites
+      `people.display_name` in one statement, and joining is what makes an
+      erased author's words render under
+      `HospitalityComs.Lifecycle.erased_display_name/0` with nothing having
+      visited this table;
+    * KTD2 is the reason that does **not** apply. `room_messages` is an
+      employer-zone row and may name no human; this row already names one
+      directly, so a name column here would break nothing about the bridge. It
+      is still not a column, for the two reasons above.
+
+  The join carries no activeness predicate and no `erased_at` filter, which is
+  R15 rather than a copy of `with_author/1`'s reasoning: a connection outlives
+  the visibility that produced it and every engagement either party holds, so a
+  name that lapsed with co-rostering would blank a conversation two people are
+  still having.
+
   ## The body is bounded in the database as well as here
 
   Both bounds are mirrored from `room_messages` for the reason U5 mirrored a
@@ -59,6 +85,9 @@ defmodule HospitalityComs.Peers.PeerMessage do
     field :body, :string
     field :sent_at, :utc_datetime
 
+    # Joined on the read that loaded this row, never stored. See the moduledoc.
+    field :author_display_name, :string, virtual: true
+
     belongs_to :connection, Connection
     belongs_to :author, Person
 
@@ -72,6 +101,7 @@ defmodule HospitalityComs.Peers.PeerMessage do
           connection: Connection.t() | Ecto.Association.NotLoaded.t() | nil,
           author_id: Ecto.UUID.t() | nil,
           author: Person.t() | Ecto.Association.NotLoaded.t() | nil,
+          author_display_name: String.t() | nil,
           body: String.t() | nil,
           sent_at: DateTime.t() | nil,
           inserted_at: DateTime.t() | nil,

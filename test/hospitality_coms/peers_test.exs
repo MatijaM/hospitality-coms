@@ -34,6 +34,7 @@ defmodule HospitalityComs.PeersTest do
   alias HospitalityComs.EmployerRepo
   alias HospitalityComs.EmployerRepo.ZoneViolationError
   alias HospitalityComs.Engagements
+  alias HospitalityComs.Lifecycle
   alias HospitalityComs.Peers
   alias HospitalityComs.Peers.Connection
   alias HospitalityComs.Peers.ConnectionRequest
@@ -1040,6 +1041,384 @@ defmodule HospitalityComs.PeersTest do
 
       assert {:error, :close, :already_disconnected, _changes} =
                Peers.disconnect(second, connection.id)
+    end
+  end
+
+  describe "the counterpart's display name" do
+    # #73. Every one of these shapes rendered a bare uuid before, and the client
+    # rendered `shortId(…)` of it: an incoming request's requester, a
+    # conversation's heading, and every line inside it.
+    #
+    # The name is joined on the read and **the join carries no predicate at
+    # all** — not activeness, not `erased_at`. That is R13 here rather than a
+    # copy of `Rooms.Records.with_author/1`'s reasoning: a connection outlives
+    # the visibility that produced it, so a name that lapsed with co-rostering
+    # would blank the heading of a conversation two people are still having.
+
+    test "is on the conversation list, and is the counterpart's from either side" do
+      %{first: first, second: second} = co_rostered(@now)
+      {:ok, _} = Accounts.update_display_name(first, "Wendy Darling")
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+
+      connection_fixture(first, second)
+
+      assert [%Conversation{} = theirs] = Peers.list_conversations(first)
+      assert [%Conversation{} = mine] = Peers.list_conversations(second)
+
+      # **Asked from both sides against two known, different names**, which is
+      # the control the assertion needs: a `peer_display_name` taken from
+      # `person_a` every time, or from the *reader* rather than the
+      # counterpart, satisfies a one-sided test completely. The pair is stored
+      # canonically, so which of the two is `person_a` is decided by a uuid
+      # comparison and is not something a test can choose.
+      assert theirs.peer_display_name == "Captain Nemo"
+      assert mine.peer_display_name == "Wendy Darling"
+    end
+
+    test "is the same on one conversation as it is on the list" do
+      %{first: first, second: second} = co_rostered(@now)
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+
+      connection = connection_fixture(first, second)
+
+      assert [%Conversation{} = listed] = Peers.list_conversations(first)
+      assert {:ok, %Conversation{} = fetched} = Peers.fetch_conversation(first, connection.id)
+
+      # An equality between two reads rather than two copies of one literal:
+      # `fetch_conversation/2` resolves through a different query and this is
+      # what says the two cannot drift.
+      assert fetched == listed
+      assert fetched.peer_display_name == "Captain Nemo"
+    end
+
+    test "survives the co-rostering that produced the connection lapsing" do
+      # The mutation this refuses: a visibility predicate on the join. Every
+      # other assertion in this block passes with one, because every other pair
+      # here is currently co-rostered.
+      ends_at = DateTime.add(@now, 10, :day)
+
+      %{first: first, second: second} =
+        co_rostered(@now, %{
+          first: %{starts_at: @now, ends_at: ends_at},
+          second: %{starts_at: @now, ends_at: ends_at}
+        })
+
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+      connection = connection_fixture(first, second)
+
+      long_after = person_at(first, DateTime.add(ends_at, 400, :day))
+
+      refute Peers.visible?(long_after, second.person.id)
+
+      assert [%Conversation{peer_display_name: "Captain Nemo"}] =
+               Peers.list_conversations(long_after)
+
+      assert {:ok, %PeerMessage{} = sent} =
+               Peers.send_message(long_after, connection.id, "still here")
+
+      assert {:ok, [read]} = Peers.list_messages(long_after, connection.id)
+      assert read.author_display_name == sent.author_display_name
+    end
+
+    test "reads as the erasure constant once the counterpart has been erased" do
+      # No special case anywhere: `Lifecycle.erase_person/1` overwrites
+      # `people.display_name` in the statement that nulls the address, so the
+      # join answers the constant with nothing having visited `peer_connections`
+      # or `connection_requests`. The mutation this refuses is an
+      # `erased_at IS NULL` filter on either join, which reads as tidiness and
+      # produces a `nil` where the whole point is a readable heading.
+      #
+      # Two of the three shapes, because the third cannot exist: erasure
+      # **deletes the erased person's own peer messages** and leaves the
+      # connection and the request rows standing (the request row *is* KTD19's
+      # block). So there is no peer message with an erased author to render, and
+      # `list_messages/2` below is the assertion that says so rather than an
+      # omission.
+      %{employer: employer, first: first, second: second} = co_rostered(@now)
+      pending_from = person_scope_fixture(@now)
+      engage(employer, pending_from, %{}, @now)
+
+      connection = connection_fixture(first, second)
+      {:ok, _theirs} = Peers.send_message(second, connection.id, "before")
+      {:ok, _mine} = Peers.send_message(first, connection.id, "mine")
+
+      request_fixture(pending_from, first)
+
+      assert {:ok, _erasure} = Lifecycle.erase_person(second)
+      assert {:ok, _also} = Lifecycle.erase_person(pending_from)
+
+      assert [%Conversation{} = conversation] = Peers.list_conversations(first)
+      assert conversation.peer_display_name == Lifecycle.erased_display_name()
+
+      assert [incoming] = Peers.list_incoming_requests(first)
+      assert incoming.requester_display_name == Lifecycle.erased_display_name()
+
+      # The erased party's words are gone and this party's own survive, which is
+      # why the message join has no erased author to answer for.
+      assert {:ok, [only_mine]} = Peers.list_messages(first, connection.id)
+      assert only_mine.body == "mine"
+    end
+
+    test "is on both request lists, in both directions" do
+      %{first: first, second: second} = co_rostered(@now)
+      {:ok, _} = Accounts.update_display_name(first, "Wendy Darling")
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+
+      request_fixture(first, second)
+
+      assert [outgoing] = Peers.list_outgoing_requests(first)
+      assert [incoming] = Peers.list_incoming_requests(second)
+
+      assert outgoing.requester_display_name == "Wendy Darling"
+      assert outgoing.addressee_display_name == "Captain Nemo"
+      assert incoming.requester_display_name == "Wendy Darling"
+      assert incoming.addressee_display_name == "Captain Nemo"
+    end
+
+    test "is on a request that has lapsed, which is when it is most needed" do
+      # A lapsed request is one the pair can no longer see each other over, and
+      # it is still in the requester's list — so a visibility predicate on this
+      # join takes the name off exactly the row a requester is trying to make
+      # sense of.
+      ends_at = DateTime.add(@now, 10, :day)
+
+      %{first: first, second: second} =
+        co_rostered(@now, %{
+          first: %{starts_at: @now, ends_at: ends_at},
+          second: %{starts_at: @now, ends_at: ends_at}
+        })
+
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+      request = request_fixture(first, second)
+
+      long_after = person_at(first, DateTime.add(ends_at, 400, :day))
+
+      assert [lapsed] = Peers.list_outgoing_requests(long_after)
+      assert lapsed.state == :lapsed
+      assert lapsed.addressee_display_name == "Captain Nemo"
+
+      assert {:ok, fetched} = Peers.fetch_request(long_after, request.id)
+      assert fetched.addressee_display_name == "Captain Nemo"
+    end
+
+    test "is on every message, in an open conversation and in the own-only read after a disconnect" do
+      %{first: first, second: second} = co_rostered(@now)
+      {:ok, _} = Accounts.update_display_name(first, "Wendy Darling")
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+
+      connection = connection_fixture(first, second)
+      {:ok, _} = Peers.send_message(first, connection.id, "mine")
+
+      {:ok, _} =
+        Peers.send_message(
+          person_at(second, DateTime.add(@now, 1, :minute)),
+          connection.id,
+          "theirs"
+        )
+
+      assert {:ok, [one, two]} = Peers.list_messages(first, connection.id)
+      assert one.author_display_name == "Wendy Darling"
+      assert two.author_display_name == "Captain Nemo"
+
+      # And after a disconnect, where each party reads their own and only their
+      # own through a *different* query — `own_messages_of/2` composes
+      # `messages_of/1`, so this is what says the join survived the composition.
+      {:ok, _closed} = Peers.disconnect(first, connection.id)
+
+      assert {:ok, [own]} = Peers.list_messages(first, connection.id)
+      assert own.body == "mine"
+      assert own.author_display_name == "Wendy Darling"
+    end
+
+    test "is on a message whose author's engagement has ended" do
+      ends_at = DateTime.add(@now, 10, :day)
+
+      %{first: first, second: second} =
+        co_rostered(@now, %{
+          first: %{starts_at: @now, ends_at: ends_at},
+          second: %{starts_at: @now, ends_at: ends_at}
+        })
+
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+      connection = connection_fixture(first, second)
+      {:ok, _} = Peers.send_message(second, connection.id, "before I left")
+
+      long_after = person_at(first, DateTime.add(ends_at, 400, :day))
+
+      assert Engagements.list_person_engagements(
+               person_at(second, DateTime.add(ends_at, 400, :day))
+             ) == []
+
+      assert {:ok, [message]} = Peers.list_messages(long_after, connection.id)
+      assert message.author_display_name == "Captain Nemo"
+    end
+
+    test "is on the row every write answers with, and it is the row a read would give" do
+      # **Decision 4.** Neither `Multi.insert/4` nor `update_all … RETURNING`
+      # can name a joined column, and a name taken off the caller's scope is
+      # `nil` on a channel (#66, measured) — so each of the four writes reads
+      # its own row back through the query a list read uses.
+      %{first: first, second: second} = co_rostered(@now)
+      {:ok, _} = Accounts.update_display_name(first, "Wendy Darling")
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+
+      assert {:ok, requested} = Peers.request_connection(first, second.person.id)
+      assert requested.requester_display_name == "Wendy Darling"
+      assert requested.addressee_display_name == "Captain Nemo"
+
+      assert {:ok, declined} = Peers.decline_request(second, requested.id)
+      assert declined.requester_display_name == "Wendy Darling"
+      assert declined.addressee_display_name == "Captain Nemo"
+      # The state is virtual and the re-read has none, so it is re-applied to
+      # the row the write produced. Without that the reply says `nil` and a
+      # client renders no badge at all.
+      assert declined.state == :declined
+
+      # Accepting and disconnecting answer conversations, whose whole heading is
+      # the counterpart's name.
+      assert {:ok, second_request} = Peers.request_connection(second, first.person.id)
+      assert {:ok, connection} = Peers.accept_request(first, second_request.id)
+
+      assert Conversation.of_connection(connection, first.person.id).peer_display_name ==
+               "Captain Nemo"
+
+      assert {:ok, sent} = Peers.send_message(first, connection.id, "hello")
+      assert sent.author_display_name == "Wendy Darling"
+
+      # The send reply is the row a history read produces, asserted as an
+      # equality between the two rather than against the literal twice.
+      assert {:ok, [read]} = Peers.list_messages(first, connection.id)
+      assert read == sent
+
+      assert {:ok, closed} = Peers.disconnect(first, connection.id)
+
+      assert Conversation.of_connection(closed, first.person.id).peer_display_name ==
+               "Captain Nemo"
+    end
+
+    test "is refused rather than rendered as nothing when a read forgot the join" do
+      # The guard on `Connection.counterpart_display_name/2`, which is
+      # `RoomChannel.rendered/1`'s manoeuvre: a connection resolved through a
+      # query that did not compose `with_pair/1` crashes here rather than
+      # putting a `null` on the wire and an `undefined` in a heading.
+      %{first: first, second: second} = co_rostered(@now)
+      connection = connection_fixture(first, second)
+
+      unnamed = Repo.one!(Records.connection_of(first.person.id, connection.id))
+
+      assert_raise FunctionClauseError, fn ->
+        Conversation.of_connection(unnamed, first.person.id)
+      end
+    end
+  end
+
+  describe "everyone who can reach this person's record" do
+    # `Peers.list_reachable_peers/1` — the list form of the pair
+    # `Profiles.fetch_peer_profile/2` gates on, and #73's audience picker.
+
+    test "holds a visible counterpart once, with their name" do
+      %{first: first, second: second} = co_rostered(@now)
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+
+      assert [reachable] = Peers.list_reachable_peers(first)
+      assert reachable == %{person_id: second.person.id, display_name: "Captain Nemo"}
+    end
+
+    test "holds a connected counterpart whose visibility has lapsed" do
+      # The half that makes the picker useful. The person a worker most wants
+      # to take an entry away from is one who is connected and no longer
+      # co-rostered — `CLAUDE.md` names one `set_disclosure/4` row as one of the
+      # two remedies for that residue, and a picker without this half cannot
+      # reach it.
+      ends_at = DateTime.add(@now, 10, :day)
+
+      %{first: first, second: second} =
+        co_rostered(@now, %{
+          first: %{starts_at: @now, ends_at: ends_at},
+          second: %{starts_at: @now, ends_at: ends_at}
+        })
+
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+      connection_fixture(first, second)
+
+      long_after = person_at(first, DateTime.add(ends_at, 400, :day))
+
+      refute Peers.visible?(long_after, second.person.id)
+      assert Peers.connected?(long_after, second.person.id)
+
+      assert [%{person_id: id, display_name: "Captain Nemo"}] =
+               Peers.list_reachable_peers(long_after)
+
+      assert id == second.person.id
+    end
+
+    test "holds neither a stranger nor a counterpart whose connection was closed" do
+      # The control for both halves above: a list that answered everybody
+      # satisfies each of them completely.
+      ends_at = DateTime.add(@now, 10, :day)
+
+      %{first: first, second: second} =
+        co_rostered(@now, %{
+          first: %{starts_at: @now, ends_at: ends_at},
+          second: %{starts_at: @now, ends_at: ends_at}
+        })
+
+      %{first: stranger} = co_rostered(@now)
+      connection = connection_fixture(first, second)
+
+      long_after = person_at(first, DateTime.add(ends_at, 400, :day))
+      assert [_still_connected] = Peers.list_reachable_peers(long_after)
+
+      {:ok, _closed} =
+        Peers.disconnect(person_at(first, DateTime.add(ends_at, 401, :day)), connection.id)
+
+      assert Peers.list_reachable_peers(person_at(first, DateTime.add(ends_at, 402, :day))) == []
+      refute Enum.any?(Peers.list_reachable_peers(first), &(&1.person_id == stranger.person.id))
+    end
+
+    test "gives one entry for a counterpart visible at two venues, and one who is both visible and connected" do
+      %{first: first, second: second} = co_rostered(@now)
+      {elsewhere, _creation} = scoped_venue_fixture(@now)
+
+      engage(elsewhere, first, %{}, @now)
+      engage(elsewhere, second, %{}, @now)
+      connection_fixture(first, second)
+
+      # Two venues, so `list_visible_peers/1` correctly gives two — it is per
+      # venue because it carries the venue. An audience is a person.
+      assert [_one, _two] = Peers.list_visible_peers(first)
+      assert [%{person_id: id}] = Peers.list_reachable_peers(first)
+      assert id == second.person.id
+    end
+
+    test "deduplicates on the id and never on the name" do
+      # Display-name collisions are deliberate (#66), so `uniq_by(&
+      # &1.display_name)` is the plausible slip and it silently drops a person.
+      %{employer: employer, first: first, second: second} = co_rostered(@now)
+      third = person_scope_fixture(@now)
+      engage(employer, third, %{}, @now)
+
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+      {:ok, _} = Accounts.update_display_name(third, "Captain Nemo")
+
+      assert [one, two] = Peers.list_reachable_peers(first)
+      assert one.display_name == "Captain Nemo"
+      assert two.display_name == "Captain Nemo"
+
+      assert MapSet.new([one.person_id, two.person_id]) ==
+               MapSet.new([second.person.id, third.person.id])
+    end
+
+    test "discloses no email address" do
+      # `peers_test.exs`'s standing assertion, applied to the new list. The test
+      # above is its control: a projection returning nothing at all satisfies
+      # this one alone.
+      %{first: first, second: second} = co_rostered(@now)
+
+      assert [reachable] = Peers.list_reachable_peers(first)
+
+      refute reachable |> Map.values() |> Enum.member?(second.person.email)
+      assert reachable |> Map.keys() |> Enum.sort() == ~w(display_name person_id)a
     end
   end
 

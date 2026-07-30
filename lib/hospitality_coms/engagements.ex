@@ -577,6 +577,33 @@ defmodule HospitalityComs.Engagements do
   end
 
   @doc """
+  The venues this person holds an engagement at, at their scope's instant, by
+  name.
+
+  `list_managed_venues/1` without the authority: **where somebody works**, where
+  that one is **where somebody may act**. An ordinary worker holds no grant
+  anywhere and every venue they work at is here.
+
+  The caller is #73's disclosure audience picker — a venue is an audience of
+  `HospitalityComs.Profiles.set_disclosure/4`, and until now nothing could
+  answer which venues one might be. The three lists of venues in this tree are
+  now deliberately different from one another and
+  `HospitalityComs.Engagements.Records.engaged_venues/2` carries the argument:
+  this one, `managed_venues/2` (a live grant as well), and
+  `HospitalityComs.Rooms.Records.venues_of_person/2` (suspensions subtracted,
+  because it is asking about *rooms*).
+
+  Person-scoped and run through `HospitalityComs.Repo`, for
+  `list_managed_venues/1`'s reason. Refuses an employer scope and an anonymous
+  person scope by function clause.
+  """
+  @spec list_engaged_venues(PersonScope.t()) :: [Venue.t()]
+  def list_engaged_venues(%PersonScope{person: %Person{id: person_id}, now: now})
+      when is_binary(person_id) do
+    person_id |> Records.engaged_venues(now) |> Repo.all()
+  end
+
+  @doc """
   Every engagement this person has ever held, active or not.
 
   The portable record's spine: KTD16 gives engagements and attested entries no

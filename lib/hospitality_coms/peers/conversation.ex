@@ -31,19 +31,33 @@ defmodule HospitalityComs.Peers.Conversation do
 
   alias HospitalityComs.Peers.Connection
 
-  @enforce_keys [:connection_id, :peer_id, :connected_at, :open?]
+  @enforce_keys [:connection_id, :peer_id, :peer_display_name, :connected_at, :open?]
   defstruct [
     :connection_id,
     :peer_id,
+    :peer_display_name,
     :connected_at,
     :disconnected_at,
     :disconnected_by_id,
     :open?
   ]
 
+  @typedoc """
+  One conversation as one of its two parties sees it.
+
+  `peer_display_name` is the counterpart's own name (#73), joined on the read
+  that produced the connection and enforced rather than optional — a
+  conversation whose heading is a uuid is what this field exists to remove, so a
+  `nil` here would be the defect wearing the fix's name.
+
+  It is the counterpart's and never the reader's, which
+  `Connection.counterpart_display_name/2` decides with the same repeated
+  variable `Connection.counterpart/2` uses.
+  """
   @type t() :: %__MODULE__{
           connection_id: Ecto.UUID.t(),
           peer_id: Ecto.UUID.t(),
+          peer_display_name: String.t(),
           connected_at: DateTime.t(),
           disconnected_at: DateTime.t() | nil,
           disconnected_by_id: Ecto.UUID.t() | nil,
@@ -55,13 +69,17 @@ defmodule HospitalityComs.Peers.Conversation do
 
   Raises `FunctionClauseError` through `Connection.counterpart/2` for a viewer
   who is not a party — every caller resolves the connection from one side, so a
-  non-party reaching here is a bug rather than an input.
+  non-party reaching here is a bug rather than an input — and through
+  `Connection.counterpart_display_name/2` for a connection read without
+  `HospitalityComs.Peers.Records.with_pair/1`, which is the same manoeuvre
+  aimed at a different mistake.
   """
   @spec of_connection(Connection.t(), Ecto.UUID.t()) :: t()
   def of_connection(%Connection{} = connection, viewer_id) when is_binary(viewer_id) do
     %__MODULE__{
       connection_id: connection.id,
       peer_id: Connection.counterpart(connection, viewer_id),
+      peer_display_name: Connection.counterpart_display_name(connection, viewer_id),
       connected_at: connection.connected_at,
       disconnected_at: connection.disconnected_at,
       disconnected_by_id: connection.disconnected_by_id,

@@ -73,6 +73,34 @@ defmodule HospitalityComs.Peers.Records do
   disclosure U9 governs. Since #66 it also joins `people` for the counterpart's
   display name, which puts it back with the rest: person zone throughout, so the
   backstop refuses it for an employer scope rather than the convention doing so.
+
+  ## Three joins to `people`, and none of them filters anything
+
+  `with_pair/1`, `with_parties/1` and `with_author/1` fill the virtual
+  `*_display_name` fields on `Connection`, `ConnectionRequest` and `PeerMessage`
+  (#73). They are `HospitalityComs.Rooms.Records.with_author/1`'s manoeuvre and
+  they carry its rule: **no activeness predicate anywhere**, and no `erased_at`
+  filter either. A connection outlives the visibility that produced it (R13), an
+  outgoing request that has lapsed is still in its requester's list, and an
+  erased counterpart already reads as
+  `HospitalityComs.Lifecycle.erased_display_name/0` because erasure overwrites
+  the column rather than removing the row.
+
+  Three names for one manoeuvre, because the three schemas name their people
+  differently and one function cannot serve all three: a connection's two are
+  **the pair** (`pair_low_id`, `pair/2`, and the canonical ordering the row's
+  identity rests on), a request's two are **the parties** to an approach and
+  neither is canonically ordered, and a message has one **author**, which is
+  U6's word unchanged.
+
+  **Which queries compose them is a decision rather than an omission.**
+  `connection_of/2` deliberately does not, because two of its callers cannot
+  take a join: `HospitalityComs.Peers.disconnect/2` composes it into an
+  `update_all`, whose `RETURNING` cannot reference a joined table, and
+  `locked_open_connection_of/2` adds `FOR SHARE`, which over a join would lock
+  the joined `people` rows too — the trade `HospitalityComs.Engagements.Records
+  .decision_set/4` already refuses by using a subquery in `where`. So the reads
+  that render a conversation compose `with_pair/1` themselves.
   """
 
   import Ecto.Query
@@ -174,6 +202,27 @@ defmodule HospitalityComs.Peers.Records do
       where: own.person_id == ^person_id,
       distinct: true,
       select: peer.person_id
+  end
+
+  @doc """
+  The people this person can see at `instant`, as an id and a display name each.
+
+  `visible_person_ids/2` with the name beside the id, which is what a picker
+  renders. One row per counterpart however many venues they share, because the
+  answer is a set of people rather than a set of stints —
+  `HospitalityComs.Peers.list_visible_peers/1` is the one that is per venue, and
+  it is per venue because it carries the venue.
+
+  No email address, for `visible_peers/2`'s reason.
+  """
+  @spec visible_people(Ecto.UUID.t(), DateTime.t()) :: Ecto.Query.t()
+  def visible_people(person_id, %DateTime{} = instant) when is_binary(person_id) do
+    from [own: own, peer: peer] in co_engagements(instant),
+      join: counterpart in Person,
+      on: counterpart.id == peer.person_id,
+      where: own.person_id == ^person_id,
+      distinct: true,
+      select: %{person_id: peer.person_id, display_name: counterpart.display_name}
   end
 
   @doc """
@@ -284,13 +333,20 @@ defmodule HospitalityComs.Peers.Records do
 
   @doc """
   Requests `person_id` sent that nothing has superseded, newest first.
+
+  Carries both parties' display names. A request that has **lapsed** — the pair
+  cannot see each other at the asking instant — is still on this list and still
+  carries them, which is what a visibility predicate on the join would take
+  away.
   """
   @spec outgoing_requests(Ecto.UUID.t()) :: Ecto.Query.t()
   def outgoing_requests(person_id) when is_binary(person_id) do
-    from request in ConnectionRequest,
+    from(request in ConnectionRequest,
       where: request.requester_id == ^person_id,
       where: is_nil(request.superseded_at),
       order_by: [desc: request.requested_at, asc: request.id]
+    )
+    |> with_parties()
   end
 
   @doc """
@@ -302,12 +358,14 @@ defmodule HospitalityComs.Peers.Records do
   """
   @spec incoming_requests(Ecto.UUID.t()) :: Ecto.Query.t()
   def incoming_requests(person_id) when is_binary(person_id) do
-    from request in ConnectionRequest,
+    from(request in ConnectionRequest,
       where: request.addressee_id == ^person_id,
       where: is_nil(request.accepted_at),
       where: is_nil(request.declined_at),
       where: is_nil(request.superseded_at),
       order_by: [desc: request.requested_at, asc: request.id]
+    )
+    |> with_parties()
   end
 
   @doc """
@@ -326,10 +384,12 @@ defmodule HospitalityComs.Peers.Records do
   """
   @spec request_of(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.Query.t()
   def request_of(person_id, request_id) when is_binary(person_id) and is_binary(request_id) do
-    from request in ConnectionRequest,
+    from(request in ConnectionRequest,
       where: request.id == ^request_id,
       where: request.requester_id == ^person_id or request.addressee_id == ^person_id,
       where: is_nil(request.superseded_at)
+    )
+    |> with_parties()
   end
 
   @doc """
@@ -345,6 +405,57 @@ defmodule HospitalityComs.Peers.Records do
   @spec request_by_id(Ecto.UUID.t()) :: Ecto.Query.t()
   def request_by_id(request_id) when is_binary(request_id) do
     from request in ConnectionRequest, where: request.id == ^request_id
+  end
+
+  @doc """
+  One request by id, carrying both parties' display names.
+
+  What `HospitalityComs.Peers.request_connection/2` and `decline_request/2` read
+  their own row back through, because neither `Ecto.Multi.insert/4` nor
+  `update_all … RETURNING` can name a joined column — the shape
+  `HospitalityComs.Rooms.naming/1` gives its two sends, so that the row a write
+  answers with is the row a list read would have produced.
+
+  Built on `request_by_id/1` rather than on `request_of/2`, and the difference
+  is a race rather than a shortcut. `request_of/2` carries
+  `superseded_at IS NULL`; a decline is one statement with no transaction around
+  it, so a counterpart's fresh approach committing between the `UPDATE` and this
+  read would make it match nothing — on a channel where a raise takes every one
+  of that person's conversations down. This predicate cannot stop matching, and
+  nothing deletes a request row: U10's erasure retains them deliberately,
+  because the row *is* KTD19's block.
+
+  It authorises nothing, exactly as `request_by_id/1` does not, and for the same
+  reason: the caller has the id because the statement in front of this one wrote
+  it.
+  """
+  @spec named_request_by_id(Ecto.UUID.t()) :: Ecto.Query.t()
+  def named_request_by_id(request_id) when is_binary(request_id) do
+    request_id |> request_by_id() |> with_parties()
+  end
+
+  @doc """
+  A request's two parties, by display name.
+
+  `requester_display_name` and `addressee_display_name`, both virtual, filled by
+  an inner join to `people` on each of the row's two person columns. **No
+  activeness predicate and no `erased_at` filter** — see the moduledoc.
+
+  Not composed into `answerable/2`, which every write goes through: that query
+  is the `WHERE` of an `UPDATE … RETURNING`, and RETURNING cannot reference a
+  joined table.
+  """
+  @spec with_parties(Ecto.Queryable.t()) :: Ecto.Query.t()
+  def with_parties(queryable) do
+    from request in queryable,
+      join: requester in Person,
+      on: requester.id == request.requester_id,
+      join: addressee in Person,
+      on: addressee.id == request.addressee_id,
+      select_merge: %{
+        requester_display_name: requester.display_name,
+        addressee_display_name: addressee.display_name
+      }
   end
 
   @doc """
@@ -370,8 +481,57 @@ defmodule HospitalityComs.Peers.Records do
   """
   @spec connections_of(Ecto.UUID.t()) :: Ecto.Query.t()
   def connections_of(person_id) when is_binary(person_id) do
-    from connection in party_to(Connection, person_id),
+    from(connection in party_to(Connection, person_id),
       order_by: [desc: connection.connected_at, asc: connection.id]
+    )
+    |> with_pair()
+  end
+
+  @doc """
+  One connection this person is a party to, by id, carrying the pair's names.
+
+  `connection_of/2` plus `with_pair/1`, which is a separate function rather than
+  a line added to `connection_of/2` because two of that query's callers cannot
+  take a join — see the moduledoc. What
+  `HospitalityComs.Peers.fetch_conversation/2` resolves through, and what
+  `accept_request/2` and `disconnect/2` read their own row back through.
+  """
+  @spec named_connection_of(Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.Query.t()
+  def named_connection_of(person_id, connection_id)
+      when is_binary(person_id) and is_binary(connection_id) do
+    person_id |> connection_of(connection_id) |> with_pair()
+  end
+
+  @doc """
+  The pair's two display names, merged onto the connection.
+
+  `person_a_display_name` and `person_b_display_name`, both virtual, filled by
+  an inner join to `people` on each of the row's two person columns.
+  `HospitalityComs.Peers.Connection.counterpart_display_name/2` is what picks
+  the reader's counterpart out of them.
+
+  **No activeness predicate and no `erased_at` filter**, which here is R13
+  rather than a copy of `HospitalityComs.Rooms.Records.with_author/1`'s
+  reasoning: a connection is permanent, so a name that lapsed with the
+  co-rostering that produced it would blank the heading of a conversation two
+  people are still having.
+
+  Not composed into `connection_of/2`, `locked_open_connection_of/2` or
+  `live_connections_of/1` — the first two are `UPDATE`/`FOR SHARE` statements
+  under the hood and the third is composed into an `update_all`. See the
+  moduledoc.
+  """
+  @spec with_pair(Ecto.Queryable.t()) :: Ecto.Query.t()
+  def with_pair(queryable) do
+    from connection in queryable,
+      join: person_a in Person,
+      on: person_a.id == connection.person_a_id,
+      join: person_b in Person,
+      on: person_b.id == connection.person_b_id,
+      select_merge: %{
+        person_a_display_name: person_a.display_name,
+        person_b_display_name: person_b.display_name
+      }
   end
 
   @doc """
@@ -480,16 +640,50 @@ defmodule HospitalityComs.Peers.Records do
   ## Messages
 
   @doc """
-  A conversation's messages, oldest first.
+  A conversation's messages, oldest first, each carrying its author's name.
 
   Unfiltered by instant: a peer conversation has no window and no grace, and it
   stays readable after it closes.
   """
   @spec messages_of(Ecto.UUID.t()) :: Ecto.Query.t()
   def messages_of(connection_id) when is_binary(connection_id) do
-    from message in PeerMessage,
+    from(message in PeerMessage,
       where: message.connection_id == ^connection_id,
       order_by: [asc: message.sent_at, asc: message.id]
+    )
+    |> with_author()
+  end
+
+  @doc """
+  One message by id, carrying its author's name.
+
+  What `HospitalityComs.Peers.send_message/3` reads the row it just inserted back
+  through, so that the send reply, a history entry and the live push are one
+  shape produced by one query.
+  `HospitalityComs.Rooms.Records.message/1` is the same function one context
+  over, and it is deliberately not filtered by conversation for the same reason:
+  the id comes from an insert two steps earlier in the same transaction, so
+  there is nothing a caller could have chosen.
+  """
+  @spec named_message(Ecto.UUID.t()) :: Ecto.Query.t()
+  def named_message(message_id) when is_binary(message_id) do
+    from(message in PeerMessage, where: message.id == ^message_id) |> with_author()
+  end
+
+  @doc """
+  The author's display name, merged onto a message.
+
+  `HospitalityComs.Rooms.Records.with_author/1` one context over, one join
+  shorter — a peer message names its author directly, where a room message
+  reaches `people` through the engagement (KTD15b). **No activeness predicate
+  and no `erased_at` filter**; see the moduledoc.
+  """
+  @spec with_author(Ecto.Queryable.t()) :: Ecto.Query.t()
+  def with_author(queryable) do
+    from message in queryable,
+      join: author in Person,
+      on: author.id == message.author_id,
+      select_merge: %{author_display_name: author.display_name}
   end
 
   @doc """
