@@ -91,11 +91,10 @@ Then open <http://localhost:5173>, enter an address, and read the link at
 <http://localhost:4000/dev/mailbox>. In development that mailbox is the only
 place a magic link exists — nothing renders one, and no mail leaves the machine.
 
-The link points at `http://localhost:4000/log-in/<token>`, which is Phoenix and
-serves no page, so **paste the whole link into the box under the form**. It
-takes the link or the bare token. If you set `MAGIC_LINK_BASE_URL` to
-`http://localhost:5173/log-in/` the link becomes clickable and lands on
-`/log-in/:linkToken`, which redeems it on arrival.
+The link points at `http://localhost:5173/log-in/<token>` — this client — so
+**follow it**. It lands on `/log-in/:linkToken` and redeems on arrival. The box
+under the form is still there and still takes the link or the bare token, for a
+link mailed by a server whose `MAGIC_LINK_BASE_URL` points somewhere else.
 
 To reach a room you need its id, because nothing serves a list of them — see
 "The rooms" below. `mix run` against the dev database is the way to get one:
@@ -1169,11 +1168,14 @@ are the plan's U3 on the server and U5 here.
 
 Recorded so the next unit knows they are open questions and not settled:
 
-- **The magic link's landing origin.** `config/config.exs` defaults
+- ~~**The magic link's landing origin.**~~ **Settled in #46**, and left here
+  because the reasoning outlived the question. `config/config.exs` defaulted
   `MAGIC_LINK_BASE_URL` to `http://localhost:4000/log-in/`, which is Phoenix and
-  not this client. `/log-in/:linkToken` matches that path shape so the link works
-  if the base URL is pointed here, and the paste box works if it is not. Changing
-  the default is a backend decision.
+  serves no page, so every link had to be pasted rather than followed — a
+  backend default that made this client's front door look broken. It is
+  `http://localhost:5173/log-in/` now. The paste box stays, because a server
+  configured to mail links somewhere else is still a server this client can be
+  logged into.
 - **Whether an employer session is a different client.** KTD9 splits the sockets
   so an employer session cannot be routed to a peer conversation. Whether that
   implies a separate surface, a separate route tree, or a separate build is a
