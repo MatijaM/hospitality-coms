@@ -81,9 +81,16 @@ export function ConversationView({
     void loadHistory(connectionId, open);
   }, [loadHistory, connectionId, open, joinGeneration]);
 
+  // Named once and used for the heading and the region's accessible name, so
+  // the two cannot come to say different things. The short id stays beside the
+  // name for the reason it stays everywhere on this surface: collisions are
+  // deliberate, and an erased counterpart reads "Former colleague", which every
+  // erased counterpart reads.
+  const counterpart = `${conversation.peerDisplayName} · ${shortId(conversation.peerId)}`;
+
   return (
-    <section aria-label={`Conversation with ${shortId(conversation.peerId)}`}>
-      <h2>Conversation with {shortId(conversation.peerId)}</h2>
+    <section aria-label={`Conversation with ${counterpart}`}>
+      <h2>Conversation with {counterpart}</h2>
       <p>
         Connected{" "}
         <time dateTime={conversation.connectedAt}>{conversation.connectedAt}</time>.{" "}
@@ -108,8 +115,15 @@ export function ConversationView({
       <ul aria-label="Conversation messages">
         {messages.map((message) => (
           <li key={message.messageId}>
+            {/*
+              The server sends this person's own name like anybody else's — the
+              join does not know who is asking — so "You" is a choice made here
+              rather than an absence inherited from the wire.
+            */}
             <strong>
-              {message.authorId === ownPersonId ? "You" : shortId(message.authorId)}
+              {message.authorId === ownPersonId
+                ? "You"
+                : `${message.authorDisplayName} · ${shortId(message.authorId)}`}
             </strong>{" "}
             <span>{message.body}</span>{" "}
             <time dateTime={message.sentAt}>{message.sentAt}</time>

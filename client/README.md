@@ -648,6 +648,36 @@ see, the request state machine as a user meets it, 1:1 conversations with
 history, and the disconnect. Four behaviours are the point of it, and each has
 an assertion that fails when it regresses.
 
+### Everybody here is named, and the short id beside the name is not decoration
+
+Until #73 exactly one list on this surface — the visible peers, from #66 — had a
+name. The other five places it names a human rendered eight hex characters with
+nothing else: the incoming request and both its answer buttons, the outgoing
+request, the conversation list, the conversation heading, and the message
+author. #76 put `peer_display_name`, `requester_display_name`,
+`addressee_display_name` and `author_display_name` on the wire; all six render
+`name · shortId` now.
+
+**The id stays.** Display-name collisions are deliberate — a globally unique
+readable name would be a second `person_id` in plain text, readable by every
+worker rather than by somebody holding a database connection — so the id is the
+only one of the two that tells two people apart. It is on the **buttons** as
+well as the headings, which is a departure from the visible-peer list's
+"Open conversation with `<name>`": two outstanding requests from two people who
+drew the same character would otherwise give a screen-reader user two buttons
+with one accessible name. `peers.test.tsx` carries a fixture of exactly that
+pair, and it is the only place the id in a button is load-bearing.
+
+The decoders **require** every name rather than falling back. None of the three
+joins carries an activeness predicate or an `erased_at` filter, so there is no
+message, request or conversation the server can produce without one — an erased
+counterpart reads `Lifecycle.erased_display_name/0`, which this client has no
+case for and must not grow one. A fallback here could only ever mask a server
+that had drifted, which is #66's client half: it sent `{displayName}` to a
+server reading `display_name` and killed nothing, because every surface test
+fakes the transport. The wire keys are asserted in `decode.test.ts` against
+literals for that reason, and nowhere else.
+
 ### One topic, and the case of the id is load-bearing
 
 The topic is **`peer:<person_id>`** and the suffix is the session's own person —
@@ -844,9 +874,16 @@ It read one peer's record at a time until #73, which took that section off the
 screen. The way in was a text box for a person's uuid — the one thing about a
 peer a worker cannot look up anywhere in this client — so the control asked for
 its own answer as input. `loadPeerProfile` is untouched and the `peer_profile`
-event is unchanged; what is missing is a **picker**, which needs a list of the
-people a worker may read, and that is the same gap the disclosure audience has.
-The section comes back with the list, and the rule below comes back with it.
+event is unchanged; what was missing is a **picker**, which needs a list of the
+people a worker may read, and that was the same gap the disclosure audience had.
+
+**#76 closed the gap and the disclosure audience took it up; this section has
+not.** `list_audiences` answers `people` as `Peers.list_reachable_peers/1` —
+visible **or** connected, exactly the pair `fetch_peer_profile/2` gates on — so
+the list this section needs is on `surface.audiences.people` and nothing has to
+be built to get it. Reviving the section is a decision about what the profile
+screen is for rather than a missing dependency, and the rule below comes back
+with it.
 
 ### It is built against a transport that does not exist, and that was a choice
 
@@ -931,12 +968,29 @@ worker's jobs overlapped, so the reassuring version tells somebody their second
 job is disclosed to the venue it is in fact concealed from — and the decision
 they then do not bother taking is the one the unit exists to give them.
 
-**There is no audience picker, because nothing enumerates an audience.**
-`VisibleEntry.venue_id` is the venue that _asserted_ the entry, not one that
-might read it, and no event lists the venues a worker holds an engagement at or
-the peers who can see them. So an audience is typed in as a raw id — poor, and
-better than the only picker this surface could actually build, which would offer
-the attesting venue: the one audience an entry is never hidden from.
+**The audience is picked from a list, and until #73 it was typed as a raw id.**
+Nothing enumerated an audience: `VisibleEntry.venue_id` is the venue that
+_asserted_ the entry rather than one that might read it, and no event listed the
+venues a worker holds an engagement at or the peers who can see them. The only
+picker this surface could have built would have offered the attesting venue —
+the one audience an entry is never hidden from, and so the one the control is
+useless for.
+
+#76 added `list_audiences`, which answers both halves at one instant: engagements
+**active now**, and people visible **or connected now**. The kind selector went
+with the text box, because the kind is not a choice a worker makes — it is a fact
+about whichever row they picked, and offering it separately invited the one pair
+the server refuses outright. The tagged union survives the DOM as a `<kind>:<id>`
+option value with one writer and one reader, which is the wire's own argument
+applied a layer up: the split done twice is the defect.
+
+**Two things about that list are answers about _now_, and the ledger is for
+ever.** `audiences` is therefore `Audiences | null`, `null` meaning _not
+answered_ — initialised to a pair of empty lists, the surface would tell a
+worker there is nobody they can name for as long as one round trip takes, which
+is #68's venue link again. And a decision already taken can name an audience on
+neither list; that row renders its short id and a sentence saying the decision
+still applies, never an empty name beside a dangling separator.
 
 **The employer read is not here at all.** `list_visible_entries/2`,
 `list_visible_corrections/2`, `list_venue_corrections/1` and
@@ -1061,8 +1115,19 @@ takes it off the screen, which is why `SessionBar` is on this page at all.
 ### Nothing on the employer page names a human
 
 `GET /api/employer/venues/:venue_id/engagements` renders `{engagement_id,
-role_label, starts_at, ends_at}` and there is no name column anywhere in the
-schema to omit. The client carries the fourth pin on that (the server has three):
+role_label, starts_at, ends_at}`.
+
+**It said "there is no name column anywhere in the schema to omit" and that
+stopped being true at #66**, which added `people.display_name`. The claim it was
+making still holds, and by a stronger mechanism than an absent column: `people`
+is person zone, `employer_role` holds no privilege on it, and `boundary_test.exs`
+asserts that at table _and_ column level. An employer session cannot read a
+worker's name — that is KTD2 working, not a rendering choice — so a display name
+appearing anywhere under `features/employer/` would be a zone-boundary violation
+rather than a feature. #73 put names on five person-facing surfaces and none of
+them is here.
+
+The client carries the fourth pin on that (the server has three):
 every decoder builds its object naming fields one at a time — never a spread —
 so a `person_id` that reaches this client reaches nothing past the decoder.
 `features/employer/decode.test.ts` pins the key set against a literal written

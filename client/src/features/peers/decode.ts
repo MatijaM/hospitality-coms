@@ -103,8 +103,22 @@ export function decodePeers(payload: unknown): readonly Peer[] | null {
 }
 
 /**
- * `%{request_id:, requester_id:, addressee_id:, state:, requested_at:,
- * accepted_at:, declined_at:}` — `rendered_request/1`.
+ * `%{request_id:, requester_id:, requester_display_name:, addressee_id:,
+ * addressee_display_name:, state:, requested_at:, accepted_at:, declined_at:}`
+ * — `rendered_request/1`.
+ *
+ * **Both names are required and neither is nullable** (#73). The render heads
+ * on `is_binary/1` for both, so a read path that forgot the join crashes on the
+ * server rather than putting a `null` on the wire — which means a missing name
+ * here is a server that has drifted, and a fallback would only hide it. There
+ * is no state it would serve: `Records.with_parties/1` carries no activeness
+ * predicate and no `erased_at` filter, so a lapsed request and one from an
+ * erased person both arrive with a string, the second being
+ * `Lifecycle.erased_display_name/0`.
+ *
+ * The two are kept apart rather than collapsed into a counterpart, because the
+ * server cannot collapse them: that function serves four call sites and takes
+ * no viewer. Which one a surface renders is this client's choice per list.
  *
  * `state` is an `Ecto.Enum` atom on the Elixir side and a string on the wire.
  * It is narrowed against `REQUEST_STATES` rather than taken as any string,
@@ -117,7 +131,9 @@ export function decodePeerRequest(payload: unknown): PeerRequest | null {
   if (!isRecord(payload)) return null;
   if (typeof payload.request_id !== "string") return null;
   if (typeof payload.requester_id !== "string") return null;
+  if (typeof payload.requester_display_name !== "string") return null;
   if (typeof payload.addressee_id !== "string") return null;
+  if (typeof payload.addressee_display_name !== "string") return null;
   if (typeof payload.requested_at !== "string") return null;
 
   const state: RequestState | undefined = REQUEST_STATES.find(
@@ -134,7 +150,9 @@ export function decodePeerRequest(payload: unknown): PeerRequest | null {
   return {
     requestId: payload.request_id,
     requesterId: payload.requester_id,
+    requesterDisplayName: payload.requester_display_name,
     addresseeId: payload.addressee_id,
+    addresseeDisplayName: payload.addressee_display_name,
     state,
     requestedAt: payload.requested_at,
     acceptedAt,
@@ -167,8 +185,13 @@ export function decodePeerRequests(payload: unknown): {
 }
 
 /**
- * `%{connection_id:, peer_id:, connected_at:, disconnected_at:,
- * disconnected_by_id:, open:}` — `rendered_conversation/1`.
+ * `%{connection_id:, peer_id:, peer_display_name:, connected_at:,
+ * disconnected_at:, disconnected_by_id:, open:}` — `rendered_conversation/1`.
+ *
+ * `peer_display_name` is required (#73). A conversation always has one to
+ * carry: the join has no activeness predicate and no `erased_at` filter, so a
+ * closed conversation, one whose counterpart left the trade, and one whose
+ * counterpart was erased all arrive with a string.
  *
  * Also the reply to `"accept"` and to `"disconnect"`, both of which go through
  * `rendered_connection/2` and land on the same shape. So an acceptance answers
@@ -179,6 +202,7 @@ export function decodeConversation(payload: unknown): Conversation | null {
   if (!isRecord(payload)) return null;
   if (typeof payload.connection_id !== "string") return null;
   if (typeof payload.peer_id !== "string") return null;
+  if (typeof payload.peer_display_name !== "string") return null;
   if (typeof payload.connected_at !== "string") return null;
   if (typeof payload.open !== "boolean") return null;
 
@@ -191,6 +215,7 @@ export function decodeConversation(payload: unknown): Conversation | null {
   return {
     connectionId: payload.connection_id,
     peerId: payload.peer_id,
+    peerDisplayName: payload.peer_display_name,
     connectedAt: payload.connected_at,
     disconnectedAt,
     disconnectedById,
@@ -206,19 +231,27 @@ export function decodeConversations(payload: unknown): readonly Conversation[] |
 }
 
 /**
- * `%{message_id:, connection_id:, author_id:, body:, sent_at:}` — the reply to
- * `"send"`, every entry of `"history"`, and the `"peer_message"` push.
+ * `%{message_id:, connection_id:, author_id:, author_display_name:, body:,
+ * sent_at:}` — the reply to `"send"`, every entry of `"history"`, and the
+ * `"peer_message"` push.
  *
  * **One decoder for all three, and it took a server change to earn that.** The
  * push used to say `at`; see this file's header and issue #31. `sent_at` is
  * still required rather than accepted alongside `at`, because accepting either
  * is how one entity keeps two key names for ever.
+ *
+ * `author_display_name` is #73's, spelled exactly as `decodeRoomMessage`
+ * spells it — a message's author is one entity whichever room or conversation
+ * carried the words. It is required on all three paths because
+ * `peer_channel_test.exs` pins the push's key set against the reply's, so it
+ * reaches all three or none.
  */
 export function decodePeerMessage(payload: unknown): PeerMessage | null {
   if (!isRecord(payload)) return null;
   if (typeof payload.message_id !== "string") return null;
   if (typeof payload.connection_id !== "string") return null;
   if (typeof payload.author_id !== "string") return null;
+  if (typeof payload.author_display_name !== "string") return null;
   if (typeof payload.body !== "string") return null;
   if (typeof payload.sent_at !== "string") return null;
 
@@ -226,6 +259,7 @@ export function decodePeerMessage(payload: unknown): PeerMessage | null {
     messageId: payload.message_id,
     connectionId: payload.connection_id,
     authorId: payload.author_id,
+    authorDisplayName: payload.author_display_name,
     body: payload.body,
     sentAt: payload.sent_at,
   };

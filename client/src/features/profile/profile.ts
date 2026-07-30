@@ -146,6 +146,74 @@ export type AudienceKind = "venue" | "person";
 export const AUDIENCE_KINDS: readonly AudienceKind[] = ["venue", "person"];
 
 /**
+ * A venue the worker could name as an audience.
+ *
+ * `name`, not `venueName`: a venue listed **as itself** is spelled that way
+ * everywhere in this API — `EmployerController.render_venue/1` and
+ * `RoomController.render_venue_room/1` both do — while `venueName` is what a
+ * venue named *inside another entity* is called, as on `AttestedEntry`.
+ */
+export type AudienceVenue = {
+  readonly venueId: string;
+  readonly name: string;
+};
+
+/** A person the worker could name as an audience. `rendered_peer/1`'s pair. */
+export type AudiencePerson = {
+  readonly personId: string;
+  readonly displayName: string;
+};
+
+/**
+ * Everybody a disclosure decision can be about, answered at one instant.
+ *
+ * `ProfileChannel`'s `list_audiences`, added by #73 — the eighth event and the
+ * only one that does not call `HospitalityComs.Profiles`, because *where do you
+ * work* is `Engagements` and *who can see you* is `Peers`.
+ *
+ * **One event rather than two**, so both halves are answered at one instant:
+ * neither is stored and both are derived, so a picker showing a venue from
+ * 10:00 beside a peer from 10:05 would be two answers to one question.
+ *
+ * Neither list is permanent, and that is what
+ * `client/src/features/profile/profile-route.tsx` has to render around. The
+ * venues are engagements **active at the instant** and the people are visible
+ * **or connected now**, while the ledger is for ever — so a decision the worker
+ * took last year can name an audience that is on neither list.
+ */
+export type Audiences = {
+  readonly venues: readonly AudienceVenue[];
+  readonly people: readonly AudiencePerson[];
+};
+
+/**
+ * What to call one audience, or `null` when it is not one that can be named.
+ *
+ * `null` is a state the surface must render *as* something rather than
+ * interpolate: a decision about a venue the worker has left is still in force,
+ * and `${name ?? ""} · ${shortId(id)}` puts a dangling separator on screen that
+ * reads as a fault instead of a fact. See `EntryAudiences`.
+ */
+export function audienceName(
+  audiences: Audiences | null,
+  kind: AudienceKind,
+  audienceId: string,
+): string | null {
+  if (audiences === null) return null;
+
+  if (kind === "venue") {
+    return audiences.venues.find((one) => one.venueId === audienceId)?.name ?? null;
+  }
+
+  return audiences.people.find((one) => one.personId === audienceId)?.displayName ?? null;
+}
+
+/** Whether there is anybody at all to name. Distinct from "not answered yet". */
+export function noAudiences(audiences: Audiences): boolean {
+  return audiences.venues.length === 0 && audiences.people.length === 0;
+}
+
+/**
  * One decision the worker has taken about one entry and one audience.
  *
  * `engagementId` is the entry's `entryEngagementId`: an attested entry is an
@@ -283,7 +351,13 @@ export function resolutionMessage(resolution: Resolution | null): string {
 }
 
 /**
- * How long an id is shown for. Never a name: there is no name on the wire.
+ * How long an id is shown for.
+ *
+ * It said "never a name: there is no name on the wire" until #73 added
+ * `list_audiences`, which is the first thing on this surface that can turn an
+ * audience id into words. The id stays **beside** the name rather than being
+ * replaced by it, for `peer.ts`'s reason — collisions are deliberate — and
+ * because it is all there is for an audience the worker can no longer name.
  *
  * Hoisted to `src/app/short-id.ts` on its third caller, with `peer.ts`'s
  * identical copy — see there. Re-exported so no profile call site moved.

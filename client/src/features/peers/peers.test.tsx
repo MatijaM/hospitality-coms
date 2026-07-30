@@ -65,12 +65,29 @@ function peerWire(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * The two people in these fixtures, by the names #73 put on the wire.
+ *
+ * `OWN_NAME` is never rendered anywhere on this surface — a message this person
+ * wrote says "You" — so it is here to be asserted **absent**, which is what
+ * makes the author render's own-message branch observable.
+ */
+const PEER_NAME = "Captain Nemo";
+const OWN_NAME = "Doctor Watson";
+
 /** `rendered_request/1`, as this person's own outgoing approach. */
 function requestWire(overrides: Record<string, unknown> = {}) {
   return {
     request_id: REQUEST_ID,
     requester_id: PERSON_ID,
+    // Both names, beside both ids: `rendered_request/1` serves four call sites
+    // and takes no viewer, so it cannot send one viewer-relative counterpart.
+    // The two literals are deliberately unequal in every fixture built from
+    // this one, because a reader that took the wrong side would otherwise be
+    // invisible — the surface renders exactly one of the two per row.
+    requester_display_name: OWN_NAME,
     addressee_id: PEER_ID,
+    addressee_display_name: PEER_NAME,
     state: "pending",
     requested_at: "2026-07-28T09:00:00Z",
     accepted_at: null,
@@ -81,7 +98,13 @@ function requestWire(overrides: Record<string, unknown> = {}) {
 
 /** The same shape addressed the other way, which is what an incoming list holds. */
 function incomingWire(overrides: Record<string, unknown> = {}) {
-  return requestWire({ requester_id: PEER_ID, addressee_id: PERSON_ID, ...overrides });
+  return requestWire({
+    requester_id: PEER_ID,
+    requester_display_name: PEER_NAME,
+    addressee_id: PERSON_ID,
+    addressee_display_name: OWN_NAME,
+    ...overrides,
+  });
 }
 
 /** `rendered_conversation/1`, which is also the `accept` and `disconnect` reply. */
@@ -89,6 +112,7 @@ function conversationWire(overrides: Record<string, unknown> = {}) {
   return {
     connection_id: CONNECTION_ID,
     peer_id: PEER_ID,
+    peer_display_name: PEER_NAME,
     connected_at: "2026-07-28T09:05:00Z",
     disconnected_at: null,
     disconnected_by_id: null,
@@ -103,6 +127,7 @@ function messageWire(overrides: Record<string, unknown> = {}) {
     message_id: "55555555-5555-4555-8555-555555555555",
     connection_id: CONNECTION_ID,
     author_id: PEER_ID,
+    author_display_name: PEER_NAME,
     body: "are you on tonight?",
     sent_at: "2026-07-28T09:10:00Z",
     ...overrides,
@@ -114,6 +139,12 @@ function mineWire(overrides: Record<string, unknown> = {}) {
   return messageWire({
     message_id: "55555555-5555-4555-8555-000000000011",
     author_id: PERSON_ID,
+    // The server sends this person's own name like anybody else's — the join
+    // does not know who is asking. The surface renders "You" instead, and this
+    // string being on the wire is what lets that be asserted rather than
+    // assumed: without it, "the author's own name is absent" would pass because
+    // there was never a name to render.
+    author_display_name: OWN_NAME,
     body: "mine, from before",
     sent_at: "2026-07-28T09:11:00Z",
     ...overrides,
@@ -304,7 +335,12 @@ async function openConversation(
 ): Promise<void> {
   await userEvent.click(
     await screen.findByRole("button", {
-      name: new RegExp(`open conversation ${peerId.slice(0, 8)}`, "i"),
+      // The button reads `Open conversation <name> · <short id>` since #73, so
+      // the name sits between the two halves this helper used to match on. It
+      // is matched loosely here and pinned exactly one describe block below:
+      // a helper asserting the render would make every test that uses it a
+      // second, silent copy of that assertion.
+      name: new RegExp(`open conversation .*${peerId.slice(0, 8)}`, "i"),
     }),
   );
 
@@ -412,6 +448,170 @@ describe("the topic the peer surface is joined on", () => {
   });
 });
 
+describe("every person on this surface is named and not only numbered", () => {
+  // #73. `list_visible_peers/1` carried a name from #66 and nothing else did,
+  // so five of the six places this surface names a human rendered eight hex
+  // characters with no name at all — which is worse than the chat, where the
+  // name was at least there. #76 put `peer_display_name`,
+  // `requester_display_name`, `addressee_display_name` and
+  // `author_display_name` on the wire; these are the renders that read them.
+  //
+  // **The short id stays beside every one.** Collisions are deliberate — a
+  // globally unique readable name would be a second `person_id` in plain text
+  // — so the id is the only one of the two that tells two people apart. The
+  // colliding-names test below is what makes that a measurement here rather
+  // than a sentence in `CLAUDE.md`.
+
+  it("names the requester in the heading and in both answers", async () => {
+    await openPeers({ incoming: [incomingWire()] });
+
+    const row = within(await screen.findByRole("list", { name: /requests to you/i }));
+    const short = PEER_ID.slice(0, 8);
+
+    expect(row.getByText(`${PEER_NAME} · ${short}`)).toBeInTheDocument();
+    expect(
+      row.getByRole("button", { name: `Accept ${PEER_NAME} · ${short}` }),
+    ).toBeInTheDocument();
+    expect(
+      row.getByRole("button", { name: `Decline ${PEER_NAME} · ${short}` }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the two answer buttons apart when two requesters share a name", async () => {
+    // The control on the short id in a *button*, and the reason it is on the
+    // buttons at all rather than only in the heading. Two people may draw the
+    // same character, and two buttons with one accessible name are a
+    // screen-reader user choosing between two identical options.
+    //
+    // **Asserted as an inequality rather than against the two expected
+    // strings**, which is the difference between this test and the one above.
+    // Written the other way it failed when the *format* changed and passed
+    // whenever two buttons were indistinguishable in some other format —
+    // measured: dropping the short id made it fail "could not find `Accept
+    // Captain Nemo · c3c3c3c3`", which is the wrong reason and would have been
+    // satisfied by any renaming. The property is that the two differ.
+    await openPeers({
+      incoming: [
+        incomingWire(),
+        incomingWire({
+          request_id: "22222222-2222-4222-8222-000000000002",
+          requester_id: OTHER_PEER_ID,
+          // The same name, deliberately. A fixture with two different names
+          // is invariant under the mutation this test exists to catch.
+          requester_display_name: PEER_NAME,
+        }),
+      ],
+    });
+
+    const row = within(await screen.findByRole("list", { name: /requests to you/i }));
+
+    // The control: two rows rendered, and both name the shared character. An
+    // inequality over an empty list is vacuous.
+    const accepts = row.getAllByRole("button", { name: /^accept/i });
+    expect(accepts).toHaveLength(2);
+    for (const button of accepts) {
+      expect(button).toHaveAccessibleName(new RegExp(PEER_NAME));
+    }
+
+    const [first, second] = accepts.map((button) => button.textContent);
+    expect(first).not.toEqual(second);
+  });
+
+  it("names the addressee on an outgoing request, which is the side the reader is not", async () => {
+    await openPeers({ outgoing: [requestWire()] });
+
+    const row = within(await screen.findByRole("list", { name: /requests you sent/i }));
+
+    // The control: the row rendered and carries what it always carried. An
+    // absence assertion below passes against a list that rendered nothing.
+    expect(row.getByText(`${PEER_NAME} · ${PEER_ID.slice(0, 8)}`)).toBeInTheDocument();
+    expect(row.getByText("Pending")).toBeInTheDocument();
+
+    // `rendered_request/1` sends both names because it takes no viewer. Which
+    // of the two a row shows is this client's choice, and showing the
+    // requester here would name the reader to themselves.
+    expect(row.queryByText(new RegExp(OWN_NAME))).toBeNull();
+  });
+
+  it("names the counterpart in the conversation list", async () => {
+    await openPeers({ conversations: [conversationWire()] });
+
+    expect(
+      await screen.findByRole("button", {
+        name: `Open conversation ${PEER_NAME} · ${PEER_ID.slice(0, 8)}`,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("names the counterpart in the conversation heading", async () => {
+    const { channel } = await openPeers({ conversations: [conversationWire()] });
+    await openConversation(channel, PEER_ID);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: `Conversation with ${PEER_NAME} · ${PEER_ID.slice(0, 8)}`,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("names the author of everybody else's messages and says `You` for its own", async () => {
+    const { channel } = await openPeers({ conversations: [conversationWire()] });
+    await openConversation(channel, PEER_ID, [mineWire(), messageWire()]);
+
+    const list = within(
+      await screen.findByRole("list", { name: /conversation messages/i }),
+    );
+
+    // The control: both messages are on screen. Asserting the reader's own
+    // name is absent passes against an empty history.
+    expect(list.getByText("are you on tonight?")).toBeInTheDocument();
+    expect(list.getByText("mine, from before")).toBeInTheDocument();
+
+    expect(list.getByText(`${PEER_NAME} · ${PEER_ID.slice(0, 8)}`)).toBeInTheDocument();
+    expect(list.getByText("You")).toBeInTheDocument();
+
+    // `mineWire` carries this person's own name on the wire — the join does
+    // not know who is asking — so "You" is a choice this render makes and not
+    // an absence it inherits.
+    expect(list.queryByText(new RegExp(OWN_NAME))).toBeNull();
+    expect(list.queryByText(new RegExp(PERSON_ID.slice(0, 8)))).toBeNull();
+  });
+
+  it("renders an erased counterpart's constant verbatim, having no case for it", async () => {
+    // A control rather than coverage, and it is recorded as one in the brief.
+    // `Lifecycle.erase_person/1` overwrites `display_name` with
+    // `erased_display_name/0` in the statement that nulls the address, and
+    // none of the three joins filters `erased_at` — so the constant arrives as
+    // an ordinary string. This passes trivially against a correct client and
+    // fails against one that grew a branch for it, or a decoder that treated
+    // the constant as an absence. A second spelling of that string on this
+    // side is the thing being refused.
+    //
+    // **It asserts the list *and* the heading**, which is a correction found by
+    // mutating rather than by reading: written against the list alone, a
+    // special case planted in `conversation-view.tsx` killed 0. The heading is
+    // where such a branch would most plausibly go — it is the one render that
+    // names the counterpart on their own and reads oddest with a constant.
+    const { channel } = await openPeers({
+      conversations: [conversationWire({ peer_display_name: "Former colleague" })],
+    });
+
+    expect(
+      await screen.findByRole("button", {
+        name: `Open conversation Former colleague · ${PEER_ID.slice(0, 8)}`,
+      }),
+    ).toBeInTheDocument();
+
+    await openConversation(channel, PEER_ID);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: `Conversation with Former colleague · ${PEER_ID.slice(0, 8)}`,
+      }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("a pending outbound request renders as pending until answered", () => {
   it("asks, shows pending, and only stops when the server says otherwise", async () => {
     // Issue #12's first scenario, end to end.
@@ -484,7 +684,7 @@ describe("a pending outbound request renders as pending until answered", () => {
     expect(
       within(screen.getByRole("list", { name: /your conversations/i })).getByRole(
         "button",
-        { name: /open conversation c3c3c3c3/i },
+        { name: /open conversation .*c3c3c3c3/i },
       ),
     ).toBeInTheDocument();
   });
@@ -524,7 +724,7 @@ describe("a pending outbound request renders as pending until answered", () => {
     ).toBeNull();
 
     // The answer is still one click away, which is the point of saying where.
-    expect(screen.getByRole("button", { name: /accept c3c3c3c3/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /accept .*c3c3c3c3/i })).toBeEnabled();
   });
 });
 
@@ -537,7 +737,7 @@ describe("two workers exchanging peer messages see them in order", () => {
     const { channel } = await openPeers({ conversations: [conversationWire()] });
 
     await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /open conversation .*c3c3c3c3/i }),
     );
 
     expect(pushesOf(channel, "history")).toEqual([
@@ -594,8 +794,10 @@ describe("two workers exchanging peer messages see them in order", () => {
     expect(bodies[3]).toContain("see you there");
 
     // Attribution is the person here — the peer graph is person zone and the
-    // counterpart's id is already in the peer list. There is still no name.
-    expect(bodies[1]).toMatch(/^c3c3c3c3/);
+    // counterpart's id is already in the peer list. Since #73 the name leads
+    // and the shortened id follows it, which is the ordering every render on
+    // this surface uses; the full id is still never on screen.
+    expect(bodies[1]).toMatch(new RegExp(`^${PEER_NAME} · c3c3c3c3`));
     expect(bodies[1]).not.toContain(PEER_ID);
     expect(bodies[2]).toMatch(/^You/);
   });
@@ -1025,7 +1227,7 @@ describe("answering a request", () => {
     const { channel, server } = await openPeers({ incoming: [incomingWire()] });
 
     await userEvent.click(
-      await screen.findByRole("button", { name: /accept c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /accept .*c3c3c3c3/i }),
     );
 
     expect(pushesOf(channel, "accept")).toEqual([
@@ -1040,7 +1242,7 @@ describe("answering a request", () => {
     });
 
     expect(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /open conversation .*c3c3c3c3/i }),
     ).toBeInTheDocument();
     expect(screen.getByText(/nobody has asked you to connect/i)).toBeInTheDocument();
   });
@@ -1053,14 +1255,14 @@ describe("answering a request", () => {
     const { channel } = await openPeers({ incoming: [incomingWire()] });
 
     await userEvent.click(
-      await screen.findByRole("button", { name: /accept c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /accept .*c3c3c3c3/i }),
     );
 
-    expect(screen.getByRole("button", { name: /accept c3c3c3c3/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /decline c3c3c3c3/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /accept .*c3c3c3c3/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /decline .*c3c3c3c3/i })).toBeDisabled();
 
-    await userEvent.click(screen.getByRole("button", { name: /accept c3c3c3c3/i }));
-    await userEvent.click(screen.getByRole("button", { name: /decline c3c3c3c3/i }));
+    await userEvent.click(screen.getByRole("button", { name: /accept .*c3c3c3c3/i }));
+    await userEvent.click(screen.getByRole("button", { name: /decline .*c3c3c3c3/i }));
 
     expect(pushesOf(channel, "accept")).toHaveLength(1);
     expect(pushesOf(channel, "decline")).toHaveLength(0);
@@ -1070,7 +1272,7 @@ describe("answering a request", () => {
     const { channel, server } = await openPeers({ incoming: [incomingWire()] });
 
     await userEvent.click(
-      await screen.findByRole("button", { name: /decline c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /decline .*c3c3c3c3/i }),
     );
 
     expect(pushesOf(channel, "decline")).toEqual([
@@ -1101,10 +1303,10 @@ describe("answering a request", () => {
     });
 
     expect(
-      await screen.findByRole("button", { name: /decline c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /decline .*c3c3c3c3/i }),
     ).toBeEnabled();
 
-    await userEvent.click(screen.getByRole("button", { name: /accept c3c3c3c3/i }));
+    await userEvent.click(screen.getByRole("button", { name: /accept .*c3c3c3c3/i }));
     answer(channel, "accept", "error", refusal("gone"));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/expired/i);

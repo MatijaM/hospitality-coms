@@ -85,7 +85,15 @@ describe("a request", () => {
   const wire = {
     request_id: REQUEST,
     requester_id: PERSON,
+    // The two names are deliberately unequal, and neither is a substring of the
+    // other. `rendered_request/1` serves four call sites and takes no viewer,
+    // so it sends **both** names rather than one viewer-relative counterpart —
+    // which means the one way this decoder can be wrong and still look right is
+    // to put each name on the other party. A fixture naming both parties
+    // "Captain Nemo" is invariant under exactly that mutation.
+    requester_display_name: "Captain Nemo",
     addressee_id: OTHER,
+    addressee_display_name: "Allan Quatermain",
     state: "pending",
     requested_at: "2026-07-28T09:00:00Z",
     accepted_at: null,
@@ -105,12 +113,36 @@ describe("a request", () => {
     ).toEqual({
       requestId: REQUEST,
       requesterId: PERSON,
+      requesterDisplayName: "Captain Nemo",
       addresseeId: OTHER,
+      addresseeDisplayName: "Allan Quatermain",
       state: "declined",
       requestedAt: wire.requested_at,
       acceptedAt: null,
       declinedAt: "2026-07-28T10:00:00Z",
     });
+  });
+
+  it("puts each name on its own party, which is the only way this can be subtly wrong", () => {
+    // Read as a pair with the assertion above rather than as a repeat of it.
+    // That one would survive both names being read off `requester_display_name`
+    // if the two literals were equal; this one names the sides explicitly and
+    // is the row the swap mutation is measured against.
+    const decoded = decodePeerRequest(wire);
+
+    expect(decoded?.requesterDisplayName).toBe("Captain Nemo");
+    expect(decoded?.addresseeDisplayName).toBe("Allan Quatermain");
+    expect(decoded?.requesterDisplayName).not.toBe(decoded?.addresseeDisplayName);
+  });
+
+  it("is nothing at all when either name is missing", () => {
+    // #73 put both on the wire and every `rendered_request/1` heads on
+    // `is_binary/1` for both, so there is no request the server can produce
+    // without them. A fallback here would only ever mask a server that drifted
+    // — and would put `undefined` in the heading of somebody's inbox.
+    for (const key of Object.keys(wire)) {
+      expect(decodePeerRequest(without(wire, key))).toBeNull();
+    }
   });
 
   it("refuses a state this client has no case for", () => {
@@ -143,6 +175,7 @@ describe("a conversation", () => {
   const wire = {
     connection_id: CONNECTION,
     peer_id: OTHER,
+    peer_display_name: "Captain Nemo",
     connected_at: "2026-07-28T09:00:00Z",
     disconnected_at: null,
     disconnected_by_id: null,
@@ -153,11 +186,22 @@ describe("a conversation", () => {
     expect(decodeConversation(wire)).toEqual({
       connectionId: CONNECTION,
       peerId: OTHER,
+      peerDisplayName: "Captain Nemo",
       connectedAt: wire.connected_at,
       disconnectedAt: null,
       disconnectedById: null,
       open: true,
     });
+  });
+
+  it("is nothing at all when the counterpart has no name", () => {
+    // `Records.with_pair/1` has no activeness predicate and no `erased_at`
+    // filter, so a conversation always has a name to carry: a closed one, one
+    // whose counterpart left the trade, and one whose counterpart was erased —
+    // the last reading `Lifecycle.erased_display_name/0` — all arrive with a
+    // string. There is no state this fallback would serve.
+    expect(decodeConversation(without(wire, "peer_display_name"))).toBeNull();
+    expect(decodeConversation({ ...wire, peer_display_name: null })).toBeNull();
   });
 
   it("carries who closed it, so the two sides can read differently", () => {
@@ -182,20 +226,41 @@ describe("a message, which reaches this client under one key on all three paths"
     message_id: MESSAGE,
     connection_id: CONNECTION,
     author_id: PERSON,
+    author_display_name: "Captain Nemo",
     body: "on my way",
   };
 
   it("says `sent_at` in a reply, in a history entry, and in the push", () => {
     // `rendered_message/1`. `peer_channel_test.exs` pins this key set exactly
-    // — `author_id body connection_id message_id sent_at` — and now pins the
-    // push's against it, which is what let the second decoder go.
+    // and now pins the push's against it, which is what let the second decoder
+    // go — so `author_display_name` reaches all three paths or none.
     expect(decodePeerMessage({ ...common, sent_at: "2026-07-28T09:00:00Z" })).toEqual({
       messageId: MESSAGE,
       connectionId: CONNECTION,
       authorId: PERSON,
+      authorDisplayName: "Captain Nemo",
       body: "on my way",
       sentAt: "2026-07-28T09:00:00Z",
     });
+  });
+
+  it("is nothing at all when the author has no name", () => {
+    // Spelled `author_display_name`, exactly as `RoomChannel.rendered/1`
+    // spells it: a message's author is one entity whichever room or
+    // conversation carried the words, and `decodeRoomMessage` requires the
+    // same key for the same reason.
+    expect(
+      decodePeerMessage(
+        without({ ...common, sent_at: "2026-07-28T09:00:00Z" }, "author_display_name"),
+      ),
+    ).toBeNull();
+    expect(
+      decodePeerMessage({
+        ...common,
+        sent_at: "2026-07-28T09:00:00Z",
+        author_display_name: 7,
+      }),
+    ).toBeNull();
   });
 
   it("refuses `at`, which is what the push used to say", () => {

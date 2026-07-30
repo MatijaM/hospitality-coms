@@ -76,12 +76,46 @@ const PEER_ID = "c3c3c3c3-d4d4-4e5e-8f6f-a7a7a7a7a7a7";
 const ENGAGEMENT_ID = "22222222-2222-4222-8222-222222222222";
 const OTHER_ENGAGEMENT_ID = "99999999-9999-4999-8999-999999999999";
 const AUDIENCE_VENUE_ID = "77777777-7777-4777-8777-777777777777";
+const OTHER_AUDIENCE_VENUE_ID = "88888888-8888-4888-8888-888888888888";
+
+/**
+ * The two audiences `list_audiences` offers, and both are deliberately not the
+ * entry's own venue.
+ *
+ * An entry is never hidden from the venue that wrote it, so a fixture whose
+ * only audience is "The Anchor" would be a fixture of the one audience the
+ * control is useless for — which is the picker `DisclosureControl`'s old
+ * docstring said was the only one this surface could have built.
+ */
+const AUDIENCE_VENUE_NAME = "The Bell";
+const OTHER_AUDIENCE_VENUE_NAME = "The Crown";
+const AUDIENCE_PERSON_NAME = "Allan Quatermain";
+
+/**
+ * What an option is actually *called*, which is the name plus the first eight
+ * characters of the id — neither `venues.name` nor `people.display_name` is
+ * unique, so the name alone does not identify a row.
+ *
+ * **Written out as literals rather than built with `shortId`.** Composing the
+ * expectation from the same function the component calls makes the assertion
+ * agree with itself for any implementation of it, including one that returns
+ * the empty string — the defect `peers_test.exs` keeps its own `@tail_days`
+ * to avoid. These are read off `AUDIENCE_VENUE_ID` and friends above by eye,
+ * and a change to either end fails here.
+ */
+const AUDIENCE_VENUE_OPTION = "The Bell · 77777777";
+const OTHER_AUDIENCE_VENUE_OPTION = "The Crown · 88888888";
+const AUDIENCE_PERSON_OPTION = "Allan Quatermain · c3c3c3c3";
 
 /** `Profiles.incompleteness_notice/0`, verbatim. */
 const NOTICE =
   "This record may be incomplete. A worker chooses which of their entries each employer and each peer can see.";
 
-const READS = [PROFILE_EVENTS.ownProfile, PROFILE_EVENTS.listDisclosures] as const;
+const READS = [
+  PROFILE_EVENTS.ownProfile,
+  PROFILE_EVENTS.listDisclosures,
+  PROFILE_EVENTS.listAudiences,
+] as const;
 
 /** `VisibleEntry`. */
 function entryWire(overrides: Record<string, unknown> = {}) {
@@ -160,6 +194,17 @@ type Record_ = {
   readonly declared?: readonly object[];
   readonly corrections?: readonly object[];
   readonly disclosures?: readonly object[];
+  /**
+   * `list_audiences`' two halves.
+   *
+   * They default to one of each rather than to empty, because the picker is
+   * the only way to reach `set_disclosure` and every disclosure test in this
+   * file needs something to pick. A test that wants the empty case says so —
+   * `?? ` falls back on `undefined` and not on `[]`, so `venues: []` means
+   * what it says.
+   */
+  readonly venues?: readonly object[];
+  readonly people?: readonly object[];
 };
 
 function profilePayload(record: Record_) {
@@ -168,6 +213,30 @@ function profilePayload(record: Record_) {
     declared_entries: record.declared ?? [],
     correction_requests: record.corrections ?? [],
   };
+}
+
+/** `rendered_venue/1` — `venue_id`/`name`, the spelling a venue has as itself. */
+function audienceVenueWire(overrides: Record<string, unknown> = {}) {
+  return { venue_id: AUDIENCE_VENUE_ID, name: AUDIENCE_VENUE_NAME, ...overrides };
+}
+
+/** `rendered_person/1` — `person_id`/`display_name`, `rendered_peer/1`'s pair. */
+function audiencePersonWire(overrides: Record<string, unknown> = {}) {
+  return { person_id: PEER_ID, display_name: AUDIENCE_PERSON_NAME, ...overrides };
+}
+
+function audiencesPayload(record: Record_) {
+  return {
+    venues: record.venues ?? [audienceVenueWire()],
+    people: record.people ?? [audiencePersonWire()],
+  };
+}
+
+function replyFor(event: string, record: Record_) {
+  if (event === PROFILE_EVENTS.ownProfile) return profilePayload(record);
+  if (event === PROFILE_EVENTS.listAudiences) return audiencesPayload(record);
+
+  return { disclosures: record.disclosures ?? [] };
 }
 
 function renderProfile(personId: string) {
@@ -210,19 +279,33 @@ function settle(): Promise<void> {
  * had accumulated could not catch the difference.
  */
 function serverFor(channel: FakeChannel) {
-  let cursor = 0;
   const reads: readonly string[] = READS;
 
-  function pending(): string[] {
+  // Answered indices rather than a cursor, which is what `hold` needs: a read
+  // left unanswered has to stay outstanding while the reads *after* it are
+  // answered, and a cursor can only move past both or neither.
+  const answered = new Set<number>();
+
+  function outstanding(): number[] {
     return channel.sent
-      .slice(cursor)
-      .map((sent) => sent.event)
-      .filter((event) => reads.includes(event));
+      .map((sent, index) => (reads.includes(sent.event) ? index : -1))
+      .filter((index) => index !== -1 && !answered.has(index));
   }
 
+  function pending(): string[] {
+    return outstanding().map((index) => channel.sent[index]?.event ?? "");
+  }
+
+  /**
+   * @param hold events to leave outstanding, so a render state that only
+   * exists *before* an answer can be observed. `list_audiences` is the one
+   * that needs it: "still loading" and "answered with nobody" render the same
+   * thing unless a test can stop between them.
+   */
   async function answerReads(
     expected: readonly string[],
     record: Record_,
+    hold: readonly string[] = [],
   ): Promise<void> {
     await waitFor(() => {
       expect(pending()).toEqual([...expected]);
@@ -234,16 +317,12 @@ function serverFor(channel: FakeChannel) {
     expect(pending()).toEqual([...expected]);
 
     act(() => {
-      for (; cursor < channel.sent.length; cursor += 1) {
-        const sent = channel.sent[cursor];
-        if (sent === undefined || !reads.includes(sent.event)) continue;
+      for (const index of outstanding()) {
+        const sent = channel.sent[index];
+        if (sent === undefined || hold.includes(sent.event)) continue;
 
-        sent.push.trigger(
-          "ok",
-          sent.event === PROFILE_EVENTS.ownProfile
-            ? profilePayload(record)
-            : { disclosures: record.disclosures ?? [] },
-        );
+        answered.add(index);
+        sent.push.trigger("ok", replyFor(sent.event, record));
       }
     });
   }
@@ -275,7 +354,11 @@ function pushesOf(channel: FakeChannel, event: string) {
   return channel.pushed.filter((sent) => sent.event === event);
 }
 
-async function openProfile(record: Record_ = {}, personId: string = PERSON_ID) {
+async function openProfile(
+  record: Record_ = {},
+  personId: string = PERSON_ID,
+  hold: readonly string[] = [],
+) {
   const socket = renderProfile(personId);
   const topic = profileTopic(normalisePersonId(personId) ?? "");
 
@@ -294,29 +377,40 @@ async function openProfile(record: Record_ = {}, personId: string = PERSON_ID) {
   });
 
   const server = serverFor(channel);
-  await server.answerReads(READS, record);
+  await server.answerReads(READS, record, hold);
 
   return { socket, channel, server };
 }
 
+/** One entry's audience picker, found by the label that names that entry. */
+function picker(entry: string): Promise<HTMLElement> {
+  return screen.findByLabelText(new RegExp(`^who this is about, for ${entry}$`, "i"));
+}
+
 /**
- * Types an audience into one entry's control and presses Show or Hide.
+ * Picks an audience on one entry's control and presses Show or Hide.
  *
- * `entry` names the entry in both the field's label and the button's, which is
+ * `entry` names the entry in both the picker's label and the button's, which is
  * what stops this helper reaching for whichever control happens to be first
  * when a fixture carries two.
+ *
+ * The audience is named by the **text a worker reads** rather than by an id or
+ * by the option's value. The value encodes the tagged union as
+ * `<kind>:<id>` and that encoding is `profile-route.tsx`'s business; a helper
+ * that spelled it would make every test using it agree with the parser by
+ * construction, which is the shape of a test that cannot fail.
  */
 async function decide(
   entry: string,
-  audienceId: string,
+  audience: string,
   which: "Show" | "Hide",
 ): Promise<void> {
-  const control = await screen.findByLabelText(
-    new RegExp(`^their id, for ${entry}$`, "i"),
-  );
+  const control = await picker(entry);
 
-  await userEvent.clear(control);
-  await userEvent.type(control, audienceId);
+  await userEvent.selectOptions(
+    control,
+    within(control).getByRole("option", { name: audience }),
+  );
   await userEvent.click(
     screen.getByRole("button", { name: new RegExp(`^${which} ${entry} `, "i") }),
   );
@@ -417,30 +511,273 @@ describe("each attested entry renders its current audience", () => {
 
   it("says an audience it has no row for is undecided, not visible", async () => {
     // The control renders the three-valued answer for whichever audience is
-    // being typed, and this is the branch where the third value is the whole
+    // selected, and this is the branch where the third value is the whole
     // point: the worker is about to decide about somebody the ledger says
     // nothing about, and "Shown" there would be a claim this client cannot
     // make and which the employer default usually contradicts.
+    //
+    // Two audiences are offered and the ledger names exactly one of them, so
+    // the same control answers differently for each. Before #73 this typed two
+    // ids into a text box; the pair of audiences is what carries the property
+    // now, and a fixture offering only the decided one could not show the
+    // third value at all.
+    await openProfile({
+      attested: [entryWire()],
+      venues: [
+        audienceVenueWire(),
+        audienceVenueWire({
+          venue_id: OTHER_AUDIENCE_VENUE_ID,
+          name: OTHER_AUDIENCE_VENUE_NAME,
+        }),
+      ],
+      disclosures: [disclosureWire({ audience_id: AUDIENCE_VENUE_ID })],
+    });
+
+    const control = await picker("bartender at the anchor");
+
+    await userEvent.selectOptions(
+      control,
+      within(control).getByRole("option", { name: OTHER_AUDIENCE_VENUE_OPTION }),
+    );
+    expect(await screen.findByText("Not decided")).toBeInTheDocument();
+
+    await userEvent.selectOptions(
+      control,
+      within(control).getByRole("option", { name: AUDIENCE_VENUE_OPTION }),
+    );
+
+    // The same control, a different audience, and now there *is* a row.
+    await waitFor(() => {
+      expect(screen.queryByText("Not decided")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText(/right now, for them/i)).toBeInTheDocument();
+  });
+});
+
+describe("the audience is picked from a list rather than typed as a uuid", () => {
+  // #73's second half. `DisclosureControl` made the worker type a raw uuid for
+  // an audience that is a venue **or** a person, and its own docstring said
+  // why: nothing this client could read enumerated either. #76's
+  // `list_audiences` closed that — the venues a worker holds an engagement at
+  // *now*, and the people who can see them — so the control is a picker and
+  // the kind is no longer a separate choice, because the kind is a fact about
+  // whichever row was picked.
+
+  it("asks for the audiences on the join, once, beside the record and the ledger", async () => {
+    const { channel } = await openProfile();
+
+    expect(channel.pushed.map((sent) => sent.event)).toEqual([...READS]);
+    expect(pushesOf(channel, PROFILE_EVENTS.listAudiences)).toHaveLength(1);
+  });
+
+  it("offers both kinds, each under its own heading", async () => {
+    await openProfile({ attested: [entryWire()] });
+
+    const control = await picker("bartender at the anchor");
+
+    // Both halves, and they are asserted separately: a picker built from one
+    // list works perfectly against every fixture that carries both.
+    expect(
+      within(control).getByRole("option", { name: AUDIENCE_VENUE_OPTION }),
+    ).toBeInTheDocument();
+    expect(
+      within(control).getByRole("option", { name: AUDIENCE_PERSON_OPTION }),
+    ).toBeInTheDocument();
+
+    // `audienceKindLabel` names them, and the grouping is what tells a worker
+    // that "The Bell" is an employer and "Allan Quatermain" is not.
+    const groups = [...control.querySelectorAll("optgroup")].map((group) =>
+      group.getAttribute("label"),
+    );
+    expect(groups).toEqual(["Employer", "Peer"]);
+  });
+
+  it("keeps two audiences apart when they share a name", async () => {
+    // The reason the short id is there at all, and the case the rest of this
+    // block cannot reach: every other fixture has one venue and one person, so
+    // dropping the id changes a *label* and nothing becomes ambiguous. Here two
+    // people hold one name — deliberate, since a globally unique readable name
+    // would be a second `person_id` in plain text — and two venues do too,
+    // because `venues.name` carries no unique index either.
+    //
+    // `peers.test.tsx`'s "keeps the two answer buttons apart when two
+    // requesters share a name" is the same test on the other surface. Getting
+    // this wrong is silent: the `value` still carries the right id, so the
+    // *sent* payload is correct for whichever row happened to be picked, and
+    // the worker hides their record from the wrong person with no way to tell.
+    const twin = "b0b0b0b0-c1c1-4d2d-8e3e-f4f4f4f4f4f4";
+    const otherVenue = "a0a0a0a0-b1b1-4c2c-8d3d-e4e4e4e4e4e4";
+
+    await openProfile({
+      attested: [entryWire()],
+      people: [
+        audiencePersonWire(),
+        audiencePersonWire({ person_id: twin, display_name: AUDIENCE_PERSON_NAME }),
+      ],
+      venues: [
+        audienceVenueWire(),
+        audienceVenueWire({ venue_id: otherVenue, name: AUDIENCE_VENUE_NAME }),
+      ],
+    });
+
+    const control = await picker("bartender at the anchor");
+    const names = [...control.querySelectorAll("option")].map((option) => option.text);
+
+    // An inequality rather than two literals: what matters is that the two are
+    // *distinguishable*, and asserting the exact strings passes for any format
+    // that happens to differ — including one that stops being a short id.
+    expect(names).toContain(AUDIENCE_PERSON_OPTION);
+    expect(names).toContain("Allan Quatermain · b0b0b0b0");
+    expect(names).toContain(AUDIENCE_VENUE_OPTION);
+    expect(names).toContain("The Bell · a0a0a0a0");
+
+    // The control on all four: no two options read alike, which is the claim.
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("chooses nobody until the worker does, and keeps both buttons shut", async () => {
+    // Found by mutation: deleting the placeholder option killed nothing, and
+    // the state it leaves is worse than untested. A `<select>` whose value
+    // matches no option displays the first one, so the control would read "The
+    // Bell" while `picked` is still null and both buttons are disabled — a
+    // surface showing a chosen audience and refusing to act on it.
+    await openProfile({ attested: [entryWire()], disclosures: [] });
+
+    const control = await picker("bartender at the anchor");
+
+    expect(control).toHaveValue("");
+    expect(screen.getByRole("button", { name: /^show bartender/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^hide bartender/i })).toBeDisabled();
+
+    // The control: the buttons open once an audience is chosen, so "disabled"
+    // above is a state and not the only state this control has.
+    await userEvent.selectOptions(
+      control,
+      within(control).getByRole("option", { name: AUDIENCE_VENUE_OPTION }),
+    );
+    expect(screen.getByRole("button", { name: /^hide bartender/i })).toBeEnabled();
+  });
+
+  it("sends `person` for a person, which a control hard-coding `venue` would not", async () => {
+    // Read as a pair with "sends the tagged audience and renders what comes
+    // back" below, which picks a venue. Neither alone is sufficient: a control
+    // that always says `"venue"` passes that one, and one that always says
+    // `"person"` passes this one. The audience is a tagged union and the tag
+    // has to come off the row.
+    const { channel } = await openProfile({ attested: [entryWire()], disclosures: [] });
+
+    await decide("bartender at the anchor", AUDIENCE_PERSON_OPTION, "Hide");
+
+    expect(pushesOf(channel, PROFILE_EVENTS.setDisclosure)).toEqual([
+      {
+        event: PROFILE_EVENTS.setDisclosure,
+        payload: {
+          engagement_id: ENGAGEMENT_ID,
+          audience_kind: "person",
+          audience_id: PEER_ID,
+          disclosed: false,
+        },
+      },
+    ]);
+  });
+
+  it("claims nothing about emptiness while the list is still in flight", async () => {
+    // The render-state prompt, and the reason `audiences` is `null` until
+    // answered rather than a pair of empty lists. *In flight* and *answered
+    // with nobody* are the same DOM unless the state distinguishes them — and
+    // telling a worker there is nobody they can name, because a round trip is
+    // half a second old, is #68's venue link again: right until the network is
+    // slow, and wrong in the direction that takes the control away.
+    //
+    // The read is held open by hand. A test that rendered and asserted would
+    // see whichever of the two the scheduler happened to leave behind.
+    await openProfile({ attested: [entryWire()] }, PERSON_ID, [
+      PROFILE_EVENTS.listAudiences,
+    ]);
+
+    // The control: the surface is up and populated from the reads that *were*
+    // answered. Without this the absence below passes against a failed mount.
+    expect(await screen.findByText("Bartender")).toBeInTheDocument();
+    expect(
+      screen.getByText(/you have not made a decision about this entry/i),
+    ).toBeInTheDocument();
+
+    expect(screen.queryByText(/there is nobody to name yet/i)).toBeNull();
+  });
+
+  it("says there is nobody to name once the list comes back empty", async () => {
+    await openProfile({ attested: [entryWire()], venues: [], people: [] });
+
+    // The control on the assertion below: the sentence is present, so the
+    // control was offered and is empty rather than missing altogether.
+    expect(await screen.findByText(/there is nobody to name yet/i)).toBeInTheDocument();
+
+    expect(screen.queryByLabelText(/^who this is about/i)).toBeNull();
+  });
+
+  it("offers the list when one half is empty and the other is not", async () => {
+    // A worker between jobs still has peers for thirty days; a worker at their
+    // first venue has an employer and nobody visible yet. Neither is "nobody".
+    await openProfile({ attested: [entryWire()], venues: [] });
+
+    const control = await picker("bartender at the anchor");
+
+    expect(
+      within(control).getByRole("option", { name: AUDIENCE_PERSON_OPTION }),
+    ).toBeInTheDocument();
+    expect(
+      within(control).queryByRole("option", { name: AUDIENCE_VENUE_OPTION }),
+    ).toBeNull();
+    expect(screen.queryByText(/there is nobody to name yet/i)).toBeNull();
+  });
+
+  it("names a past decision's audience when it is still one the worker can name", async () => {
     await openProfile({
       attested: [entryWire()],
       disclosures: [disclosureWire({ audience_id: AUDIENCE_VENUE_ID })],
     });
 
-    const control = await screen.findByLabelText(
-      /^their id, for bartender at the anchor$/i,
+    const decisions = within(
+      await screen.findByRole("list", {
+        name: /decisions about bartender at the anchor/i,
+      }),
     );
 
-    await userEvent.type(control, "88888888-8888-4888-8888-888888888888");
-    expect(await screen.findByText("Not decided")).toBeInTheDocument();
+    expect(
+      decisions.getByText(`${AUDIENCE_VENUE_NAME} · ${AUDIENCE_VENUE_ID.slice(0, 8)}`),
+    ).toBeInTheDocument();
+  });
 
-    await userEvent.clear(control);
-    await userEvent.type(control, AUDIENCE_VENUE_ID);
-
-    // The same field, a different audience, and now there *is* a row.
-    await waitFor(() => {
-      expect(screen.queryByText("Not decided")).not.toBeInTheDocument();
+  it("keeps a decision readable when its audience has left both lists", async () => {
+    // The residue, and it is ordinary rather than exceptional.
+    // `list_audiences` offers venues where the worker holds an engagement
+    // **active at the instant** and people visible-or-connected **now**, while
+    // the ledger is permanent — so a decision about last year's employer is
+    // still in force and is unnameable. #76 records the same thing from the
+    // server's side.
+    //
+    // What it must never render is an empty name beside the separator:
+    // `{name ?? ""} · {shortId(id)}` and `{audiences && name} · …` both put a
+    // dangling "· 4a3f1b2c" on screen, read as a rendering fault rather than a
+    // fact, and are invisible to a test that only looks for the short id.
+    await openProfile({
+      attested: [entryWire()],
+      venues: [],
+      people: [],
+      disclosures: [disclosureWire({ audience_id: OTHER_AUDIENCE_VENUE_ID })],
     });
-    expect(screen.getByText(/right now, for them/i)).toBeInTheDocument();
+
+    const list = await screen.findByRole("list", {
+      name: /decisions about bartender at the anchor/i,
+    });
+    const decisions = within(list);
+
+    // The controls: the row is on screen and still says what was decided.
+    expect(decisions.getByText(OTHER_AUDIENCE_VENUE_ID.slice(0, 8))).toBeInTheDocument();
+    expect(decisions.getByText("Hidden")).toBeInTheDocument();
+    expect(decisions.getByText(/still applies/i)).toBeInTheDocument();
+
+    expect(list.textContent).not.toContain(`· ${OTHER_AUDIENCE_VENUE_ID.slice(0, 8)}`);
   });
 });
 
@@ -453,7 +790,7 @@ describe("changing a disclosure setting confirms the new state", () => {
 
     expect(await screen.findByText(/you have not made a decision/i)).toBeInTheDocument();
 
-    await decide("bartender at the anchor", AUDIENCE_VENUE_ID, "Hide");
+    await decide("bartender at the anchor", AUDIENCE_VENUE_OPTION, "Hide");
 
     expect(pushesOf(channel, PROFILE_EVENTS.setDisclosure)).toEqual([
       {
@@ -492,7 +829,7 @@ describe("changing a disclosure setting confirms the new state", () => {
       disclosures: [],
     });
 
-    await decide("bartender at the anchor", AUDIENCE_VENUE_ID, "Show");
+    await decide("bartender at the anchor", AUDIENCE_VENUE_OPTION, "Show");
     answer(
       channel,
       PROFILE_EVENTS.setDisclosure,
@@ -510,7 +847,7 @@ describe("changing a disclosure setting confirms the new state", () => {
   it("closes both controls while a decision is in flight", async () => {
     const { channel } = await openProfile({ attested: [entryWire()], disclosures: [] });
 
-    await decide("bartender at the anchor", AUDIENCE_VENUE_ID, "Hide");
+    await decide("bartender at the anchor", AUDIENCE_VENUE_OPTION, "Hide");
 
     const show = screen.getByRole("button", { name: /^show bartender/i });
     const hide = screen.getByRole("button", { name: /^hide bartender/i });
@@ -528,7 +865,7 @@ describe("changing a disclosure setting confirms the new state", () => {
   it("renders the refusal rather than the state it asked for", async () => {
     const { channel } = await openProfile({ attested: [entryWire()], disclosures: [] });
 
-    await decide("bartender at the anchor", AUDIENCE_VENUE_ID, "Hide");
+    await decide("bartender at the anchor", AUDIENCE_VENUE_OPTION, "Hide");
     answer(channel, PROFILE_EVENTS.setDisclosure, "error", refusal("not_found"));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/not one of yours/i);
@@ -663,8 +1000,12 @@ describe("somebody else's record", () => {
     expect(
       screen.getByRole("button", { name: /ask the anchor for a correction/i }),
     ).toBeInTheDocument();
+    // #73's second half renamed this: it was `audience-id-…`, a text box for a
+    // raw uuid, and is now `audience-…`, the picker that replaced it. Still
+    // here as the control on the cut below — the surface's *other* control has
+    // to be shown standing before the peer lookup is asserted gone.
     expect(
-      document.getElementById(`audience-id-${entryWire().attested_entry_id}`),
+      document.getElementById(`audience-${entryWire().attested_entry_id}`),
     ).not.toBeNull();
     expect(pushesOf(channel, PROFILE_EVENTS.ownProfile)).toHaveLength(1);
 
@@ -686,19 +1027,27 @@ describe("somebody else's record", () => {
     expect(document.getElementById("peer-profile-id")).toBeNull();
   });
 
-  it("leaves the disclosure control's own id field alone", async () => {
-    // The two controls both asked for an id, and the removed one was the other
-    // place on this surface with a label beginning "Their id" — so a cut that
-    // reached one field too far would take the audience box with it. Every
-    // disclosure test in this file names that field by a *scoped* label
-    // (`their id, for <entry>`), which the wrong survivor would not satisfy;
-    // this asks unscoped, so it fails if either box is the one still standing.
+  it("leaves the disclosure control alone, and it is no longer a uuid box either", async () => {
+    // **Re-pointed rather than deleted.** The two controls both asked for a
+    // raw id, and the removed one was the other place on this surface with a
+    // label beginning "Their id" — so a cut that reached one field too far
+    // would have taken the audience box with it. That guard still matters; what
+    // changed is what it guards, because #73's second half replaced the box
+    // with a picker.
+    //
+    // So it asserts the same thing from both ends: exactly one audience
+    // control, scoped to its entry — and **no field labelled "Their id" at
+    // all**, which is now the tell that the old box came back rather than that
+    // the wrong one survived.
     await openProfile({ attested: [entryWire()], disclosures: [] });
 
-    const fields = await screen.findAllByLabelText(/^their id/i);
+    const controls = await screen.findAllByLabelText(/^who this is about/i);
 
-    expect(fields).toHaveLength(1);
-    expect(fields[0]).toHaveAccessibleName("Their id, for Bartender at The Anchor");
+    expect(controls).toHaveLength(1);
+    expect(controls[0]).toHaveAccessibleName(
+      "Who this is about, for Bartender at The Anchor",
+    );
+    expect(screen.queryByLabelText(/^their id/i)).toBeNull();
   });
 });
 

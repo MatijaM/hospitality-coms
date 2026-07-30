@@ -6,7 +6,7 @@
  *
  * There was a third section — a text box for a person's uuid and a button
  * reading "Read their record". The surface behind it is real and works:
- * `peer_profile` is one of `ProfileChannel`'s seven events, `#71` verified it
+ * `peer_profile` is one of `ProfileChannel`'s eight events, `#71` verified it
  * end to end against a live server, and `useProfileSurface`'s `loadPeerProfile`
  * is untouched and still tested. **What was wrong was the way in.** The only
  * peers a worker can name are the ones whose uuid they have somehow already
@@ -18,14 +18,19 @@
  * focusable input in the accessibility tree, which is a uuid box a screen
  * reader can find and a sighted worker cannot.
  *
- * **What brings it back is a picker**, and the picker needs a list of people
- * this worker may read — the same gap `DisclosureControl` records for the
- * audience it cannot enumerate. `Peers.list_visible_peers/1` is the nearest
- * thing and it lives on another channel; the server half of #73 is building
- * the lists that would make one possible. When it lands, this section comes
- * back with a chooser where the text box was, and `ProfileView` comes back with
- * it — see below for the rule that component existed to hold, which has to be
- * re-asserted at the same time.
+ * **What brings it back is a picker, and the list it needs now exists.** #76's
+ * `list_audiences` answers `people` as `Peers.list_reachable_peers/1` — visible
+ * **or** connected, which is exactly the pair `Profiles.fetch_peer_profile/2`
+ * gates on, so it is the list of people this worker may read and not an
+ * approximation of one. `DisclosureControl` reads it below.
+ *
+ * This section is still **not** brought back, and that is scope rather than an
+ * obstacle: #73's client half is the names and the disclosure audience, and
+ * reviving a whole surface is a decision about what the profile screen is for.
+ * Whoever does it takes `surface.audiences.people` and a chooser where the text
+ * box was, and brings `ProfileView` back with it — see below for the rule that
+ * component existed to hold, which has to be **re-asserted, not assumed**, at
+ * the same time.
  *
  * ## The one rule this file exists to not break
  *
@@ -75,15 +80,19 @@ import { useSession } from "../../session/session-context";
 import type {
   AttestedEntry,
   AudienceKind,
+  Audiences,
   CorrectionRequest,
   DeclaredEntry,
   Disclosure,
 } from "./profile";
 import {
+  AUDIENCE_KINDS,
   audienceKindLabel,
+  audienceName,
   decisionsFor,
   disclosureState,
   disclosureStateLabel,
+  noAudiences,
   resolutionLabel,
   resolutionMessage,
   shortId,
@@ -280,7 +289,11 @@ function OwnAttestedEntry({
     <>
       <strong>{entry.roleLabel}</strong> <span>at {entry.venueName}</span>{" "}
       <Term startsAt={entry.startsAt} endsAt={entry.endsAt} />
-      <EntryAudiences entry={entry} disclosures={surface.disclosures} />
+      <EntryAudiences
+        entry={entry}
+        disclosures={surface.disclosures}
+        audiences={surface.audiences}
+      />
       <DisclosureControl entry={entry} surface={surface} />
       <CorrectionControl entry={entry} surface={surface} />
     </>
@@ -309,9 +322,11 @@ function OwnAttestedEntry({
 function EntryAudiences({
   entry,
   disclosures,
+  audiences,
 }: {
   readonly entry: AttestedEntry;
   readonly disclosures: readonly Disclosure[];
+  readonly audiences: Audiences | null;
 }) {
   const decisions = decisionsFor(disclosures, entry);
 
@@ -325,7 +340,11 @@ function EntryAudiences({
           {decisions.map((decision) => (
             <li key={decision.disclosureId}>
               <span>{audienceKindLabel(decision.audienceKind)}</span>{" "}
-              <strong>{shortId(decision.audienceId)}</strong>{" "}
+              <AudienceName
+                audiences={audiences}
+                kind={decision.audienceKind}
+                audienceId={decision.audienceId}
+              />{" "}
               <span>{disclosureStateLabel(decision.disclosed ? "shown" : "hidden")}</span>{" "}
               <span>
                 decided <time dateTime={decision.decidedAt}>{decision.decidedAt}</time>
@@ -346,21 +365,111 @@ function EntryAudiences({
 }
 
 /**
+ * What one past decision's audience is called, or the short id when it has no
+ * name this worker can be given.
+ *
+ * **The unnameable case is ordinary, not exceptional, and it is a consequence
+ * of what `list_audiences` answers.** The venues on it are engagements *active
+ * at the instant* and the people are visible *or connected now*, while the
+ * ledger is permanent — so a decision taken about last year's employer is still
+ * in force and cannot be resolved to a name. #76 records the same residue from
+ * the server's side: a venue whose term has ended is not offered, because it
+ * cannot read the record either, and the decision applies again if the worker
+ * returns.
+ *
+ * So it is rendered rather than interpolated. `{name ?? ""} · {shortId(id)}`
+ * and `{audiences && name} · {shortId(id)}` are each one character from correct
+ * and both put a dangling "· 4a3f1b2c" on screen, which reads as a rendering
+ * fault rather than as a fact about somebody's record — and neither is visible
+ * to a test that only checks the short id is present.
+ */
+function AudienceName({
+  audiences,
+  kind,
+  audienceId,
+}: {
+  readonly audiences: Audiences | null;
+  readonly kind: AudienceKind;
+  readonly audienceId: string;
+}) {
+  const name = audienceName(audiences, kind, audienceId);
+
+  if (name === null) {
+    return (
+      <>
+        <strong>{shortId(audienceId)}</strong>{" "}
+        <span>
+          — this decision still applies, and they are not somebody you can name from here
+          at the moment.
+        </span>
+      </>
+    );
+  }
+
+  return (
+    <strong>
+      {name} · {shortId(audienceId)}
+    </strong>
+  );
+}
+
+/**
+ * One audience, as a `<select>` option value.
+ *
+ * The audience is a **tagged union** — a kind and an id — and a `<select>`
+ * carries one string. So the tag travels in the value and is parsed back out at
+ * the one place that needs it. `contract.ts` already argues this for the wire,
+ * where the pair is `audience_kind` + `audience_id` rather than two nullable
+ * columns, and the argument is the same one: the split done twice is the
+ * defect. There is one writer and one reader of this encoding, both here.
+ *
+ * A `:` cannot appear in a uuid, so the split is unambiguous.
+ */
+type PickedAudience = { readonly kind: AudienceKind; readonly id: string };
+
+function audienceValue(picked: PickedAudience): string {
+  return `${picked.kind}:${picked.id}`;
+}
+
+function parseAudience(value: string): PickedAudience | null {
+  const separator = value.indexOf(":");
+  if (separator === -1) return null;
+
+  const kind = AUDIENCE_KINDS.find(
+    (candidate) => candidate === value.slice(0, separator),
+  );
+  if (kind === undefined) return null;
+
+  const id = value.slice(separator + 1);
+  if (id === "") return null;
+
+  return { kind, id };
+}
+
+/**
  * Show or hide one entry from one audience.
  *
- * **There is no picker, and the reason is a gap in what U9 puts on a wire.**
- * An audience is a venue or a person, and nothing this client can read
- * enumerates either: `VisibleEntry.venue_id` is the venue that *asserted* the
- * entry rather than a venue that might read it, and there is no event that
- * lists the venues a worker holds an engagement at or the peers who can see
- * them. `Peers.list_visible_peers/1` is the nearest thing and it lives on
- * another channel.
+ * **The audience is picked from a list, and until #73 it was typed as a raw
+ * uuid.** The reason it had to be is worth keeping, because it is what the
+ * server change removed rather than something that stopped mattering: an
+ * audience is a venue or a person, and nothing this client could read
+ * enumerated either. `VisibleEntry.venue_id` is the venue that *asserted* the
+ * entry rather than one that might read it, and `Peers.list_visible_peers/1`
+ * lived on another channel. The only picker this surface could have built was
+ * one offering the attesting venue — the single audience an entry is never
+ * hidden from, and so the one the control is useless for.
  *
- * So the audience is typed in, which is honest and poor, and the alternative —
- * offering only the attesting venue, which is the one venue whose id is on
- * screen — would be worse than poor: an entry is never hidden from the venue
- * that wrote it, so the only picker this surface *could* build is a picker of
- * the one audience the control is useless for. Recorded in `README.md`.
+ * #76 added `list_audiences`, which answers both halves at one instant: the
+ * venues the worker holds an engagement at **now**, and the people who can see
+ * them **now**. So the picker exists, and the kind selector is gone with the
+ * text box — the kind is not a choice a worker makes, it is a fact about
+ * whichever row they picked, and offering it separately invited the one
+ * combination the server refuses outright (a person id tagged as a venue).
+ *
+ * **Three render states, and two of them would otherwise be one.** `audiences`
+ * is `null` until answered, so "still loading" cannot render as "there is
+ * nobody to name" — see `useProfileSurface`. Both lists empty is a real answer
+ * and gets its own sentence.
  */
 function DisclosureControl({
   entry,
@@ -369,65 +478,114 @@ function DisclosureControl({
   readonly entry: AttestedEntry;
   readonly surface: ProfileSurface;
 }) {
-  const [kind, setKind] = useState<AudienceKind>("venue");
-  const [audienceId, setAudienceId] = useState("");
+  const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const kindField = `audience-kind-${entry.attestedEntryId}`;
-  const idField = `audience-id-${entry.attestedEntryId}`;
+  const { audiences } = surface;
+  const audienceField = `audience-${entry.attestedEntryId}`;
 
-  // What is already true of the audience being typed, so the worker is not
+  const picked = value === "" ? null : parseAudience(value);
+
+  // What is already true of the audience selected, so the worker is not
   // deciding blind. This is the one place the three-valued answer is rendered
   // as such — the list above always has a decision in hand, and here there
   // usually is not one, which is exactly where "Not decided" has to appear
   // instead of a guess at what the default resolves to.
-  const trimmed = audienceId.trim();
   const current =
-    trimmed === "" ? null : disclosureState(surface.disclosures, entry, kind, trimmed);
+    picked === null
+      ? null
+      : disclosureState(surface.disclosures, entry, picked.kind, picked.id);
 
   async function decide(disclosed: boolean): Promise<void> {
+    if (picked === null) return;
+
     setSaving(true);
     await surface.setDisclosure(
       entry.entryEngagementId,
-      kind,
-      audienceId.trim(),
+      picked.kind,
+      picked.id,
       disclosed,
     );
     setSaving(false);
   }
 
+  // Not answered yet, refused, or answered in a shape this client could not
+  // read. All three are "not known", and none of them is "there is nobody" —
+  // saying so while a round trip is in flight would take the control away from
+  // a worker who has audiences, with nothing on screen to say why. A refusal
+  // additionally renders through the surface's notice.
+  if (audiences === null) {
+    return <p>Loading the employers and people you could name.</p>;
+  }
+
+  if (noAudiences(audiences)) {
+    return (
+      <p>
+        There is nobody to name yet. Employers you currently work for, and people who can
+        see you, appear here — and a decision you take stays in force even after they stop
+        appearing.
+      </p>
+    );
+  }
+
   return (
     <>
-      <label htmlFor={kindField}>Who this is about</label>
-      <select
-        id={kindField}
-        value={kind}
-        disabled={saving}
-        onChange={(event) => {
-          setKind(event.target.value === "person" ? "person" : "venue");
-        }}
-      >
-        <option value="venue">{audienceKindLabel("venue")}</option>
-        <option value="person">{audienceKindLabel("person")}</option>
-      </select>
-
       {/*
         The label names the entry, and it has to: this control is rendered once
-        per attested entry, so a bare "Their id" would be one accessible name
-        pointing at several fields — indistinguishable to a screen reader and
-        ambiguous to anything else that resolves a control by its label.
+        per attested entry, so a bare "Who this is about" would be one
+        accessible name pointing at several controls — indistinguishable to a
+        screen reader and ambiguous to anything else resolving a control by its
+        label. It was two fields with this problem and is now one.
       */}
-      <label htmlFor={idField}>
-        Their id, for {entry.roleLabel} at {entry.venueName}
+      <label htmlFor={audienceField}>
+        Who this is about, for {entry.roleLabel} at {entry.venueName}
       </label>
-      <input
-        id={idField}
-        value={audienceId}
+      <select
+        id={audienceField}
+        value={value}
         disabled={saving}
         onChange={(event) => {
-          setAudienceId(event.target.value);
+          setValue(event.target.value);
         }}
-      />
+      >
+        {/*
+          Every option carries `· <short id>`, for the reason the answer buttons
+          on the peer surface do: **neither name is unique**. A display-name
+          collision is deliberate — a globally unique readable name would be a
+          second `person_id` in plain text — and `venues.name` has no unique
+          index either, so two venues may share one as easily as two people.
+          Without the id, two audiences collapse into two identical `<option>`s
+          that a sighted worker cannot tell apart and a screen reader announces
+          identically, while the `value` quietly carries the right id for
+          whichever one happened to be picked. Getting the *wrong* audience is
+          the failure here, and it is silent.
+        */}
+        <option value="">Choose somebody</option>
+        {audiences.venues.length > 0 && (
+          <optgroup label={audienceKindLabel("venue")}>
+            {audiences.venues.map((venue) => (
+              <option
+                key={venue.venueId}
+                value={audienceValue({ kind: "venue", id: venue.venueId })}
+              >
+                {venue.name} · {shortId(venue.venueId)}
+              </option>
+            ))}
+          </optgroup>
+        )}
+        {audiences.people.length > 0 && (
+          <optgroup label={audienceKindLabel("person")}>
+            {audiences.people.map((person) => (
+              <option
+                key={person.personId}
+                value={audienceValue({ kind: "person", id: person.personId })}
+              >
+                {person.displayName} · {shortId(person.personId)}
+              </option>
+            ))}
+          </optgroup>
+        )}
+      </select>
 
       {current !== null && (
         <p>
@@ -437,7 +595,7 @@ function DisclosureControl({
 
       <button
         type="button"
-        disabled={saving || trimmed === ""}
+        disabled={saving || picked === null}
         onClick={() => {
           void decide(true);
         }}
@@ -446,7 +604,7 @@ function DisclosureControl({
       </button>
       <button
         type="button"
-        disabled={saving || trimmed === ""}
+        disabled={saving || picked === null}
         onClick={() => {
           void decide(false);
         }}

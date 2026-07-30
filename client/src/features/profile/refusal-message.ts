@@ -8,7 +8,7 @@
  * and the copy is keyed on the code. `fields` is the one exception and is shown
  * as it arrives, because those messages come from Ecto's changeset traversal
  * and name an input the worker actually filled in — which on this surface is
- * most of what can go wrong, since two of the seven events carry worker-authored
+ * most of what can go wrong, since two of the eight events carry worker-authored
  * text.
  *
  * ## The vocabulary is this surface's, and it is the smallest of the three
@@ -91,6 +91,7 @@ export type ProfileAction =
   | "join"
   | "profile"
   | "disclosures"
+  | "audiences"
   | "set_disclosure"
   | "declare"
   | "amend"
@@ -141,6 +142,10 @@ function malformedReplyMessage(action: ProfileAction): string {
       return "The server answered in a shape this client does not understand, so that person's record could not be shown.";
     case "disclosures":
       return "The server answered in a shape this client does not understand, so your disclosure decisions could not be loaded. Nothing on screen should be read as who can see what.";
+    case "audiences":
+      // Deliberately does not say "there is nobody". The list is unknown, not
+      // empty, and the surface renders the same distinction.
+      return "The server answered in a shape this client does not understand, so the employers and people you could name could not be listed. Decisions you have already taken are unaffected.";
     case "join":
     case "set_disclosure":
     case "declare":
@@ -182,6 +187,7 @@ function timeoutMessage(action: ProfileAction): string {
     case "join":
     case "profile":
     case "disclosures":
+    case "audiences":
     case "peer_profile":
       return "The server has not answered yet. It will keep trying on its own; nothing has been refused.";
     case "set_disclosure":
@@ -235,8 +241,11 @@ function notFoundMessage(action: ProfileAction): string {
     case "join":
     case "profile":
     case "disclosures":
+    case "audiences":
     case "declare":
       // No clause reaches here: these name nothing the server has to resolve.
+      // `audiences` in particular takes an empty payload and answers two
+      // derived lists, so there is no id in it to fail to resolve.
       // Left as a sentence rather than as `unrecognised` copy, because if one
       // ever does, "not yours or not there" is true of every refusal on this
       // code.

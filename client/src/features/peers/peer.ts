@@ -126,11 +126,20 @@ export const REQUEST_STATES: readonly RequestState[] = [
  * `acceptedAt` and `declinedAt` are here because `state` is the claim and these
  * are when it became true — a surface rendering "declined" has nothing to
  * render it *as of* without them.
+ *
+ * **Both names, beside both ids** (#73). The server sends the pair rather than
+ * one viewer-relative counterpart, because `rendered_request/1` serves four
+ * call sites — `request`, `decline`, and both halves of `list_requests` — and
+ * takes no viewer, so a single `counterpartDisplayName` would make one entity's
+ * shape depend on who asked. Each surface reads the side it is not: the
+ * incoming list renders the requester, the outgoing list the addressee.
  */
 export type PeerRequest = {
   readonly requestId: string;
   readonly requesterId: string;
+  readonly requesterDisplayName: string;
   readonly addresseeId: string;
+  readonly addresseeDisplayName: string;
   readonly state: RequestState;
   readonly requestedAt: string;
   readonly acceptedAt: string | null;
@@ -147,10 +156,17 @@ export type PeerRequest = {
  * Closed conversations are in the list and stay there. A disconnect leaves each
  * party their own messages (KTD21 deletes nothing), and a list that dropped
  * closed ones would leave those messages with nothing to reach them by.
+ *
+ * `peerDisplayName` is #73's and is **not** nullable, which is R15 rather than
+ * a copy of #66's reasoning: `Records.with_pair/1` carries no activeness
+ * predicate and no `erased_at` filter, because a connection outlives the
+ * visibility that produced it. A name that lapsed with co-rostering would blank
+ * the heading of a conversation two people are still having.
  */
 export type Conversation = {
   readonly connectionId: string;
   readonly peerId: string;
+  readonly peerDisplayName: string;
   readonly connectedAt: string;
   readonly disconnectedAt: string | null;
   readonly disconnectedById: string | null;
@@ -175,6 +191,14 @@ export type PeerMessage = {
   readonly messageId: string;
   readonly connectionId: string;
   readonly authorId: string;
+  /**
+   * Spelled as `features/rooms/room.ts` spells it, because a message's author
+   * is one entity whichever room or conversation carried the words (#73).
+   *
+   * It arrives on this person's own messages too — the server's join does not
+   * know who is asking — and `conversation-view.tsx` renders "You" for those.
+   */
+  readonly authorDisplayName: string;
   readonly body: string;
   readonly sentAt: string;
 };
@@ -185,7 +209,14 @@ export function peerKey(peer: Peer): string {
 }
 
 /**
- * How long an id is shown for. Never a name: there is no name on the wire.
+ * How long an id is shown for.
+ *
+ * It said "never a name: there is no name on the wire" until #73, when four
+ * rendered shapes gained one. The id is shown **beside** the name now rather
+ * than instead of it, and it is not decoration: display-name collisions are
+ * deliberate, because a globally unique readable name would be a second
+ * `person_id` in plain text readable by every worker. The id is the only one of
+ * the two that tells two people apart.
  *
  * It moved to `src/app/short-id.ts` when the rooms surface became its third
  * caller — `profile.ts` had declared the same function with the same body — and
