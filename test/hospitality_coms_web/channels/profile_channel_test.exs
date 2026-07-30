@@ -288,6 +288,26 @@ defmodule HospitalityComsWeb.ProfileChannelTest do
       assert refusal.error.code == "not_found"
     end
 
+    test "refuses an audience that is an id and names nothing by naming the field" do
+      # The third answer this event can give, and the one `refusal-message.ts`
+      # names: `Disclosure.declare_constraints/1` declares
+      # `foreign_key_constraint(:audience_venue_id)`, so an id that is an id and
+      # names no venue arrives as a changeset rather than as an
+      # `Ecto.ConstraintError` out of a function whose spec enumerates one atom
+      # and a changeset — which on one process carrying the whole surface would
+      # be a crash rather than a refusal (KTD10).
+      %{worker: worker, entry_engagement: engagement} = concealable()
+      channel = joined(worker)
+
+      ref = push(channel, "set_disclosure", decision(engagement, Ecto.UUID.generate(), false))
+      assert_reply ref, :error, refusal
+
+      assert refusal.error.code == "unprocessable_entity"
+      assert %{audience_venue_id: [_message | _more]} = refusal.error.fields
+
+      assert Process.alive?(channel.channel_pid)
+    end
+
     test "refuses an audience that is not one, without pretending it is an entry" do
       # `audience_kind` and `audience_id` are one value spelled as two fields, so
       # a pair that is not an audience is a malformed payload rather than a

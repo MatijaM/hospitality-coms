@@ -392,3 +392,116 @@ written for and this brief says so before it is measured.
 | Regression protection | 4/5 | seven existing paths named; `sockets_test.exs` will fail by design and is extended rather than relaxed; the client is protected by an unchanged count rather than by an assertion |
 | Falsifiability | 5/5 | every row names a mechanism whose removal fails it, and M18's zero is predicted before it is run |
 | Risk of a vacuous pass | 3/5 | the residue is the browser. No test in this tree opens a socket over HTTP, so "the Profile tab loads" is inferred from a join, a reply shape and a `Jason` round trip rather than observed. Written into the report rather than claimed as coverage |
+
+## Revisions made during implementation
+
+Recorded rather than silently applied, because the gate exists to be departed from explicitly. The
+sections above are not edited to agree with what shipped.
+
+1. **M11's prediction was wrong, and the zero is the most useful number in this brief.** The brief
+   predicted the `handle_info/2` catch-all at ≥1. Deleting it kills **0** — and the reason is in
+   `RoomChannel.ignored/1`'s own docstring, which nobody connected to the fact that this channel has
+   exactly *one* `handle_info/2` clause: removing it means the module exports none, which restores
+   Phoenix's warn-and-ignore fallback, which is what the test was checking for. **The clause's value
+   is only visible as a pair**, so M11b was added — add one specific clause (as the day an
+   announcement arrives will) and delete the catch-all — and that kills **1**. So the catch-all is
+   insurance rather than a live guard, and it is kept on that basis with the reason written into its
+   `@doc` rather than left as a claim the tree cannot check. Same shape as #65's M1/M1+M3 pair.
+
+2. **The matrix missed a refusal that `refusal-message.ts` enumerates**, and the miss is in Decision
+   5's own territory. `set_disclosure` has *three* answers for a bad audience — `bad_request` for a
+   pair that is not an audience, and `unprocessable_entity` for an `audience_id` that **is** an id
+   and names no venue, which arrives as a foreign-key changeset because
+   `Disclosure.declare_constraints/1` declares one. The matrix tested the first two only. A test was
+   added ("refuses an audience that is an id and names nothing by naming the field"); without it,
+   the path from `Ecto.ConstraintError` to a reply is untested on a channel where a raise takes the
+   whole surface down. M20 kills it, along with the two blank-text tests.
+
+3. **No `Map.take/2` in front of the three writes, which the brief left open.** `DeclaredEntry`'s
+   `cast/3` allowlist is exactly the four fields the contract sends, `CorrectionRequest`'s is
+   `[:body]`, and `Disclosure` casts nothing at all — so the guard `EmployerController`'s
+   `@term_fields` is would have nothing to protect and would be a second copy of a field list. The
+   difference from `EmployerController` is that there the changeset *would* cast `grant_id`.
+   Recorded rather than measured: there is no mutation for a guard that was not written.
+
+4. **`declare_entry` needed a fallback clause the matrix folded into one row.** It is the only event
+   with no id, so `%{}` in the head matches every JSON object and the only way to miss is a payload
+   that is not one. Falling through to the terminal clause would answer "this channel does not
+   handle that event" about an event it does handle, so it has its own sentence. Row 26 tests all
+   three fallbacks and asserts two of the bodies are unequal; M15 kills it.
+
+5. **The acceptance test went further than the brief promised.** Decision 8 asked for a `Jason`
+   round trip, which is what row 27 does — and M18 confirms it is the only assertion in the file
+   that catches a struct on the wire, killing that test and nothing else, exactly as predicted. On
+   top of that, the finished channel was run **against a real Phoenix server over a real websocket**
+   using the `phoenix` JS client the browser uses, on a throwaway Postgres cluster
+   (`initdb` on port 55432, prod build, `PHX_SERVER=true`), following the recipe in
+   `client/src/socket/session-socket.integration.test.ts`. Thirty checks, all passing: the join
+   reply's keys, all seven events, `audience_kind` arriving as the string `"venue"`, a stranger's
+   profile refused `not_found`, an unknown event refused `bad_request`, a blank label refused
+   `unprocessable_entity` **with `fields`**, the channel still answering afterwards, and a topic
+   naming somebody else refused `unauthorized` before any of it. Neither `hospitality_coms_dev` nor
+   `hospitality_coms_test` was touched, and the cluster was destroyed afterwards. This is not in the
+   suite: it needs a server, and the three client integration files that need one are already
+   skipped for that reason.
+
+6. **Rows do not map one-to-one onto test bodies**, as every brief since U8 has recorded. Thirty-one
+   rows became **19** bodies in `profile_channel_test.exs` and **2** new bodies plus **2** extended
+   ones in `sockets_test.exs`.
+
+7. **Baseline arithmetic.** Elixir **1245/1249** before, **1275/1279** after — the same four
+   `PostgresRolesTest` failures naming `hospitality_coms_dev` (issue #20). Client **514 passed / 15
+   skipped** before and after, with nothing under `client/` edited.
+
+8. **One thing the unit found and deliberately did not fix.** `client/src/features/profile/contract.ts`'s
+   header and three passages in `client/README.md` still say no channel answers these events. That is
+   false as of this unit. They were left alone because the contract is this unit's *specification*
+   and an edit under `client/` would have been the signal that the channel had diverged from it;
+   the correction is recorded in `CLAUDE.md`'s Realtime section and reported as follow-up instead.
+
+## Mutation record
+
+Twenty-one mutations, each applied to the finished tree, run against the whole suite, then restored.
+Counts are failures minus the four `PostgresRolesTest` baseline failures.
+
+| # | Mutation | Predicted | Killed |
+|---|----------|-----------|--------|
+| M1 | `admitted/3` drops the repeated variable | ≥1 | **1** |
+| M2 | the join reply drops `incompleteness_notice` | ≥1 | 3 |
+| M3 | `join/3` builds its scope from assigns, not `ChannelAuth.join_scope/1` | ≥1 | **1** |
+| M4 | `profile` filters attested entries by the ledger | ≥1 | **1** |
+| M5 | `rendered_declaration/1` says `id` | ≥3 | 4 |
+| M6 | `rendered_correction/1` says `id` | ≥2 | 2 |
+| M7 | `rendered_disclosure/1` emits the two nullable columns | ≥2 | 2 |
+| M8 | `peer_profile` gates on `Peers.visible?/2` in front of the context | ≥1 | **1** |
+| M9 | the `peer_profile` reply gains a ledger | ≥1 | 3 |
+| M10 | the terminal `handle_in/3` clause is deleted | ≥1 | **1** |
+| M11 | the `handle_info/2` catch-all is deleted | ≥1 | **0**, wrong |
+| M11b | a specific `handle_info/2` clause is added **and** the catch-all deleted | — | **1** |
+| M12 | `with_id/3` passes the raw string through uncast | ≥1 | 2 |
+| M13 | the instant is captured at join (KTD5 broken) | ≥1 | **1** |
+| M14 | `audience/2`'s fallback treats an unknown kind as `:venue` | ≥1 | **1** |
+| M15 | `set_disclosure` loses its own fallback sentence | ≥1 | **1** |
+| M16 | `EmployerSocket` gains `channel "profile:*"` | ≥1 | **1** |
+| M17 | `rendered_entry/1` gains `person_id` | ≥1 | 3 |
+| M18 | `list_disclosures` replies with the structs rather than maps | 0 without row 27, ≥1 with it | **1** |
+| M19 | `:not_a_peer` becomes `unauthorized` rather than `not_found` | ≥1 | 2 |
+| M20 | a changeset becomes a flat `bad_request` with no fields | ≥2 | 3 |
+
+**Four are worth reading twice.**
+
+- **M11 is the wrong prediction**, and M11b beside it is the only thing that makes the catch-all's
+  value measurable at all. Neither number says anything alone.
+- **M18 is the prediction that held, and it is what the acceptance test was written for.** It kills
+  exactly one test — the `Jason` round trip — and nothing else, which is the point: every other
+  assertion in the file reads the Elixir term, so a struct on the wire is invisible to all of them
+  and fatal in a browser.
+- **M4 kills exactly one test, and that test needs its control to mean anything.** The ledger filter
+  is the plausible-looking bug this unit is most likely to have shipped, and only
+  `"shows an entry the worker has concealed from a venue"` catches it. That test in turn passes
+  against a `set_disclosure` that wrote nothing, which is what the employer-side control beside it
+  refuses — and the control is a *separate* test, so M4 killing one rather than two is correct.
+- **M8 kills one, and it is the test written for it.** A `Peers.visible?/2` gate in front of the
+  context satisfies every other peer assertion in the file, because every other pair in it is
+  currently co-rostered. A control whose mutation kills only the control is a control that was
+  needed.

@@ -352,6 +352,13 @@ defmodule HospitalityComsWeb.ProfileChannel do
   channel out of that fallback, and the failure mode then is one unhandled
   message taking the whole surface down (KTD10). Putting it back afterwards is
   the step somebody forgets.
+
+  **Measured, so the sentence above is not read as more than it is: deleting
+  this clause kills 0 tests.** It is the only `handle_info/2` clause here, so
+  removing it makes the module export none, which restores exactly the fallback
+  it is standing in for. Add one specific clause and delete it — which is the
+  state the day an announcement arrives — and the stray-message test fails. The
+  value is visible only as that pair; on its own this is insurance, not a guard.
   """
   @impl true
   @spec handle_info(term(), Socket.t()) :: {:noreply, Socket.t()}
