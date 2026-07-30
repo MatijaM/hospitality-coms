@@ -80,10 +80,6 @@ function PeerSurfaceView({ personId }: { readonly personId: string }) {
   return (
     <section>
       <h1>Peers</h1>
-      <p>
-        Everything here comes from the server every time this page is opened. Nothing
-        about who you know is stored in this browser.
-      </p>
 
       <ConnectionState connection={surface.connection} />
       <Notice notice={surface.notice} onDismiss={surface.clearNotice} />
@@ -192,8 +188,7 @@ function PeopleYouCanSee({
       <h2>People you can see</h2>
       <p>
         Anybody you worked with at the same place at the same time, for thirty days after
-        the first of the two engagements ended. It is worked out fresh on every request —
-        nothing here is a list somebody keeps.
+        the first of the two engagements ended.
       </p>
       {surface.peers.length === 0 ? (
         <p>Nobody right now.</p>

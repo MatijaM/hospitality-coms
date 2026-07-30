@@ -141,9 +141,9 @@ function VenueDesk({ venue }: { readonly venue: ManagedVenue }) {
 
       <h3>People here now</h3>
       <p>
-        Everyone whose term is open at this moment. No name and no address: this API has
-        neither, and the engagement id below is this venue&rsquo;s alone — it says nothing
-        about where else somebody works.
+        Everyone whose term is open at this moment. No name and no address, and the
+        engagement id below is this venue&rsquo;s alone — it says nothing about where else
+        somebody works.
       </p>
 
       <Unlisted
@@ -294,7 +294,7 @@ function ShiftForm({
       <Unlisted
         state={types.state}
         onRetry={types.reload}
-        empty="No shift types are configured at this venue, so no shift can be created here. Shift types are set up outside this page; a venue with none is a gap in the seed rather than in this form."
+        empty="No shift types are configured at this venue, so no shift can be created here. Shift types are set up outside this page."
       />
 
       <form
@@ -652,9 +652,8 @@ function ClaimCode({
       <h4>Claim code</h4>
       <p>
         <strong>Copy this now — it is shown once and nothing can show it again.</strong>{" "}
-        The server keeps only a one-way digest of it, so no page, no route and no backup
-        can produce it a second time. Send it to the new starter however you already talk
-        to them; this product holds no address for them and never will.
+        Send it to the new starter however you already talk to them; this product holds no
+        address for them and never will.
       </p>
       <p>
         <code>{issued.claimCode}</code>

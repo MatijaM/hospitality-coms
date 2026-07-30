@@ -33,8 +33,8 @@
  * progress goes. That is exactly what navigating from `/rooms` to `/peers`
  * already did, so nothing is worse than it was — but a tab strip reads like
  * Slack's, where the conversation is still there when you come back, and this
- * one is not. Do not add persistence here by rendering all three and hiding
- * two; the paragraph above is why.
+ * one is not. Do not add persistence here by rendering all four and hiding
+ * three; the paragraph above is why.
  *
  * ## The identity block is above the tabs
  *
@@ -46,57 +46,74 @@
  * pages of their own and a shared terminal needs the log-out on every screen a
  * session rests on. Same sentence, same button label, moved verbatim.
  *
- * ## The two employer doors are links and not tabs
+ * ## Venues is the fourth tab, and it is not like the other three
  *
- * `/employer` and `/claim` are used by two people in two windows at once, so
- * neither is "another surface of mine" the way the three tabs are — and the
- * tab strip is a keyboard widget whose wrapping is asserted over exactly three
- * entries. They sit under their own heading with a sentence saying which
- * person each is for, which is also the only place this client says out loud
- * that managing a venue and working at one are the same account.
+ * `/rooms`, `/peers` and `/profile` are each a real route that this page mounts
+ * a *second* door to. **Venues mounts no surface and has no route of its own**
+ * — there is no `/venues`, so do not go looking for one. Its panel is two
+ * links, and the pages behind them stay full screens rather than becoming
+ * panels: `/employer` and `/claim` are used by two people in two windows at
+ * once, which is why they were never candidates to be tabs themselves.
  *
- * It lost its `<h1>Signed in</h1>` in the move. Each of the three surfaces
- * brings its own — "Rooms", "Peers", "Your record" — so keeping one here made
- * two on the page, and the one that would have won the reader's attention was
- * a greeting rather than the name of what they were looking at.
+ * What changed is where those two links live. They sat under their own heading
+ * *below* the panel, which put the thing a manager comes here for underneath
+ * whichever surface happened to be open, and left the tab strip claiming to be
+ * the page's navigation while the most consequential control on it was not a
+ * tab. As a tab it is one press from anywhere on the page, and reachable from
+ * the keyboard like the other three.
  *
- * ## Say what is missing, not which unit owes it
+ * The strip's wrapping is asserted over exactly the entries in `TABS`, so
+ * adding one is a change to `app.test.tsx` rather than only to this file.
  *
- * The notes under the panel previously read "waiting on U9", "waiting on U10",
- * "waiting on U11". All three shipped, and the list still said so — it was
- * written when they were future work and nothing brought it back. Worse, the
- * vocabulary was the plan's: a worker reading "waiting on U9" learns nothing,
- * and a developer reading it after U9 merged learns something false.
+ * **The `/employer` link is shown unless the server has said there are none.**
+ * That is deliberately not "shown once we know there are some" — the two read
+ * identically until the network fails. `venueDoorOpen` below carries the
+ * argument.
  *
- * So each entry now names the thing that is actually absent. Those are
- * checkable claims, and one of them is checked: the Profile tab cannot connect
- * because `PersonSocket` routes no `profile:*` topic, and `sockets_test.exs`
- * pins that socket's routing table exactly, with a control. Adding the channel
- * fails that test, which is where somebody will be standing when this
- * paragraph needs deleting.
+ * It lost its `<h1>Signed in</h1>` in the move to tabs. Each of the three
+ * surfaces brings its own — "Rooms", "Peers", "Your record" — so keeping one
+ * here made two on the page, and the one that would have won the reader's
+ * attention was a greeting rather than the name of what they were looking at.
  *
- * The profile is stated separately from the two absences below it, and the
- * split is the claim rather than layout: that surface **is** reachable — it is
- * a tab, it mounts, it renders — and only its wire is missing. Erasure and the
- * demo controls have no way in from a browser at all. Folding the three into
- * one list is what made the old one say three false things at once.
+ * ## The page no longer explains itself to a developer
+ *
+ * Three blocks of prose used to sit under the panel: a paragraph on the profile
+ * tab having no channel behind it, and a list headed "Not reachable from here
+ * yet" naming erasure, retention and the demo controls. They were addressed to
+ * whoever was building the next unit — they cited units, a file path, "no
+ * endpoint and no channel", and an HTTP header — so a worker who signed in to
+ * read a room was handed a status report on the project instead of the product.
+ *
+ * They are deleted rather than reworded, because the reader they were written
+ * for is not on this screen and every claim they made is still recorded where
+ * that reader will be standing: `features/profile/contract.ts` is the one place
+ * that says nothing on the server answers a profile event, and `sockets_test.exs`
+ * pins the routing table that makes it true.
+ *
+ * The rule the sweep followed, for whoever does the next surface: copy that
+ * tells a worker what is true of *their* record, or what to do next, stays.
+ * Copy that tells a developer how the thing is put together goes.
  */
 
 import type { KeyboardEvent } from "react";
 import { useId, useRef, useState } from "react";
 import { Link } from "react-router";
 
+import type { ManagedVenue } from "../../features/employer/employer";
+import { useManagedVenues } from "../../features/employer/use-employer-venue";
 import { PeersRoute } from "../../features/peers/peers-route";
 import { ProfileRoute } from "../../features/profile/profile-route";
 import type { RoomStore } from "../../features/rooms/room-store";
 import { RoomsRoute } from "../../features/rooms/rooms-route";
 import { useSession } from "../../session/session-context";
 import { SessionBar } from "../session-bar";
+import type { Loaded } from "../use-fetched";
 
 const TABS = [
   { id: "rooms", label: "Rooms" },
   { id: "peers", label: "Peers" },
   { id: "profile", label: "Profile" },
+  { id: "venues", label: "Venues" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -115,8 +132,8 @@ export function HomeRoute({ roomStore }: HomeRouteProps) {
   const ids = useId();
 
   // Only for moving focus with the arrow keys. A roving `tabIndex` takes the
-  // other two tabs out of the tab order, so after an arrow key the browser has
-  // nowhere to put focus on its own.
+  // other three tabs out of the tab order, so after an arrow key the browser
+  // has nowhere to put focus on its own.
   const buttons = useRef(new Map<TabId, HTMLButtonElement>());
 
   // `RequireSession` renders this only when the session is authenticated. The
@@ -140,10 +157,17 @@ export function HomeRoute({ roomStore }: HomeRouteProps) {
    * Arrow keys move between the tabs, wrapping at both ends; Home and End go
    * to the first and last.
    *
-   * Selection follows focus, which is the pattern's automatic-activation form
-   * and the right one here: the three panels are already on this device and
-   * nothing is fetched by arriving at one, so there is no cost to landing on a
-   * tab you were only passing through.
+   * Selection follows focus, which is the pattern's automatic-activation form.
+   * It was free when every panel was already on this device; **Venues fetches**,
+   * so arrowing past it now costs one `GET /api/employer/venues` for a tab the
+   * worker was only passing through.
+   *
+   * Kept anyway. That read is idempotent, it is the same call opening the tab
+   * makes deliberately, and the alternative — manual activation, where the
+   * arrow keys move focus and Enter selects — is a second interaction rule for
+   * one tab in four, on the surface a session opens on. The cost is one request
+   * somebody's keyboard travel decided to make; the cost of the other is that
+   * three tabs behave one way and the fourth another.
    */
   function onKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
     const here = TABS.findIndex((tab) => tab.id === open);
@@ -173,8 +197,8 @@ export function HomeRoute({ roomStore }: HomeRouteProps) {
             }}
             aria-selected={tab.id === open}
             /*
-              Named only on the selected tab, because the other two panels are
-              not in the document — see this file's header — and an
+              Named only on the selected tab, because the other three panels
+              are not in the document — see this file's header — and an
               `aria-controls` pointing at an id nothing has is worse than none
               at all: a screen reader offers a jump that goes nowhere.
             */
@@ -193,68 +217,19 @@ export function HomeRoute({ roomStore }: HomeRouteProps) {
       <div role="tabpanel" id={panelId(open)} aria-labelledby={tabId(open)}>
         <Surface open={open} roomStore={roomStore} />
       </div>
-
-      {/*
-        Below the panel rather than above it: these are notes about the product,
-        and a worker who came here to read a room should not have to scroll past
-        them to reach one.
-      */}
-      <h2>Venues</h2>
-      <p>
-        The same account does both of these. There is no separate employer log-in and no
-        employer password — an authority is something a venue grants to a person, and it
-        is checked against the database on every single request.
-      </p>
-      <ul>
-        <li>
-          <Link to="/employer">Venues you manage</Link> — who is engaged at one of them
-          right now, and the offer that brings somebody new onto it. Empty, with a
-          sentence, if nobody has granted you an authority anywhere.
-        </li>
-        <li>
-          <Link to="/claim">Claim a job</Link> — paste a code a manager handed you and see
-          the engagement it produced.
-        </li>
-      </ul>
-
-      <h2>Profile</h2>
-      <p>
-        <strong>That tab cannot connect yet.</strong> The record itself is built —
-        attested entries, declared entries, corrections, and the per-venue and per-person
-        disclosure rules — but no channel carries any of it to this browser, so the tab
-        renders against the shapes in <code>features/profile/contract.ts</code> and waits
-        for a reply that does not come. It is a tab rather than one of the absences below
-        because the thing it names exists; what is missing is the wire to it.
-      </p>
-
-      <h2>Not reachable from here yet</h2>
-      <p>
-        Both of these exist in the backend and neither has a way in from a browser.
-        Nothing is stubbed, because a placeholder for a shape nobody has chosen costs more
-        to remove than to write.
-      </p>
-      <ul>
-        <li>
-          <strong>Erasure and retention.</strong> Erasing an account, and the deadlines
-          that delete old messages, run on the server. There is no endpoint and no
-          channel, so no screen can ask for them.
-        </li>
-        <li>
-          <strong>The demo controls.</strong> Seeding, moving the clock and running due
-          work are HTTP endpoints under <code>/api/demo</code>, in development builds
-          only, and they need an <code>x-demo-control</code> header. There is no UI for
-          them.
-        </li>
-      </ul>
     </section>
   );
 }
 
 /**
- * The three surfaces, rendered exactly as their own routes render them.
+ * What the open tab shows.
  *
- * An exhaustive switch rather than three `&&`s, so that a fourth tab is a
- * compile error here rather than a blank panel at runtime.
+ * Three of the four are a surface rendered exactly as its own route renders it.
+ * The fourth is `VenueDoors`, which is this file's own and is why the return
+ * type is not "one of the three routes" — see the header.
+ *
+ * An exhaustive switch rather than four `&&`s, so that a fifth tab is a compile
+ * error here rather than a blank panel at runtime.
  */
 function Surface({
   open,
@@ -270,7 +245,64 @@ function Surface({
       return <PeersRoute />;
     case "profile":
       return <ProfileRoute />;
+    case "venues":
+      return <VenueDoors />;
   }
+}
+
+/**
+ * The two ways into the employer half of the product.
+ *
+ * `useManagedVenues` is the hook `EmployerRoute` already uses rather than a
+ * second fetch of the same list, so there is one spelling of "which venues may
+ * this session act for" and one place a change to it lands.
+ *
+ * **The request is made when this tab is opened and not before**, which is the
+ * one place the "only the open tab is mounted" rule in the header pays rather
+ * than costs: a worker who never manages anything never opens this tab and
+ * never makes the call. Nothing is cached between opens, deliberately —
+ * `use-employer-venue.ts` gives the reason, and it is the same one that keeps a
+ * revoked authority off the screen.
+ */
+function VenueDoors() {
+  const venues = useManagedVenues();
+
+  return (
+    <ul>
+      {venueDoorOpen(venues.state) && (
+        <li>
+          <Link to="/employer">Venues you manage</Link>
+        </li>
+      )}
+      <li>
+        <Link to="/claim">Claim a job</Link>
+      </li>
+    </ul>
+  );
+}
+
+/**
+ * Whether to offer the way into `/employer`.
+ *
+ * **Hidden only on a successful answer naming no venues** — never on "not known
+ * to be non-empty", and the two are indistinguishable until the network fails,
+ * which is exactly when the difference matters. Written the other way round, a
+ * manager whose one request timed out loses their only door into their own
+ * venues and has nothing on screen to say why.
+ *
+ * So a read that is still in flight, refused, or idle all show the link. The
+ * cost is bounded and already paid for: `/employer` has its own copy for the
+ * empty case *and* for the failed one, so the worst outcome is a link to a page
+ * that explains itself properly. The cost of the other choice is unbounded —
+ * there is no other route to that page from this client.
+ *
+ * **In-flight is therefore the same answer as refused, on purpose.** A separate
+ * "wait and see" branch would spare somebody who manages nothing a link that
+ * appears and vanishes, and would charge the manager — the person the door is
+ * for — a wait for it. One predicate, and the person who needs it never waits.
+ */
+function venueDoorOpen(state: Loaded<readonly ManagedVenue[]>): boolean {
+  return state.status !== "ready" || state.value.length > 0;
 }
 
 /** The tab an arrow, Home or End key asks for, or `null` for any other key. */
