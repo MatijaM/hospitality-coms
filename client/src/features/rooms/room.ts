@@ -102,15 +102,17 @@ export type RoomEntry = {
  * Attribution is the **engagement**, never the person (KTD15b), and it is
  * venue-local by construction.
  *
- * `authorDisplayName` is the author's own chosen name (#66), joined by the
- * server on every read rather than stored beside the message — so it follows a
- * rename, and an erased author's history renders under a non-identifying
- * constant with no row in `room_messages` having been touched.
+ * `authorDisplayName` is the author's own chosen name (#66) and
+ * `authorRoleLabel` is what the venue calls the job they do there (#65). Both
+ * are joined by the server on every read rather than stored beside the message
+ * — so the name follows a rename, the label follows a corrected engagement, and
+ * an erased author's history renders under two non-identifying constants with
+ * no row in `room_messages` having been touched.
  *
- * **Both are on the wire and both are rendered.** Display names are
- * deliberately not unique, so the name alone cannot tell two colleagues who
- * drew the same character apart; the engagement id is what does, and it is
- * venue-local where the name is not.
+ * **All three are on the wire and all three are rendered.** Neither the name
+ * nor the label is unique — a venue can hold two Bartenders and two people can
+ * draw the same character — so the engagement id is the only one of the three
+ * that tells two speakers apart, and it is venue-local where the name is not.
  */
 export type RoomMessage = {
   readonly id: string;
@@ -118,6 +120,7 @@ export type RoomMessage = {
   readonly sentAt: string;
   readonly authorEngagementId: string;
   readonly authorDisplayName: string;
+  readonly authorRoleLabel: string;
 };
 
 /**

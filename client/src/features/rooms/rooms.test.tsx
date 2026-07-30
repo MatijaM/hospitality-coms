@@ -365,6 +365,7 @@ describe("a rejected send", () => {
         sent_at: "2026-07-28T09:00:00Z",
         author_engagement_id: OWN_ENGAGEMENT_ID,
         author_display_name: "Captain Nemo",
+        author_role_label: "Head Chef",
       });
     });
 
@@ -649,6 +650,7 @@ describe("messages", () => {
         sent_at: "2026-07-28T09:00:00Z",
         author_engagement_id: OTHER_ENGAGEMENT_ID,
         author_display_name: "Captain Nemo",
+        author_role_label: "Head Chef",
       });
       channel.emit("message", {
         id: "aaaaaaaa-0000-4000-8000-000000000002",
@@ -656,6 +658,7 @@ describe("messages", () => {
         sent_at: "2026-07-28T09:01:00Z",
         author_engagement_id: OWN_ENGAGEMENT_ID,
         author_display_name: "Captain Nemo",
+        author_role_label: "Bartender",
       });
     });
 
@@ -664,27 +667,33 @@ describe("messages", () => {
     });
     const bodies = messageBodies();
 
-    // Attribution is the author's chosen name **and** the engagement (KTD15b,
-    // #66). This session's own engagement id came back on the join reply, so it
-    // can mark its own — and somebody else's line leads with their name, with
-    // the shortened engagement id beside it because display names are not
-    // unique. The full id is still never rendered.
+    // Attribution is who they are, what they do here, and the engagement
+    // (KTD15b, #66, #65). This session's own engagement id came back on the
+    // join reply, so it can mark its own — and somebody else's line leads with
+    // their name, then the venue's own label for them, then the shortened
+    // engagement id, because neither of the first two is unique. The full id is
+    // still never rendered.
     expect(bodies[0]).toContain("kitchen is short tonight");
     expect(bodies[0]).toMatch(
-      new RegExp(`^Captain Nemo · ${OTHER_ENGAGEMENT_ID.slice(0, 8)}`),
+      new RegExp(`^Captain Nemo · Head Chef · ${OTHER_ENGAGEMENT_ID.slice(0, 8)}`),
     );
     expect(bodies[0]).not.toContain(OTHER_ENGAGEMENT_ID);
     expect(bodies[1]).toMatch(/^You/);
     expect(bodies[1]).not.toContain("Captain Nemo");
+    expect(bodies[1]).not.toContain("Bartender");
     expect(bodies[1]).toContain("i can stay");
   });
 
   it("names an author whose engagement has ended, from what the server sent", async () => {
-    // #66's argument for the server carrying the name. A venue room keeps full
-    // history, so a message from somebody no longer on the roll is ordinary —
-    // and this client holds no roll to join against anyway. The name is on the
-    // message, so the only way this can be wrong is the server getting it
-    // wrong, which is where `rooms_test.exs` asserts it.
+    // #66's and #65's argument for the server carrying both. A venue room keeps
+    // full history, so a message from somebody no longer on the roll is
+    // ordinary — and this client holds no roll to join against anyway. Both
+    // values are on the message, so the only way this can be wrong is the
+    // server getting it wrong, which is where `rooms_test.exs` asserts it.
+    //
+    // An erased author reads as **both** constants, which is deliberate: who
+    // they were and what they did are two facts and the server keeps two
+    // separate strings for them.
     const { socket } = renderRooms([entry(venueRoom)]);
     const channel = await open(socket, venueRoom);
 
@@ -695,6 +704,7 @@ describe("messages", () => {
         sent_at: "2026-07-28T08:00:00Z",
         author_engagement_id: OTHER_ENGAGEMENT_ID,
         author_display_name: "Former colleague",
+        author_role_label: "Former team member",
       });
     });
 
@@ -703,7 +713,9 @@ describe("messages", () => {
     });
 
     expect(messageBodies()[0]).toMatch(
-      new RegExp(`^Former colleague · ${OTHER_ENGAGEMENT_ID.slice(0, 8)}`),
+      new RegExp(
+        `^Former colleague · Former team member · ${OTHER_ENGAGEMENT_ID.slice(0, 8)}`,
+      ),
     );
   });
 
@@ -718,6 +730,7 @@ describe("messages", () => {
       sent_at: "2026-07-28T09:02:00Z",
       author_engagement_id: OWN_ENGAGEMENT_ID,
       author_display_name: "Captain Nemo",
+      author_role_label: "Head Chef",
     };
 
     await userEvent.type(composer(), "on my way");

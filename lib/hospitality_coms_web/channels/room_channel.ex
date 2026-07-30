@@ -48,7 +48,8 @@ defmodule HospitalityComsWeb.RoomChannel do
           body: String.t(),
           sent_at: String.t(),
           author_engagement_id: Ecto.UUID.t(),
-          author_display_name: String.t()
+          author_display_name: String.t(),
+          author_role_label: String.t()
         }
 
   @typedoc """
@@ -183,16 +184,34 @@ defmodule HospitalityComsWeb.RoomChannel do
   already what `room_messages.author_engagement_id` holds. A client that can
   render a message can render a presence entry with the same key.
 
-  ## Both the id and the name, and neither replaces the other
+  ## Three values, and no two of them do the same work
 
-  `author_display_name` is the person's own (#66), joined on the read by
-  `HospitalityComs.Rooms.Records.with_author_display_name/1` and taken off the
-  sender's scope on the write. Display names are deliberately **not unique** —
-  a globally unique readable name would be a second `person_id` in plain text —
-  so the id stays beside it as the disambiguator, and a client renders both.
-  Dropping the id would make two colleagues who drew the same character
-  indistinguishable; dropping the name puts the room back to eight hex
-  characters, which is the issue.
+  `author_display_name` is the person's own (#66) and `author_role_label` is the
+  venue's own words for what they do (#65). Both are joined on the read by
+  `HospitalityComs.Rooms.Records.with_author/1`, and both sends read the row
+  back through that same query rather than assembling it from what they hold.
+
+    * **The name** says who spoke. It is global and it is deliberately **not
+      unique** — a globally unique readable name would be a second `person_id`
+      in plain text.
+    * **The label** says what that person does *at this venue*, which in a work
+      chat is often what decides whether you act on the message. It is
+      venue-local and it is not unique either: a venue can have two Bartenders.
+    * **The engagement id** is what actually distinguishes them, and it is the
+      only one of the three that does. Drop it and two colleagues who drew the
+      same character and hold the same job are one speaker.
+
+  ## An erased author reads as two constants, deliberately
+
+  Erasure overwrites `people.display_name` with
+  `HospitalityComs.Lifecycle.erased_display_name/0` and
+  `engagements.role_label` with `HospitalityComs.Lifecycle.erased_label/0`, so
+  their history renders **Former colleague · Former team member · 4a3f…**. That
+  doubling is on purpose and is named here so it is not read as an oversight:
+  the two are different facts about different things — who a person called
+  themselves, and what an employer wrote about a job — kept as separate
+  constants with no asserted relation, and suppressing one would be the only
+  special case in a render function that has none.
 
   **One disclosure follows and it is on the record rather than closed.** The id
   is venue-local by construction; the name is the same string at every venue. So
@@ -202,20 +221,30 @@ defmodule HospitalityComsWeb.RoomChannel do
   `person_id`, now reachable without the join.
   `HospitalityComs.Accounts.Person`'s moduledoc carries the full statement.
 
-  It matches on the field being a binary rather than reading it, so a message
-  read by a path that forgot the join is a `FunctionClauseError` here rather
-  than a `null` on the wire and an `undefined` in a heading. That is
+  **A second, smaller one arrives with the label.** That roll is the venue's
+  *active* engagements and peer visibility lapses thirty days past a term's end,
+  while a venue room keeps full history — so somebody who joined last week can
+  now read out of the history that a person who left two years ago was the head
+  chef. It is a job title at a venue, authored by that venue, attached to words
+  that venue already retains indefinitely (KTD15c). `CLAUDE.md`'s "Five
+  disclosures on the record" carries it.
+
+  It matches on both fields being binaries rather than reading them, so a
+  message read by a path that forgot the join is a `FunctionClauseError` here
+  rather than a `null` on the wire and an `undefined` in a heading. That is
   `HospitalityComsWeb.RoomController.rendered_shift_room/1`'s manoeuvre against
-  an unloaded association, applied to a virtual field.
+  an unloaded association, applied to two virtual fields.
   """
   @spec rendered(RoomMessage.t()) :: rendered()
-  def rendered(%RoomMessage{author_display_name: name} = message) when is_binary(name) do
+  def rendered(%RoomMessage{author_display_name: name, author_role_label: label} = message)
+      when is_binary(name) and is_binary(label) do
     %{
       id: message.id,
       body: message.body,
       sent_at: DateTime.to_iso8601(message.sent_at),
       author_engagement_id: message.author_engagement_id,
-      author_display_name: name
+      author_display_name: name,
+      author_role_label: label
     }
   end
 end

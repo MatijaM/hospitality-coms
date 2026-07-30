@@ -34,6 +34,7 @@ defmodule HospitalityComsWeb.VenueRoomChannelTest do
   alias HospitalityComs.Rooms
   alias HospitalityComs.Rooms.RoomMessage
   alias HospitalityComsWeb.PersonSocket
+  alias HospitalityComsWeb.RoomChannel
 
   @now HospitalityComs.EngagementsFixtures.fixed_instant()
   @an_hour_on DateTime.add(@now, 1, :hour)
@@ -44,6 +45,13 @@ defmodule HospitalityComsWeb.VenueRoomChannelTest do
   # every refusal has to be the same string: telling them apart is the
   # enumeration AE1 forbids.
   @refused %{code: "unauthorized", message: "this session is not in that venue's room"}
+
+  # `RoomChannel.rendered/1`'s whole shape, written down rather than derived.
+  # `HospitalityComsWeb.ShiftRoomChannelTest` writes the same literal against
+  # the other room kind, which is what makes "one spelling of a message" an
+  # assertion rather than a claim: a divergence fails even if both files were
+  # edited in the same sitting.
+  @message_keys ~w(author_display_name author_engagement_id author_role_label body id sent_at)a
 
   describe "joining a venue room" do
     test "succeeds for an engagement active at this instant" do
@@ -175,23 +183,25 @@ defmodule HospitalityComsWeb.VenueRoomChannelTest do
 
     test "names the author on the reply and on the broadcast, with the same key set" do
       # `RoomChannel.rendered/1` is the single spelling of a message and this is
-      # the transport half of it (#66). The reply and the broadcast are asserted
-      # to have the **same key set** rather than each having the key, because
-      # one shape for one entity is the claim — U8's `sent_at`/`at` split is the
-      # defect this prevents, and it survived a fix once already (#31).
-      %{venue: venue, person: person, socket: socket} = engaged()
+      # the transport half of it (#66, #65). The reply and the broadcast are
+      # asserted to have the **same key set** rather than each having the key,
+      # because one shape for one entity is the claim — U8's `sent_at`/`at`
+      # split is the defect this prevents, and it survived a fix once already
+      # (#31).
+      %{venue: venue, person: person, engagement: engagement, socket: socket} = engaged()
       {:ok, _reply, channel} = subscribe_and_join(socket, topic(venue), %{})
 
       ref = push(channel, "send", %{"body" => "who has the pass?"})
 
       assert_reply ref, :ok, sent
       assert sent.author_display_name == person.person.display_name
+      assert sent.author_role_label == engagement.role_label
       assert_broadcast "message", broadcast
       assert broadcast.author_display_name == person.person.display_name
+      assert broadcast.author_role_label == engagement.role_label
       assert Enum.sort(Map.keys(broadcast)) == Enum.sort(Map.keys(sent))
 
-      assert Enum.sort(Map.keys(sent)) ==
-               ~w(author_display_name author_engagement_id body id sent_at)a
+      assert Enum.sort(Map.keys(sent)) == @message_keys
     end
 
     test "carries no person id on the wire" do
@@ -290,7 +300,52 @@ defmodule HospitalityComsWeb.VenueRoomChannelTest do
     end
   end
 
+  describe "the rendered shape" do
+    test "refuses a message whose author was not joined on" do
+      # Both `author_display_name` and `author_role_label` are **virtual**, so
+      # a `%RoomMessage{}` that reached a render without
+      # `HospitalityComs.Rooms.Records.with_author/1` carries `nil` for each.
+      # `rendered/1` heads on both being binaries so that the read path which
+      # forgot the join is a `FunctionClauseError` here rather than a `null` on
+      # the wire and an `undefined` in a heading. Each field is asserted with
+      # the other one present, so neither guard is covered by the other.
+      assert %{author_display_name: "Captain Nemo", author_role_label: "Head Chef"} =
+               RoomChannel.rendered(unjoined(:whole))
+
+      assert_raise FunctionClauseError, fn -> RoomChannel.rendered(unjoined(:nameless)) end
+      assert_raise FunctionClauseError, fn -> RoomChannel.rendered(unjoined(:unlabelled)) end
+    end
+  end
+
   ## Fixtures
+
+  # A message that never met `Records.with_author/1`, in each of the three
+  # shapes, handed out of a map so that its type at the call site is the union
+  # of all three rather than the one the compiler can prove has no matching
+  # clause. Written inline, Elixir 1.20 proves the refusal at compile time and
+  # warns — a good warning and a bad test, because a row read out of the
+  # database carries no such proof and it is the run-time refusal the guard
+  # rests on. `HospitalityComs.RoomsTest.scope_of/2` does this for the same
+  # reason.
+  defp unjoined(shape) do
+    whole = %RoomMessage{
+      id: Ecto.UUID.generate(),
+      body: "on the pass",
+      sent_at: @now,
+      author_engagement_id: Ecto.UUID.generate(),
+      author_display_name: "Captain Nemo",
+      author_role_label: "Head Chef"
+    }
+
+    Map.fetch!(
+      %{
+        whole: whole,
+        nameless: %{whole | author_display_name: nil},
+        unlabelled: %{whole | author_role_label: nil}
+      },
+      shape
+    )
+  end
 
   defp topic(venue), do: "venue_room:" <> venue.id
 

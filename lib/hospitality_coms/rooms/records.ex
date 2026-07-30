@@ -731,14 +731,29 @@ defmodule HospitalityComs.Rooms.Records do
   end
 
   @doc """
-  The same messages, each carrying its author's display name (#66).
+  The same messages, each carrying who wrote it and what they do here.
 
   Two joins, no filter: `room_messages → engagements → people`, `select_merge`d
-  onto `RoomMessage`'s virtual `author_display_name`. **This is the last step in
-  every person-side read**, applied outside `most_recent/2`'s subquery rather
-  than inside it — the subquery's select is the message source, and a `join` on
-  a subquery source is the shape that leaves the bound and the ordering
-  untouched.
+  onto `RoomMessage`'s two virtual fields — `author_display_name`, the person's
+  own (#66), and `author_role_label`, the venue's own words for the job (#65).
+  **This is the last step in every person-side read**, applied outside
+  `most_recent/2`'s subquery rather than inside it — the subquery's select is
+  the message source, and a `join` on a subquery source is the shape that leaves
+  the bound and the ordering untouched.
+
+  ## Two fields, one join, and the second one was free
+
+  #65 weighed a client-side join against the venue room's roll and hedged on
+  what a server join would cost. By the time it was built the cost was zero:
+  `role_label` is a column on `engagements`, which this query already binds for
+  the hop to `people`, so the label is one more entry in a `select_merge` rather
+  than a join. Reading them as one function is also what keeps them arriving
+  together — a name without a role and a role without a name are both halves of
+  an attribution, and there is no read path that wants one.
+
+  The two say different things and neither substitutes for the other.
+  `display_name` is the person's, global, and follows a rename; `role_label` is
+  the employer's, venue-local, and follows a correction to the engagement.
 
   ## No predicate on the engagement, and that is the whole point
 
@@ -750,6 +765,10 @@ defmodule HospitalityComs.Rooms.Records do
   the hole `Rosters.list_roster/2` had to close by preloading (#60), reached
   from the other end of the term, and it is why this is a server join at all
   rather than a client-side one against a list the client already holds.
+
+  Both fields ride on that absence. The label is a column on the very row an
+  activeness predicate would have filtered, so the roll-based reading loses the
+  role exactly where it loses the name.
 
   Both are inner joins and neither can drop a row: `room_messages_author_fkey`
   is `MATCH FULL` into `engagements (id, venue_id)` and `engagements.person_id`
@@ -765,25 +784,28 @@ defmodule HospitalityComs.Rooms.Records do
   already holds nothing at all on `room_messages`, so no employer path reaches
   these reads in the first place.
   """
-  @spec with_author_display_name(Ecto.Queryable.t()) :: Ecto.Query.t()
-  def with_author_display_name(queryable) do
+  @spec with_author(Ecto.Queryable.t()) :: Ecto.Query.t()
+  def with_author(queryable) do
     from message in queryable,
       join: engagement in Engagement,
       on: engagement.id == message.author_engagement_id,
       join: person in Person,
       on: person.id == engagement.person_id,
-      select_merge: %{author_display_name: person.display_name}
+      select_merge: %{
+        author_display_name: person.display_name,
+        author_role_label: engagement.role_label
+      }
   end
 
   @doc """
   One message, by id.
 
-  Composed with `with_author_display_name/1` by both sends, to read back the row
-  they just inserted carrying its author's name — so the send reply and a
-  history read are produced by one query rather than by two spellings that can
-  drift. It is deliberately not filtered by venue or by room: the id comes from
-  an insert two steps earlier in the same transaction, so there is nothing a
-  caller could have chosen.
+  Composed with `with_author/1` by both sends, to read back the row they just
+  inserted carrying its author — so the send reply and a history read are
+  produced by one query rather than by two spellings that can drift. It is
+  deliberately not filtered by venue or by room: the id comes from an insert two
+  steps earlier in the same transaction, so there is nothing a caller could have
+  chosen.
   """
   @spec message(Ecto.UUID.t()) :: Ecto.Query.t()
   def message(message_id) when is_binary(message_id) do

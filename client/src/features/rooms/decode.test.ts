@@ -18,6 +18,7 @@ describe("a message", () => {
         sent_at: "2026-07-28T09:00:00Z",
         author_engagement_id: "33333333-3333-4333-8333-333333333333",
         author_display_name: "Captain Nemo",
+        author_role_label: "Head Chef",
       }),
     ).toEqual({
       id: "aaaaaaaa-0000-4000-8000-000000000001",
@@ -25,6 +26,7 @@ describe("a message", () => {
       sentAt: "2026-07-28T09:00:00Z",
       authorEngagementId: "33333333-3333-4333-8333-333333333333",
       authorDisplayName: "Captain Nemo",
+      authorRoleLabel: "Head Chef",
     });
   });
 
@@ -35,6 +37,7 @@ describe("a message", () => {
       sent_at: "c",
       author_engagement_id: "d",
       author_display_name: "e",
+      author_role_label: "f",
     };
 
     for (const missing of Object.keys(complete)) {
@@ -61,6 +64,7 @@ describe("a message", () => {
       sent_at: "2026-07-28T09:00:00Z",
       author_engagement_id: "d",
       author_display_name: "e",
+      author_role_label: "f",
     });
 
     expect(message?.sentAt).toBe("2026-07-28T09:00:00Z");
@@ -193,6 +197,7 @@ describe("a page of history", () => {
     sent_at: "2026-07-28T09:00:00Z",
     author_engagement_id: "33333333-3333-4333-8333-333333333333",
     author_display_name: "Captain Nemo",
+    author_role_label: "Head Chef",
   };
 
   it("reads the messages and whether they are the whole history", () => {
@@ -204,6 +209,7 @@ describe("a page of history", () => {
           sentAt: "2026-07-28T09:00:00Z",
           authorEngagementId: "33333333-3333-4333-8333-333333333333",
           authorDisplayName: "Captain Nemo",
+          authorRoleLabel: "Head Chef",
         },
       ],
       complete: false,
