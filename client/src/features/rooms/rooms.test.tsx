@@ -24,7 +24,7 @@ import { createFakeApi, ok, somePerson } from "../../test-support/fake-api";
 import type { FakeChannel } from "../../test-support/fake-socket";
 import { fakeSocketFactory } from "../../test-support/fake-socket";
 import type { RoomEntry, RoomRef } from "./room";
-import { roomTopic } from "./room";
+import { roomFallbackLabel, roomTopic } from "./room";
 import type { RoomStore } from "./room-store";
 import { createMemoryRoomStore } from "./room-store";
 
@@ -36,8 +36,12 @@ const OTHER_ENGAGEMENT_ID = "44444444-4444-4444-8444-444444444444";
 const venueRoom: RoomRef = { kind: "venue", id: VENUE_ID };
 const shiftRoom: RoomRef = { kind: "shift", id: SHIFT_ROOM_ID };
 
-function entry(ref: RoomRef, barred: RoomEntry["barred"] = null): RoomEntry {
-  return { ref, barred };
+function entry(
+  ref: RoomRef,
+  barred: RoomEntry["barred"] = null,
+  name: string | null = null,
+): RoomEntry {
+  return { ref, barred, name };
 }
 
 function renderRooms(
@@ -71,14 +75,24 @@ function renderRooms(
   return { socket, store };
 }
 
-/** Opens a listed room and answers its join, as the server would. */
+/**
+ * Opens a listed room and answers its join, as the server would.
+ *
+ * Every room in this file is opened from the recently-opened list with no name
+ * anywhere — the fake API's `read` fails by default, so the browse list never
+ * loads — which means every row here renders under `roomFallbackLabel`. That is
+ * navigation rather than an assertion, so it is derived; what the fallback
+ * actually reads is pinned against literals in `room.test.ts`.
+ */
 async function open(
   socket: ReturnType<typeof fakeSocketFactory>["socket"],
   ref: RoomRef,
   reply: object = { venue_id: VENUE_ID, engagement_id: OWN_ENGAGEMENT_ID },
 ): Promise<FakeChannel> {
   await userEvent.click(
-    await screen.findByRole("button", { name: new RegExp(`open .*${ref.id}`, "i") }),
+    await screen.findByRole("button", {
+      name: new RegExp(`^open ${roomFallbackLabel(ref)}$`, "i"),
+    }),
   );
 
   const channel = await waitFor(() => {
@@ -807,13 +821,40 @@ describe("the list itself", () => {
     expect(socket.channels).toHaveLength(0);
   });
 
-  it("leaves the topic when a room is closed by hand", async () => {
-    const { socket, store } = renderRooms([entry(venueRoom)]);
-    const channel = await open(socket, venueRoom);
+  it("offers one control per row, and it is the one that opens the room", async () => {
+    // There was a "Forget" beside every "Open". It went, and the list is
+    // bounded instead — `room-store.test.ts` holds the eviction.
+    //
+    // "No Forget button" passes against a panel that rendered nothing at all,
+    // so the control is in the same test: the list is found by its own label,
+    // both rows are counted, and each is asserted to carry exactly one button.
+    renderRooms([entry(venueRoom), entry(shiftRoom)]);
 
-    await userEvent.click(screen.getByRole("button", { name: /forget/i }));
+    const list = await screen.findByRole("list", { name: /recently opened chats/i });
+    const rows = within(list).getAllByRole("listitem");
 
-    expect(store.read()).toEqual([]);
-    expect(channel.leaves).toBe(1);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(within(row).getAllByRole("button")).toHaveLength(1);
+    }
+
+    expect(within(list).queryByRole("button", { name: /forget/i })).toBeNull();
+    expect(within(list).getAllByRole("button", { name: /^open /i })).toHaveLength(2);
+  });
+
+  it("puts no uuid in a row, even for a room it has never had a name for", async () => {
+    // The report, at the surface. These two rooms have no stored name and no
+    // live one — this file's fake `read` fails — so they are the degenerate
+    // case, and even it does not render an id.
+    renderRooms([entry(venueRoom), entry(shiftRoom)]);
+
+    const list = await screen.findByRole("list", { name: /recently opened chats/i });
+
+    expect(list.textContent).not.toContain(VENUE_ID);
+    expect(list.textContent).not.toContain(SHIFT_ROOM_ID);
+    // The control: the rows are there and say something, so the absences above
+    // are not passing against an empty list.
+    expect(list.textContent).toContain("venue room 11111111");
+    expect(list.textContent).toContain("shift room 22222222");
   });
 });

@@ -40,6 +40,7 @@
  * whenever `HospitalityComs.Clock` is offset, which the demo does deliberately.
  */
 
+import { shortId } from "../../app/short-id";
 import { normaliseTopicId } from "../../socket/topic-id";
 
 /** Where `HospitalityComs.Peers` announces, and what `PeerChannel` joins. */
@@ -183,10 +184,15 @@ export function peerKey(peer: Peer): string {
   return `${peer.personId}@${peer.venueId}`;
 }
 
-/** How long an id is shown for. Never a name: there is no name on the wire. */
-export function shortId(id: string): string {
-  return id.slice(0, 8);
-}
+/**
+ * How long an id is shown for. Never a name: there is no name on the wire.
+ *
+ * It moved to `src/app/short-id.ts` when the rooms surface became its third
+ * caller — `profile.ts` had declared the same function with the same body — and
+ * this re-export is what keeps every peer call site unchanged across the move.
+ * Same shim rule as `room.ts`'s `instantLabel`: a new caller imports from there.
+ */
+export { shortId };
 
 /** What the surface calls each request state. */
 export function requestStateLabel(state: RequestState): string {

@@ -167,9 +167,15 @@ describe("the list of venue rooms", () => {
 
     await open(socket, /open the anchor/i, roomTopic({ kind: "venue", id: VENUE_ID }));
 
-    expect(await screen.findByRole("list", { name: /your rooms/i })).toHaveTextContent(
-      VENUE_ID,
-    );
+    const recent = await screen.findByRole("list", { name: /recently opened chats/i });
+
+    // It used to be asserted by looking for the id, which is what the row was.
+    // The row is the venue's name now, and the id is asserted absent — with the
+    // name as the control, because an empty list contains no id either.
+    expect(
+      within(recent).getByRole("button", { name: /open the anchor/i }),
+    ).toBeVisible();
+    expect(recent.textContent).not.toContain(VENUE_ID);
   });
 
   it("says so when the list cannot be loaded, and offers to ask again", async () => {
@@ -285,6 +291,98 @@ describe("the list of shift rooms at a venue", () => {
     );
 
     expect(channel.topic).toBe(`shift_room:${SHIFT_ROOM_ID}`);
+  });
+});
+
+/**
+ * The recently-opened list's rows, which are the reported surface.
+ *
+ * Every assertion here is scoped to that list with `within`, because the browse
+ * list above it offers the same rooms under the same names — two "Open The
+ * Anchor" buttons on one screen is the design (two lists, two labelled
+ * regions), and an unscoped query would find either.
+ */
+describe("what a recently-opened row is called", () => {
+  const venueRef = { kind: "venue", id: VENUE_ID } as const;
+  const shiftRef = { kind: "shift", id: SHIFT_ROOM_ID } as const;
+
+  async function recentList(): Promise<HTMLElement> {
+    return screen.findByRole("list", { name: /recently opened chats/i });
+  }
+
+  it("uses the live name over the one it stored, so a rename corrects itself", async () => {
+    // The stored name is what this browser last saw; the live one is the
+    // server's answer now. Preferring the stored one leaves a venue renamed
+    // months ago reading under its old name for as long as the entry survives,
+    // with nothing to invalidate it.
+    renderRooms(
+      { [VENUE_ROOMS]: twoVenueRooms },
+      readsFrom({ [VENUE_ROOMS]: twoVenueRooms }),
+      [{ ref: venueRef, barred: null, name: "The Old Anchor" }],
+    );
+
+    const recent = await recentList();
+
+    await waitFor(() => {
+      expect(
+        within(recent).getByRole("button", { name: /open the anchor$/i }),
+      ).toBeVisible();
+    });
+    expect(recent.textContent).not.toContain("The Old Anchor");
+  });
+
+  it("uses the stored name when no list on screen carries one", async () => {
+    // A shift room, with its venue never expanded — so `useShiftRooms` was
+    // never asked and there is no live name anywhere in this client. Without
+    // the store this row is `shift room 22222222`, which is the case the field
+    // exists for.
+    renderRooms(
+      { [VENUE_ROOMS]: twoVenueRooms },
+      readsFrom({ [VENUE_ROOMS]: twoVenueRooms }),
+      [{ ref: shiftRef, barred: null, name: "Kitchen · Monday" }],
+    );
+
+    const recent = await recentList();
+
+    expect(
+      within(recent).getByRole("button", { name: /open kitchen · monday/i }),
+    ).toBeVisible();
+    // The control on that: the fallback is a real string this row could have
+    // shown, so "it used the stored name" is distinguishable from "it rendered
+    // nothing at all".
+    expect(recent.textContent).not.toContain("shift room 22222222");
+    expect(recent.textContent).not.toContain(SHIFT_ROOM_ID);
+  });
+
+  it("stores a shift room's name as it is opened, which is the only chance", async () => {
+    // The scenario the field was added for, driven rather than asserted about:
+    // expand a venue, open one of its shifts, collapse the venue again. The
+    // live name is gone at that point and the row still reads.
+    const { socket } = renderRooms({
+      [VENUE_ROOMS]: twoVenueRooms,
+      [SHIFT_ROOMS]: oneShiftRoom,
+      [SHIFT_HISTORY]: { messages: [], complete: true },
+    });
+
+    const expand = await screen.findByRole("button", {
+      name: /shift rooms at the anchor/i,
+    });
+
+    await userEvent.click(expand);
+    await open(socket, /open kitchen/i, roomTopic(shiftRef));
+    await userEvent.click(expand);
+
+    // The browse list's shift rooms are gone, so nothing live names this room.
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("list", { name: /shift rooms at the anchor/i }),
+      ).toBeNull();
+    });
+
+    const recent = await recentList();
+
+    expect(within(recent).getByRole("button", { name: /open kitchen/i })).toBeVisible();
+    expect(recent.textContent).not.toContain(SHIFT_ROOM_ID);
   });
 });
 
