@@ -26,6 +26,7 @@ defmodule HospitalityComsWeb.PeerChannelTest do
 
   use HospitalityComsWeb.ChannelCase
 
+  alias HospitalityComs.Accounts
   alias HospitalityComs.Peers
   alias HospitalityComs.PeersFixtures
   alias HospitalityComsWeb.PersonSocket
@@ -153,7 +154,7 @@ defmodule HospitalityComsWeb.PeerChannelTest do
       assert_reply ref, :ok, sent
 
       assert Map.keys(sent) |> Enum.sort() ==
-               ~w(author_id body connection_id message_id sent_at)a
+               ~w(author_display_name author_id body connection_id message_id sent_at)a
 
       ref = push(theirs, "history", %{"connection_id" => connection.id})
       assert_reply ref, :ok, %{messages: [entry]}
@@ -233,7 +234,8 @@ defmodule HospitalityComsWeb.PeerChannelTest do
       assert_reply ref, :ok, %{incoming: [pending]}
 
       assert Map.keys(pending) |> Enum.sort() ==
-               ~w(accepted_at addressee_id declined_at request_id requested_at requester_id state)a
+               ~w(accepted_at addressee_display_name addressee_id declined_at request_id
+                  requested_at requester_display_name requester_id state)a
 
       assert pending.declined_at == nil
       assert pending.accepted_at == nil
@@ -244,6 +246,63 @@ defmodule HospitalityComsWeb.PeerChannelTest do
       assert declined.state == :declined
       assert declined.declined_at == DateTime.to_iso8601(DateTime.truncate(@now, :second))
       assert declined.accepted_at == nil
+    end
+
+    test "name every person a person, on all four shapes" do
+      # #73. Three of these four rendered a bare uuid and nothing else, so the
+      # surface rendered `shortId(…)` of it — an incoming request's requester, a
+      # conversation's heading, and every line inside it.
+      #
+      # The key sets are literals, because that is what fails when a field is
+      # *added*, which is the direction an email address would arrive from. The
+      # **values** are asserted against two known, different names, which is
+      # what fails when a render answers with the reader's own name or with
+      # whichever party the row happens to store first.
+      %{first: first, second: second} = PeersFixtures.co_rostered(@now)
+      {:ok, _} = Accounts.update_display_name(first, "Wendy Darling")
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+
+      mine = joined(first)
+      theirs = joined(second)
+
+      ref = push(mine, "request", %{"person_id" => second.person.id})
+      assert_reply ref, :ok, requested
+
+      assert requested.requester_display_name == "Wendy Darling"
+      assert requested.addressee_display_name == "Captain Nemo"
+
+      ref = push(theirs, "list_requests", %{})
+      assert_reply ref, :ok, %{incoming: [incoming]}
+      assert Map.keys(incoming) |> Enum.sort() == Map.keys(requested) |> Enum.sort()
+      assert incoming.requester_display_name == "Wendy Darling"
+
+      ref = push(theirs, "accept", %{"request_id" => requested.request_id})
+      assert_reply ref, :ok, accepted
+
+      assert Map.keys(accepted) |> Enum.sort() ==
+               ~w(connected_at connection_id disconnected_at disconnected_by_id open
+                  peer_display_name peer_id)a
+
+      # The counterpart's, from the side that accepted.
+      assert accepted.peer_display_name == "Wendy Darling"
+
+      ref = push(mine, "list_conversations", %{})
+      assert_reply ref, :ok, %{conversations: [listed]}
+      assert Map.keys(listed) |> Enum.sort() == Map.keys(accepted) |> Enum.sort()
+
+      # …and from the other side, which is the assertion a render taking the
+      # name off `person_a` or off the reader's own scope fails.
+      assert listed.peer_display_name == "Captain Nemo"
+
+      ref = push(mine, "send", %{"connection_id" => listed.connection_id, "body" => "hello"})
+      assert_reply ref, :ok, sent
+      assert sent.author_display_name == "Wendy Darling"
+
+      ref = push(theirs, "disconnect", %{"connection_id" => listed.connection_id})
+      assert_reply ref, :ok, closed
+      assert Map.keys(closed) |> Enum.sort() == Map.keys(accepted) |> Enum.sort()
+      assert closed.peer_display_name == "Wendy Darling"
+      assert closed.open == false
     end
   end
 

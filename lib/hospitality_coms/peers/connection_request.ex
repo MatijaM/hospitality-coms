@@ -48,6 +48,21 @@ defmodule HospitalityComs.Peers.ConnectionRequest do
   nothing asks for, and it would make a fresh acceptance unable to clear
   anything.
 
+  ## Both names, never the counterpart's
+
+  `requester_display_name` and `addressee_display_name` are **virtual**, filled
+  by `HospitalityComs.Peers.Records.with_parties/1` on every read and on the two
+  rows a write reads back. They are a pair rather than one viewer-relative
+  `counterpart_display_name` because this row already names both people by id
+  and lets the reader pick: `HospitalityComsWeb.PeerChannel.rendered_request/1`
+  serves four call sites and takes no viewer, so a counterpart's name would make
+  one entity's shape depend on who asked.
+
+  Nothing new is disclosed by carrying them. A request exists only between two
+  people who were visible to each other, and
+  `HospitalityComs.Peers.list_visible_peers/1` has carried the counterpart's
+  name since #66.
+
   ## Nothing here is castable from user attributes
 
   Every changeset below takes its values as arguments. A request has exactly one
@@ -80,6 +95,11 @@ defmodule HospitalityComs.Peers.ConnectionRequest do
     # Derived on the read that loaded this row, never stored. See the moduledoc.
     field :state, Ecto.Enum, values: [:pending, :lapsed, :declined, :accepted], virtual: true
 
+    # Joined on the read that loaded this row, never stored. See "Both names,
+    # never the counterpart's" in the moduledoc.
+    field :requester_display_name, :string, virtual: true
+    field :addressee_display_name, :string, virtual: true
+
     belongs_to :requester, Person
     belongs_to :addressee, Person
     belongs_to :blocked_initiator, Person
@@ -103,6 +123,8 @@ defmodule HospitalityComs.Peers.ConnectionRequest do
           pair_low_id: Ecto.UUID.t() | nil,
           pair_high_id: Ecto.UUID.t() | nil,
           state: state() | nil,
+          requester_display_name: String.t() | nil,
+          addressee_display_name: String.t() | nil,
           inserted_at: DateTime.t() | nil,
           updated_at: DateTime.t() | nil
         }

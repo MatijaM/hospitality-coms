@@ -63,13 +63,13 @@ defmodule HospitalityComsWeb.ProfileChannel do
 
   The cost, stated rather than discovered: an unhandled exception in any
   `handle_in/3` drops the record, the ledger and the open peer profile at once.
-  Two of the seven events carry worker-authored text into an Ecto changeset,
+  Two of the eight events carry worker-authored text into an Ecto changeset,
   which is the most likely thing here to raise, so every event answers — the
   terminal `handle_in/3` clause and the `handle_info/2` catch-all are both
   present and both tested, and the changeset arm is a reply rather than a
   `raise`.
 
-  That is also why these seven are not clauses on `PeerChannel`: none of the
+  That is also why these eight are not clauses on `PeerChannel`: none of the
   names collides with any of its nine, deliberately, so the alternative was a
   one-constant change on the client — but a profile is not a conversation, and
   folding them in would mean a blank label in a form takes down every one of
@@ -115,6 +115,44 @@ defmodule HospitalityComsWeb.ProfileChannel do
   is enumerable through it either, because an audience that names no venue and
   no person is already a foreign-key changeset error by the context's design.
 
+  ## The audience picker, and the two lists it needs (#73)
+
+  `"list_audiences"` takes `%{}` and answers
+
+      %{venues: [%{venue_id, name}], people: [%{person_id, display_name}]}
+
+  which are the two kinds `HospitalityComs.Profiles.Disclosure.audience/0` has.
+  Without it the disclosure control made the worker type a raw uuid, because
+  nothing on this surface could say which venues or which people one might name.
+
+  **One event rather than two**, so the two halves are answered at one instant —
+  both are derived, neither is stored, and a picker showing a venue from 10:00
+  beside a peer from 10:05 would be two answers to one question.
+  `HospitalityComsWeb.PeerChannel`'s `"list_requests"` is the same shape.
+
+  **It is the only event here that does not call `HospitalityComs.Profiles`**,
+  and that is deliberate. The two relations belong to other contexts — *where do
+  you work* is `HospitalityComs.Engagements` and *who can see you* is
+  `HospitalityComs.Peers` — and a `Profiles.list_audiences/1` composing them
+  would have to answer an `Ecto` schema, which #36 forbids that context, or
+  invent a third spelling of a venue inside it.
+
+  Each list is exactly the set that can read the record, and neither is a list
+  that already existed:
+
+    * the venues are `Engagements.list_engaged_venues/1` — the worker's
+      engagements **active at the instant**, which is the employer view's own
+      predicate. Not `VisibleEntry.venue_id`, which is the venue that *asserted*
+      an entry rather than one that could be an audience for it; not
+      `Rooms.list_venue_rooms/1`, which subtracts suspensions (KTD18); and not
+      `list_managed_venues/1`, which needs a live grant and would leave an
+      ordinary worker's picker empty.
+    * the people are `Peers.list_reachable_peers/1` — visible **or** connected,
+      which is the pair `Profiles.fetch_peer_profile/2` gates on. The connected
+      half is what makes the remedy for the peer-disclosure residue reachable:
+      the person a worker most wants to hide an entry from is one who is
+      connected and no longer co-rostered.
+
   ## Nothing here validates what the changeset validates
 
   The three writes pass the payload straight to the context. `DeclaredEntry`'s
@@ -154,12 +192,15 @@ defmodule HospitalityComsWeb.ProfileChannel do
 
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonScope
+  alias HospitalityComs.Engagements
+  alias HospitalityComs.Peers
   alias HospitalityComs.Profiles
   alias HospitalityComs.Profiles.Disclosure
   alias HospitalityComs.Profiles.VisibleCorrection
   alias HospitalityComs.Profiles.VisibleDeclaration
   alias HospitalityComs.Profiles.VisibleDisclosure
   alias HospitalityComs.Profiles.VisibleEntry
+  alias HospitalityComs.Venues.Venue
   alias HospitalityComsWeb.ChannelAuth
   alias HospitalityComsWeb.ErrorEnvelope
   alias HospitalityComsWeb.RoomChannel
@@ -250,7 +291,7 @@ defmodule HospitalityComsWeb.ProfileChannel do
   @doc """
   Answers one inbound event, authorised at the instant it arrives.
 
-  Seven events, three fallbacks and a terminal clause. The terminal one is not
+  Eight events, three fallbacks and a terminal clause. The terminal one is not
   optional: `Phoenix.Channel.Server` dispatches to `handle_in/3`
   unconditionally, so a channel without it crashes on every event a client can
   invent — and here that takes the record, the ledger and the open peer profile
@@ -268,6 +309,17 @@ defmodule HospitalityComsWeb.ProfileChannel do
     decisions = socket |> ChannelAuth.person_scope() |> Profiles.list_disclosures()
 
     {:reply, {:ok, %{disclosures: Enum.map(decisions, &rendered_disclosure/1)}}, socket}
+  end
+
+  def handle_in("list_audiences", _payload, socket) do
+    scope = ChannelAuth.person_scope(socket)
+
+    reply = %{
+      venues: scope |> Engagements.list_engaged_venues() |> Enum.map(&rendered_venue/1),
+      people: scope |> Peers.list_reachable_peers() |> Enum.map(&rendered_person/1)
+    }
+
+    {:reply, {:ok, reply}, socket}
   end
 
   def handle_in(
@@ -506,6 +558,24 @@ defmodule HospitalityComsWeb.ProfileChannel do
       disclosed: disclosure.disclosed,
       decided_at: DateTime.to_iso8601(disclosure.decided_at)
     }
+  end
+
+  # `venue_id` and **`name`**, which is how a venue listed *as itself* is spelled
+  # twice already — `HospitalityComsWeb.EmployerController.render_venue/1` and
+  # `HospitalityComsWeb.RoomController.render_venue_room/1`, and both client
+  # decoders read it. `venue_name` is what a venue named *inside another entity*
+  # is called, which `rendered_entry/1` above does and this is not.
+  @spec rendered_venue(Venue.t()) :: %{venue_id: Ecto.UUID.t(), name: String.t()}
+  defp rendered_venue(%Venue{} = venue), do: %{venue_id: venue.id, name: venue.name}
+
+  # `person_id` and `display_name`, which is `PeerChannel.rendered_peer/1`'s
+  # spelling for the same two values. Field by field rather than passed through,
+  # so the wire names live in this file and a field added to
+  # `Peers.reachable_peer()` does not reach a browser unreviewed.
+  @spec rendered_person(Peers.reachable_peer()) ::
+          %{person_id: Ecto.UUID.t(), display_name: String.t()}
+  defp rendered_person(%{person_id: person_id, display_name: display_name}) do
+    %{person_id: person_id, display_name: display_name}
   end
 
   @spec iso8601(DateTime.t() | nil) :: String.t() | nil

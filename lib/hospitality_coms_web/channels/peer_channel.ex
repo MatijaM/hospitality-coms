@@ -78,6 +78,43 @@ defmodule HospitalityComsWeb.PeerChannel do
   identically. The three refusals that say more (`already_requested`,
   `already_connected`, `blocked`) are all statements about something the caller
   was party to, so they disclose nothing they did not already have.
+
+  ## Four rendered shapes, and every one of them names a person by name (#73)
+
+      rendered_peer/1          %{person_id, display_name, venue_id, venue_name,
+                                 role_label, visible_from, visible_until}
+
+      rendered_conversation/1  %{connection_id, peer_id, peer_display_name,
+                                 connected_at, disconnected_at,
+                                 disconnected_by_id, open}
+
+      rendered_request/1       %{request_id, requester_id, requester_display_name,
+                                 addressee_id, addressee_display_name, state,
+                                 requested_at, accepted_at, declined_at}
+
+      rendered_message/1       %{message_id, connection_id, author_id,
+                                 author_display_name, body, sent_at}
+
+  Only the first had a name before this. The other three rendered a bare uuid,
+  which is what the surface then rendered: `shortId(requesterId)` on an incoming
+  request, `shortId(peerId)` as a conversation's heading,
+  `shortId(message.authorId)` beside every line of it.
+
+  The name is **joined on every read**, never stored, and the join carries no
+  activeness predicate — see `HospitalityComs.Peers.Records`. Each of the four
+  write paths reads its own row back through that same query, so the reply to
+  `"send"`, an entry of `"history"` and the `"peer_message"` push are one shape
+  produced by one query rather than three assembled from what each caller held.
+
+  Every render **heads on the name being a binary**, which is
+  `HospitalityComsWeb.RoomChannel.rendered/1`'s manoeuvre: a read path that
+  forgot the join crashes here rather than putting a `null` on the wire and an
+  `undefined` in a heading.
+
+  **The four notices keep their ids and gain nothing**, except `peer_message`.
+  `client/src/features/peers/use-peer-surface.ts` applies that one directly
+  because it carries the whole message, and re-asks the affected list for the
+  other four — a name on a nudge would be a field nothing reads.
   """
 
   use HospitalityComsWeb, :channel
@@ -438,11 +475,20 @@ defmodule HospitalityComsWeb.PeerChannel do
     }
   end
 
+  # Heads on the name being a binary, which is
+  # `HospitalityComsWeb.RoomChannel.rendered/1`'s manoeuvre: a conversation read
+  # by a path that did not compose
+  # `HospitalityComs.Peers.Records.with_pair/1` is a `FunctionClauseError` here
+  # rather than a `null` on the wire and an `undefined` in a heading. The
+  # struct's `@enforce_keys` catches the same mistake one layer earlier; this is
+  # the layer a client would have seen it at.
   @spec rendered_conversation(Conversation.t()) :: map()
-  defp rendered_conversation(%Conversation{} = conversation) do
+  defp rendered_conversation(%Conversation{peer_display_name: name} = conversation)
+       when is_binary(name) do
     %{
       connection_id: conversation.connection_id,
       peer_id: conversation.peer_id,
+      peer_display_name: name,
       connected_at: DateTime.to_iso8601(conversation.connected_at),
       disconnected_at: iso8601(conversation.disconnected_at),
       disconnected_by_id: conversation.disconnected_by_id,
@@ -459,12 +505,26 @@ defmodule HospitalityComsWeb.PeerChannel do
   # these are when it became true. A client that renders "declined" has nothing
   # to render it *as of* without them, and every other rendered shape in this
   # file carries the timestamp of the state it reports.
+  #
+  # **Both names, beside both ids** (#73). This function serves four call sites
+  # — `"request"`, `"decline"`, and both lists in `"list_requests"` — and takes
+  # no viewer, so a single viewer-relative `counterpart_display_name` would make
+  # one entity's shape depend on who asked. The reader picks the side it is not,
+  # which is what it already does with the two ids.
   @spec rendered_request(ConnectionRequest.t()) :: map()
-  defp rendered_request(%ConnectionRequest{} = request) do
+  defp rendered_request(
+         %ConnectionRequest{
+           requester_display_name: requester,
+           addressee_display_name: addressee
+         } = request
+       )
+       when is_binary(requester) and is_binary(addressee) do
     %{
       request_id: request.id,
       requester_id: request.requester_id,
+      requester_display_name: requester,
       addressee_id: request.addressee_id,
+      addressee_display_name: addressee,
       state: request.state,
       requested_at: DateTime.to_iso8601(request.requested_at),
       accepted_at: iso8601(request.accepted_at),
@@ -481,12 +541,20 @@ defmodule HospitalityComsWeb.PeerChannel do
   # above missed: the push said `at` because it went through the generic
   # `stamped/1`. It goes through `sent/1` now and this shape's key set is what
   # the push's key set is asserted against.
+  #
+  # `author_display_name` is #73's, spelled exactly as
+  # `HospitalityComsWeb.RoomChannel.rendered/1` spells it, because a message's
+  # author is one entity whichever room or conversation carried the words. The
+  # short id stays beside it and is not redundant: names collide by design, and
+  # the id is the only one of the two that tells two speakers apart.
   @spec rendered_message(PeerMessage.t()) :: map()
-  defp rendered_message(%PeerMessage{} = message) do
+  defp rendered_message(%PeerMessage{author_display_name: name} = message)
+       when is_binary(name) do
     %{
       message_id: message.id,
       connection_id: message.connection_id,
       author_id: message.author_id,
+      author_display_name: name,
       body: message.body,
       sent_at: DateTime.to_iso8601(message.sent_at)
     }

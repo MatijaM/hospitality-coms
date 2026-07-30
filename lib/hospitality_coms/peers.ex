@@ -149,6 +149,16 @@ defmodule HospitalityComs.Peers do
   alias HospitalityComs.Repo
 
   @typedoc """
+  One person an audience picker may name, and the two things it renders them by.
+
+  Deliberately not a struct and deliberately only two fields: `list_visible_peers/1`
+  answers `HospitalityComs.Peers.Visibility` because it is about a *stint* at a
+  venue, and this is about a person. No email address, for the reason that
+  module's typedoc gives.
+  """
+  @type reachable_peer() :: %{person_id: Ecto.UUID.t(), display_name: String.t()}
+
+  @typedoc """
   Why an approach was refused, by `Ecto.Multi` step name.
 
   The shape `HospitalityComs.Engagements.claim_invitation/2` uses, for the same
@@ -234,6 +244,70 @@ defmodule HospitalityComs.Peers do
     |> Repo.all()
     |> Enum.map(&Visibility.new/1)
     |> Visibility.merge_stints()
+  end
+
+  @doc """
+  Everyone who can reach this person's record: visible at the scope's instant,
+  **or** connected.
+
+  **The list form of the pair `HospitalityComs.Profiles.fetch_peer_profile/2`
+  gates on**, written once so the gate and the list cannot come to mean two
+  things. That gate is `visible?/2 or connected?/2` and the two halves are not
+  redundant: visibility lapses thirty days past the first of a pair's two
+  engagements to end, and a connection is permanent.
+
+  The caller is the disclosure audience picker (#73). Offering only the visible
+  half would make one of the two remedies the peer-disclosure residue has —
+  `HospitalityComs.Profiles.set_disclosure/4` naming a peer, or
+  `disconnect/2` — unreachable from the surface that needs it, because the
+  person it is aimed at is precisely somebody who is connected and no longer
+  co-rostered.
+
+  **One entry per counterpart**, deduplicated on `person_id` and never on the
+  name: display-name collisions are deliberate (#66), so folding on the name
+  would silently drop a person. Where `list_visible_peers/1` gives one entry per
+  venue — because it carries the venue — this gives one per person, because an
+  audience is a person.
+
+  A **closed** connection's counterpart is not here. They cannot read the record
+  either, so this is `connected?/2`'s own liveness rather than a second rule.
+
+  Ordered by display name and then by `person_id`, which is what a picker
+  renders and what keeps the order total when two names collide.
+
+  Refuses an employer scope and an anonymous person scope by function clause.
+  """
+  @spec list_reachable_peers(PersonScope.t()) :: [reachable_peer()]
+  def list_reachable_peers(%PersonScope{person: %Person{id: person_id}, now: now})
+      when is_binary(person_id) do
+    visible = person_id |> Records.visible_people(now) |> Repo.all()
+
+    (visible ++ connected_people(person_id))
+    |> Enum.uniq_by(& &1.person_id)
+    |> Enum.sort_by(&{&1.display_name, &1.person_id})
+  end
+
+  # The counterpart of every live connection, picked in Elixir rather than in
+  # SQL. The pair is stored canonically, so "the one who is not me" is a
+  # conditional in a query and two function heads here —
+  # `Connection.counterpart/2` and `counterpart_display_name/2`, which the
+  # conversation reads already go through. `Records.with_pair/1` is what fills
+  # the names, so this reuses the join rather than adding a fourth.
+  @spec connected_people(Ecto.UUID.t()) :: [reachable_peer()]
+  defp connected_people(person_id) do
+    person_id
+    |> Records.live_connections_of()
+    |> Records.with_pair()
+    |> Repo.all()
+    |> Enum.map(&counterpart_of(&1, person_id))
+  end
+
+  @spec counterpart_of(Connection.t(), Ecto.UUID.t()) :: reachable_peer()
+  defp counterpart_of(%Connection{} = connection, person_id) do
+    %{
+      person_id: Connection.counterpart(connection, person_id),
+      display_name: Connection.counterpart_display_name(connection, person_id)
+    }
   end
 
   @doc """
@@ -333,8 +407,22 @@ defmodule HospitalityComs.Peers do
     |> Multi.insert(:request, ConnectionRequest.open_changeset(person_id, addressee_id, now),
       mode: :savepoint
     )
+    |> naming()
     |> Repo.transaction()
     |> requested()
+  end
+
+  # The row the insert produced carries no name: `Ecto.Multi.insert/4` cannot
+  # join, and the counterpart's name is not on the caller's scope —
+  # `HospitalityComsWeb.ChannelAuth.person_scope/1` builds `%Person{id: id}` and
+  # nothing else, which #66 measured. So the row is read back through the query
+  # a list read would have used, which is `HospitalityComs.Rooms.naming/1`'s
+  # shape and the reason it has that name.
+  @spec naming(Multi.t()) :: Multi.t()
+  defp naming(multi) do
+    Multi.run(multi, :named, fn repo, %{request: request} ->
+      {:ok, request.id |> Records.named_request_by_id() |> repo.one!()}
+    end)
   end
 
   @spec co_rostered(Ecto.Repo.t(), Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) ::
@@ -404,9 +492,11 @@ defmodule HospitalityComs.Peers do
   defp answered_or_permitted(false), do: {:error, :already_requested}
   defp answered_or_permitted(true), do: {:ok, :may_initiate}
 
+  # `:named` rather than `:request`, so the row an approach answers with is the
+  # row `list_outgoing_requests/1` would have produced. See `naming/1`.
   @spec requested({:ok, map()} | request_failure()) ::
           {:ok, ConnectionRequest.t()} | request_failure()
-  defp requested({:ok, %{request: %ConnectionRequest{} = request}}) do
+  defp requested({:ok, %{named: %ConnectionRequest{} = request}}) do
     announce(
       [request.requester_id, request.addressee_id],
       {:peer_request,
@@ -445,8 +535,21 @@ defmodule HospitalityComs.Peers do
     |> Multi.run(:answer, fn repo, _changes -> answer(repo, person_id, request_id, now) end)
     |> Multi.run(:visible, fn repo, changes -> still_visible(repo, changes, person_id, now) end)
     |> Multi.insert(:connect, &connection(&1, now), mode: :savepoint)
+    |> pairing(person_id)
     |> Repo.transaction()
     |> accepted(person_id)
+  end
+
+  # `naming/1`'s reason, one schema over: the inserted connection carries no
+  # names, and the reply is a conversation whose whole point is the
+  # counterpart's. Read back through `named_connection_of/2`, which is also the
+  # query `fetch_conversation/2` uses, so an acceptance and a later read of the
+  # same conversation are one shape.
+  @spec pairing(Multi.t(), Ecto.UUID.t()) :: Multi.t()
+  defp pairing(multi, person_id) do
+    Multi.run(multi, :named, fn repo, %{connect: connection} ->
+      {:ok, person_id |> Records.named_connection_of(connection.id) |> repo.one!()}
+    end)
   end
 
   @spec answer(Ecto.Repo.t(), Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) ::
@@ -488,7 +591,7 @@ defmodule HospitalityComs.Peers do
 
   @spec accepted({:ok, map()} | acceptance_failure(), Ecto.UUID.t()) ::
           {:ok, Connection.t()} | acceptance_failure()
-  defp accepted({:ok, %{connect: %Connection{} = connection}}, _person_id) do
+  defp accepted({:ok, %{named: %Connection{} = connection}}, _person_id) do
     announce(
       Connection.parties(connection),
       {:peer_connected,
@@ -561,10 +664,31 @@ defmodule HospitalityComs.Peers do
        }}
     )
 
-    {:ok, %{request | state: :declined}}
+    {:ok, request |> named() |> Map.put(:state, :declined)}
   end
 
   defp declined({:error, :not_found} = failure), do: failure
+
+  # `naming/1`'s reason, reached from a bare `update_all` rather than from a
+  # `Multi`: `UPDATE … RETURNING` cannot name a joined column, so the row this
+  # statement handed back carries no display names and the reply is one a client
+  # renders a name out of.
+  #
+  # The re-read is what carries the names and **the answered row is what carries
+  # the answer**, so the two virtual fields are merged onto the row the write
+  # produced rather than the other way about. `state` is applied by the caller
+  # afterwards for the same reason: it is virtual, and a row read back from the
+  # database has none.
+  @spec named(ConnectionRequest.t()) :: ConnectionRequest.t()
+  defp named(%ConnectionRequest{} = request) do
+    named = request.id |> Records.named_request_by_id() |> Repo.one!()
+
+    %{
+      request
+      | requester_display_name: named.requester_display_name,
+        addressee_display_name: named.addressee_display_name
+    }
+  end
 
   @doc """
   Requests this person sent that nothing has superseded, newest first, each
@@ -680,12 +804,22 @@ defmodule HospitalityComs.Peers do
   """
   @spec fetch_conversation(PersonScope.t(), Ecto.UUID.t()) ::
           {:ok, Conversation.t()} | {:error, :not_found}
-  def fetch_conversation(%PersonScope{} = scope, connection_id)
-      when is_binary(connection_id) do
-    with {:ok, connection} <- fetch_connection(scope, connection_id) do
-      {:ok, Conversation.of_connection(connection, scope.person.id)}
-    end
+  def fetch_conversation(%PersonScope{person: %Person{id: person_id}}, connection_id)
+      when is_binary(person_id) and is_binary(connection_id) do
+    person_id
+    |> Records.named_connection_of(connection_id)
+    |> Repo.one()
+    |> found_connection()
+    |> conversation(person_id)
   end
+
+  @spec conversation({:ok, Connection.t()} | {:error, :not_found}, Ecto.UUID.t()) ::
+          {:ok, Conversation.t()} | {:error, :not_found}
+  defp conversation({:ok, %Connection{} = connection}, person_id) do
+    {:ok, Conversation.of_connection(connection, person_id)}
+  end
+
+  defp conversation({:error, :not_found} = failure, _person_id), do: failure
 
   @doc """
   A conversation's messages, oldest first.
@@ -768,9 +902,20 @@ defmodule HospitalityComs.Peers do
       Multi.new()
       |> Multi.run(:open, fn repo, _changes -> locked_open(repo, person_id, connection_id) end)
       |> Multi.insert(:message, &message(&1, person_id, body, now), mode: :savepoint)
+      |> authoring()
       |> Repo.transaction()
       |> sent()
     end
+  end
+
+  # `naming/1`'s reason again, and here it is `HospitalityComs.Rooms.naming/1`
+  # verbatim: a message's author name is virtual, the insert cannot join, and
+  # the reply, a history entry and the live push are asserted to be one key set.
+  @spec authoring(Multi.t()) :: Multi.t()
+  defp authoring(multi) do
+    Multi.run(multi, :named, fn repo, %{message: message} ->
+      {:ok, message.id |> Records.named_message() |> repo.one!()}
+    end)
   end
 
   # Matching nothing here is `:disconnected` and never `:not_found`: the caller
@@ -798,7 +943,7 @@ defmodule HospitalityComs.Peers do
 
   @spec sent({:ok, map()} | {:error, atom(), term(), map()}) ::
           {:ok, PeerMessage.t()} | {:error, :disconnected | Ecto.Changeset.t(PeerMessage.t())}
-  defp sent({:ok, %{open: %Connection{} = connection, message: %PeerMessage{} = message}}) do
+  defp sent({:ok, %{open: %Connection{} = connection, named: %PeerMessage{} = message}}) do
     announce(
       Connection.parties(connection),
       {:peer_message,
@@ -806,6 +951,12 @@ defmodule HospitalityComs.Peers do
          connection_id: message.connection_id,
          message_id: message.id,
          author_id: message.author_id,
+         # The notice carries the whole message rather than nudging a re-read —
+         # `client/src/features/peers/use-peer-surface.ts` says so and applies it
+         # directly, where the other four notices cause a list to be asked for
+         # again. So the name is on it, and `peer_channel_test.exs` asserts the
+         # push's key set equals the send reply's.
+         author_display_name: message.author_display_name,
          body: message.body,
          at: message.sent_at
        }}
@@ -847,6 +998,12 @@ defmodule HospitalityComs.Peers do
     Multi.new()
     |> Multi.run(:close, fn repo, _changes -> close(repo, person_id, connection_id, now) end)
     |> Multi.run(:block, fn repo, changes -> block_counterpart(repo, changes, person_id, now) end)
+    |> Multi.run(:named, fn repo, %{close: closed} ->
+      # `pairing/2`'s reason from the other kind of statement: `close/4` is an
+      # `UPDATE … RETURNING`, which cannot name a joined column, and the reply is
+      # the closed conversation — whose heading is the counterpart's name.
+      {:ok, person_id |> Records.named_connection_of(closed.id) |> repo.one!()}
+    end)
     |> Repo.transaction()
     |> disconnected()
   end
@@ -934,7 +1091,7 @@ defmodule HospitalityComs.Peers do
 
   @spec disconnected({:ok, map()} | disconnect_failure()) ::
           {:ok, Connection.t()} | disconnect_failure()
-  defp disconnected({:ok, %{close: %Connection{} = connection}}) do
+  defp disconnected({:ok, %{named: %Connection{} = connection}}) do
     announce_disconnection(connection)
     {:ok, connection}
   end
