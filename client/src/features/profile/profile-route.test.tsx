@@ -576,6 +576,29 @@ describe("the audience is picked from a list rather than typed as a uuid", () =>
     expect(groups).toEqual(["Employer", "Peer"]);
   });
 
+  it("chooses nobody until the worker does, and keeps both buttons shut", async () => {
+    // Found by mutation: deleting the placeholder option killed nothing, and
+    // the state it leaves is worse than untested. A `<select>` whose value
+    // matches no option displays the first one, so the control would read "The
+    // Bell" while `picked` is still null and both buttons are disabled — a
+    // surface showing a chosen audience and refusing to act on it.
+    await openProfile({ attested: [entryWire()], disclosures: [] });
+
+    const control = await picker("bartender at the anchor");
+
+    expect(control).toHaveValue("");
+    expect(screen.getByRole("button", { name: /^show bartender/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^hide bartender/i })).toBeDisabled();
+
+    // The control: the buttons open once an audience is chosen, so "disabled"
+    // above is a state and not the only state this control has.
+    await userEvent.selectOptions(
+      control,
+      within(control).getByRole("option", { name: AUDIENCE_VENUE_NAME }),
+    );
+    expect(screen.getByRole("button", { name: /^hide bartender/i })).toBeEnabled();
+  });
+
   it("sends `person` for a person, which a control hard-coding `venue` would not", async () => {
     // Read as a pair with "sends the tagged audience and renders what comes
     // back" below, which picks a venue. Neither alone is sufficient: a control

@@ -481,8 +481,15 @@ describe("every person on this surface is named and not only numbered", () => {
     // The control on the short id in a *button*, and the reason it is on the
     // buttons at all rather than only in the heading. Two people may draw the
     // same character, and two buttons with one accessible name are a
-    // screen-reader user choosing between two identical options. It is also
-    // the failure announcing itself: `getByRole` throws on a duplicate.
+    // screen-reader user choosing between two identical options.
+    //
+    // **Asserted as an inequality rather than against the two expected
+    // strings**, which is the difference between this test and the one above.
+    // Written the other way it failed when the *format* changed and passed
+    // whenever two buttons were indistinguishable in some other format —
+    // measured: dropping the short id made it fail "could not find `Accept
+    // Captain Nemo · c3c3c3c3`", which is the wrong reason and would have been
+    // satisfied by any renaming. The property is that the two differ.
     await openPeers({
       incoming: [
         incomingWire(),
@@ -498,15 +505,16 @@ describe("every person on this surface is named and not only numbered", () => {
 
     const row = within(await screen.findByRole("list", { name: /requests to you/i }));
 
-    expect(
-      row.getByRole("button", { name: `Accept ${PEER_NAME} · ${PEER_ID.slice(0, 8)}` }),
-    ).toBeInTheDocument();
-    expect(
-      row.getByRole("button", {
-        name: `Accept ${PEER_NAME} · ${OTHER_PEER_ID.slice(0, 8)}`,
-      }),
-    ).toBeInTheDocument();
-    expect(row.getAllByRole("button", { name: /^accept/i })).toHaveLength(2);
+    // The control: two rows rendered, and both name the shared character. An
+    // inequality over an empty list is vacuous.
+    const accepts = row.getAllByRole("button", { name: /^accept/i });
+    expect(accepts).toHaveLength(2);
+    for (const button of accepts) {
+      expect(button).toHaveAccessibleName(new RegExp(PEER_NAME));
+    }
+
+    const [first, second] = accepts.map((button) => button.textContent);
+    expect(first).not.toEqual(second);
   });
 
   it("names the addressee on an outgoing request, which is the side the reader is not", async () => {
@@ -578,13 +586,27 @@ describe("every person on this surface is named and not only numbered", () => {
     // fails against one that grew a branch for it, or a decoder that treated
     // the constant as an absence. A second spelling of that string on this
     // side is the thing being refused.
-    await openPeers({
+    //
+    // **It asserts the list *and* the heading**, which is a correction found by
+    // mutating rather than by reading: written against the list alone, a
+    // special case planted in `conversation-view.tsx` killed 0. The heading is
+    // where such a branch would most plausibly go — it is the one render that
+    // names the counterpart on their own and reads oddest with a constant.
+    const { channel } = await openPeers({
       conversations: [conversationWire({ peer_display_name: "Former colleague" })],
     });
 
     expect(
       await screen.findByRole("button", {
         name: `Open conversation Former colleague · ${PEER_ID.slice(0, 8)}`,
+      }),
+    ).toBeInTheDocument();
+
+    await openConversation(channel, PEER_ID);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: `Conversation with Former colleague · ${PEER_ID.slice(0, 8)}`,
       }),
     ).toBeInTheDocument();
   });

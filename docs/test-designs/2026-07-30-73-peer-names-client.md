@@ -399,3 +399,51 @@ assertion goes.
 | Level-appropriateness | 5/5 | Wire keys at module level, outbound payload at surface level, and the boundary of what a fake transport can see written down rather than assumed. |
 | Regression protection | 4/5 | Every at-risk file named by path with the specific way it breaks. Held back from 5 because `peers.integration.test.ts` cannot be run here — no server — so its non-involvement is inspected rather than measured. |
 | Honesty about what is not covered | 5/5 | The event name and the reply keys are the server's to prove; the removed free-text audience is recorded as a narrowing rather than described as a fix. |
+
+## Revisions made during implementation
+
+Appended in a later commit, as `AGENTS.md` requires. The sections above are left
+as written: the gap between the brief and the tree is the only record that the gate found
+anything, and three of the five below were found by mutating rather than by reading.
+
+**1. C2's assertion was the wrong shape, and it failed for the wrong reason.** The brief
+specified "the two Accept buttons are distinguishable" and the first implementation asserted the
+two *expected strings* — `Accept Captain Nemo · c3c3c3c3` and the same with the other id.
+Measured: dropping the short id made it fail with *"unable to find an accessible element with the
+name `Accept Captain Nemo · c3c3c3c3`"*, which is a complaint about the **format** and would have
+been satisfied by any renaming that still left the two buttons identical. It is an **inequality
+over the two rendered names** now, with a control asserting both rows exist and both carry the
+shared character first. The mutation now fails with *"expected 'Accept Captain Nemo' to not deeply
+equal 'Accept Captain Nemo'"*, which is the property.
+
+**2. C7's control could not reach the render a special case would go in.** The brief called the
+erased-counterpart test a control on "the client has no case for the constant" and pointed it at
+the conversation **list**. A special case planted in `conversation-view.tsx`'s **heading** — the
+one render that names a counterpart on their own, and so the one that reads oddest with a constant
+— killed **0**. The test opens the conversation and asserts the heading as well now, and the same
+mutation kills 1.
+
+**3. One test the brief did not predict, found by a mutation that killed nothing.** Deleting the
+picker's `<option value="">Choose somebody</option>` killed 0. The state it leaves is worse than
+uncovered: a `<select>` whose value matches no option displays the **first** one, so the control
+would read "The Bell" while `picked` is still `null` and both buttons are disabled — a surface
+showing a chosen audience and refusing to act on it. There is now a test for the initial state,
+with the buttons opening on a real choice as its control, and the mutation kills 1.
+
+**4. The refusal vocabulary had to grow and the brief did not say so.** `ProfileAction` is a
+closed union feeding three exhaustive switches in `refusal-message.ts`; `loadAudiences` needed an
+`"audiences"` member, and the compiler found all three. Its `not_found` copy is unreachable by
+construction — the event takes an empty payload and answers two derived lists, so there is no id
+in it to fail to resolve — and its malformed-reply sentence deliberately says the list is *unknown*
+rather than empty, which is the same distinction the surface renders.
+
+**5. Two matrix rows are blunter instruments than the brief implies, and one number is not
+what it looks like.** D1 predicted a targeted kill for the join read. Measured, both removing
+`list_audiences` from the join **and** issuing it twice kill **31** — the whole profile file —
+because `answerReads` pins the exact set of outstanding reads and every test goes through it. That
+is real coverage and it is not evidence that D1's own assertion is load-bearing; the assertion
+earns its place as the one that names the event, not as the one that catches its absence.
+Relatedly, the brief treated the incoming request's three sites as three mutations. The
+implementation shares one `requester` constant across them, so the natural mutation is one and
+kills 2; mutating each site separately kills 1, 2 and 1. The shared constant is the better code and
+the brief's three-row framing is left standing as what was predicted.
