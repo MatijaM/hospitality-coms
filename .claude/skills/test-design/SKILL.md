@@ -14,6 +14,7 @@ Use this skill to make the tests better before implementation starts. You are ac
 - Test observable behavior, not implementation details.
 - Do not weaken, delete, or loosen existing assertions to make a future implementation easier.
 - Mock only external API boundaries such as Stripe, Square, Google Calendar, email, or S3. Never mock Ecto repositories.
+- **If the change touches `client/`, read "The gate applies to `client/`" in `AGENTS.md` before writing the matrix.** Everything else in this file is phrased for a context, a schema or a migration, and a brief written from it alone will not ask which render state is being claimed, whether the fixture can tell the two compared values apart, whether an already-stored shape still decodes, or whether a faked transport can see the assertion at all. Each of those is a defect this project shipped.
 - Run the narrowest relevant test command and confirm at least one new or changed test fails for the expected reason.
 - Stop after the red test is confirmed. Ask the user to approve the tests before any production-code changes.
 
