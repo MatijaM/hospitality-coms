@@ -148,6 +148,52 @@ everybody can. So the pause is not the requirement. These are:
 
 Where a human is present, stop and ask. The artifact and its ordering are unchanged either way.
 
+#### The gate applies to `client/`, and this is what it has to ask there
+
+Nothing above says otherwise, and it was still skipped on **every** client pull request the
+project has shipped — #68, #72 and #74, each flagged in review as a missing process artifact
+rather than a defect (issue #62). The cause is not that the rule excluded them. It is that
+every worked example under `docs/test-designs/` is a server unit, and a section that talks
+about contexts, changesets and migrations does not read as addressed to a React component. So
+the prompts are written out. **A brief for a `client/` change answers these as well as
+everything above.**
+
+Each is a defect this project actually shipped, named so the prompt is checkable rather than
+a genre:
+
+- **Which render state is being claimed?** A predicate over a fetch has at least four — idle,
+  in flight, refused, ready — and two of them usually render identically. #68's venue link is
+  hidden on *a successful answer naming none* and shown while loading, refused or idle; the
+  wrong version ("shown once we know there are some") is the same code until the network
+  fails, and takes a manager's only door away with nothing on screen to say why. A test that
+  renders and asserts cannot tell those apart. Hold the read open and release it by hand.
+- **What proves the fixture could have failed?** An absence assertion — no such button, no
+  uuid on screen — passes against a component that rendered nothing at all. Every one needs a
+  control in the same test proving the surface rendered. This is the general rule above,
+  restated because on a client surface "rendered nothing" is the *default* failure of a broken
+  mount rather than an exotic case.
+- **Can the fixture distinguish the two things being compared?** #74's header prefers a live
+  name over a stored one, and the store is written *from* the live value at open time — so on
+  any ordinarily-built fixture the two agree and both preference mutations survive. A fixture
+  where the values under comparison coincide certifies nothing, and it looks exactly like one
+  that works.
+- **Does the persisted shape change?** `localStorage` holds what an earlier build wrote.
+  #72 added a field to the room store, and the decoder drops the whole array on one bad row —
+  so requiring that field would have silently emptied every existing user's list on deploy.
+  A brief that adds, renames or narrows a stored field carries a row for decoding the *old*
+  shape.
+- **Would a fake transport see this at all?** Surface tests fake the API client, so a value
+  taken from the wrong place is invisible to them. #66's send path read the author's name off
+  the scope: correct over HTTP, `nil` on both channels, because `ChannelAuth.person_scope/1`
+  builds a bare `%Person{id: _}` — 13 kills once tested at the right level. The same PR's
+  client half sent `{displayName}` where the server reads `display_name` and killed **nothing**,
+  because every surface test fakes the method. Assertions about what goes *onto* the wire
+  belong at the client-module level, not the surface level.
+
+The `Fails without` column and the controls list are unchanged in form. What changes is that a
+client row names a *rendered state or a stored byte* as its mechanism, where a server row names
+a query, a constraint or a clause.
+
 For bug fixes, use `/compound-engineering:ce-debug` to understand and reproduce the issue, then use the test design gate to harden the regression coverage before applying the fix. Skip the gate only for documentation-only work, routine logging instrumentation covered by the logging exception below, a purely mechanical test-only change where no production implementation will follow, or a change to user-visible copy that alters no behaviour — a brief predicting the first failure of "this sentence is false and here is the true one" is ceremony, and a gate that produces ceremony is one people learn to route around. The test still comes with it; the brief does not.
 
 ### Every Bug Fix Must Have a Regression Test
