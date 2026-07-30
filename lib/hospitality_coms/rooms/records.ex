@@ -97,6 +97,7 @@ defmodule HospitalityComs.Rooms.Records do
 
   import Ecto.Query
 
+  alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Engagements.Records, as: EngagementRecords
   alias HospitalityComs.Rooms.RoomMessage
@@ -727,6 +728,66 @@ defmodule HospitalityComs.Rooms.Records do
         limit: ^limit
 
     from message in subquery(newest), order_by: [asc: message.sent_at, asc: message.id]
+  end
+
+  @doc """
+  The same messages, each carrying its author's display name (#66).
+
+  Two joins, no filter: `room_messages → engagements → people`, `select_merge`d
+  onto `RoomMessage`'s virtual `author_display_name`. **This is the last step in
+  every person-side read**, applied outside `most_recent/2`'s subquery rather
+  than inside it — the subquery's select is the message source, and a `join` on
+  a subquery source is the shape that leaves the bound and the ordering
+  untouched.
+
+  ## No predicate on the engagement, and that is the whole point
+
+  Not `active_at/2`, not `unsuspended/2`, nothing. A venue room keeps full
+  history (R14, KTD14), so a message whose author's term closed last month is
+  ordinary rather than rare, and joining through the room's *current* roll —
+  which is `venue_room_members/2`, the venue's **active** engagements — would
+  produce a name for the recent half of a room and nothing for the rest. That is
+  the hole `Rosters.list_roster/2` had to close by preloading (#60), reached
+  from the other end of the term, and it is why this is a server join at all
+  rather than a client-side one against a list the client already holds.
+
+  Both are inner joins and neither can drop a row: `room_messages_author_fkey`
+  is `MATCH FULL` into `engagements (id, venue_id)` and `engagements.person_id`
+  references `people` with the row kept by erasure (KTD15), so every message has
+  exactly one author engagement and exactly one person.
+
+  ## This reaches the person zone and only `HospitalityComs.Repo` may run it
+
+  `people` is person zone, so an employer-scoped query composing this raises
+  `HospitalityComs.EmployerRepo.ZoneViolationError` before Postgres is asked —
+  and Postgres would refuse it for want of privilege if the backstop were
+  removed. That is a strengthening rather than a new obligation: `employer_role`
+  already holds nothing at all on `room_messages`, so no employer path reaches
+  these reads in the first place.
+  """
+  @spec with_author_display_name(Ecto.Queryable.t()) :: Ecto.Query.t()
+  def with_author_display_name(queryable) do
+    from message in queryable,
+      join: engagement in Engagement,
+      on: engagement.id == message.author_engagement_id,
+      join: person in Person,
+      on: person.id == engagement.person_id,
+      select_merge: %{author_display_name: person.display_name}
+  end
+
+  @doc """
+  One message, by id.
+
+  Composed with `with_author_display_name/1` by both sends, to read back the row
+  they just inserted carrying its author's name — so the send reply and a
+  history read are produced by one query rather than by two spellings that can
+  drift. It is deliberately not filtered by venue or by room: the id comes from
+  an insert two steps earlier in the same transaction, so there is nothing a
+  caller could have chosen.
+  """
+  @spec message(Ecto.UUID.t()) :: Ecto.Query.t()
+  def message(message_id) when is_binary(message_id) do
+    from message in RoomMessage, where: message.id == ^message_id
   end
 
   ## Suspensions

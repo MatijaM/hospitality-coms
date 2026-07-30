@@ -317,9 +317,19 @@ defmodule HospitalityComs.AccountsConcurrencyTest do
 
   defp url_builder, do: &"http://localhost/log-in/#{&1}"
 
+  # `display_name` is `NOT NULL` since #66 and these rows are written by a raw
+  # changeset rather than by `Accounts.register_person/2`, which is where the
+  # generator lives — so the fixture supplies one. Nothing in this file asserts
+  # on it.
   defp person_attrs(email) do
     stamped_at = DateTime.truncate(@now, :second)
-    %{email: email, inserted_at: stamped_at, updated_at: stamped_at}
+
+    %{
+      email: email,
+      display_name: "Captain Nemo",
+      inserted_at: stamped_at,
+      updated_at: stamped_at
+    }
   end
 
   defp unconfirmed_person do

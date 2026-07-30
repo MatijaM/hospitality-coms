@@ -157,6 +157,32 @@ defmodule HospitalityComsWeb.SessionControllerTest do
       assert %{"person" => %{"id" => ^id}} = json_response(authenticated, 200)
     end
 
+    test "renders the person exactly as GET /api/me does", %{conn: conn} do
+      # One entity, one shape. `SessionController` calls
+      # `PersonController.rendered/1` rather than spelling a person a second
+      # time, and this is the assertion that fails if somebody re-spells it —
+      # compared field for field rather than by key set, because a second
+      # rendering that agreed on the keys and disagreed on a *value* is the
+      # other half of the same defect (`resolution: "declined"` against
+      # `:declined`, #36).
+      email = unique_person_email()
+      post(conn, ~p"/api/log-in", %{"email" => email})
+
+      assert %{"token" => api_token, "person" => redeemed} =
+               build_conn()
+               |> post(~p"/api/log-in/token", %{"token" => magic_link_token()})
+               |> json_response(201)
+
+      assert %{"person" => read} =
+               build_conn()
+               |> put_bearer_token(api_token)
+               |> get(~p"/api/me")
+               |> json_response(200)
+
+      assert redeemed == read
+      assert is_binary(redeemed["display_name"])
+    end
+
     test "confirms the person on first redemption", %{conn: conn} do
       email = unique_person_email()
       post(conn, ~p"/api/log-in", %{"email" => email})

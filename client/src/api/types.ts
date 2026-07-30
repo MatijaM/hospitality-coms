@@ -8,7 +8,7 @@
  */
 
 /**
- * A person, as `SessionController.render_person/1` writes them.
+ * A person, as `HospitalityComsWeb.PersonController.rendered/1` writes them.
  *
  * `email` is nullable because erasure nulls the address and nothing else may:
  * `people.email` is nullable in the schema, its unique index is partial on
@@ -16,10 +16,21 @@
  * opposition. An erased person still has a session and still has an id, so a
  * client that types the address as a plain string is wrong about a row the
  * database can produce.
+ *
+ * `displayName` is **not** nullable, and the asymmetry is the design. Erasure
+ * *removes* the address and *replaces* the name — a room keeps full history, so
+ * a message whose author has no name renders as nothing — and the column is
+ * `NOT NULL` at the database precisely so that no read path needs a coalesce.
+ * An erased person reads as `HospitalityComs.Lifecycle.erased_display_name/0`.
+ *
+ * It is the same string at every venue, which the room's `authorEngagementId`
+ * deliberately is not. That is a disclosure the server records rather than
+ * closes; nothing here should treat the name as venue-local.
  */
 export type Person = {
   readonly id: string;
   readonly email: string | null;
+  readonly displayName: string;
 };
 
 /**

@@ -67,8 +67,8 @@ export function decodeJoinedPersonId(payload: unknown): string | null {
 }
 
 /**
- * `%{person_id:, venue_id:, venue_name:, role_label:, visible_from:,
- * visible_until:}` — `rendered_peer/1`.
+ * `%{person_id:, display_name:, venue_id:, venue_name:, role_label:,
+ * visible_from:, visible_until:}` — `rendered_peer/1`.
  *
  * Every field is required and none is nullable: `venues.name` and
  * `engagements.role_label` are both `null: false`, and `Visibility.t()` types
@@ -77,6 +77,7 @@ export function decodeJoinedPersonId(payload: unknown): string | null {
 export function decodePeer(payload: unknown): Peer | null {
   if (!isRecord(payload)) return null;
   if (typeof payload.person_id !== "string") return null;
+  if (typeof payload.display_name !== "string") return null;
   if (typeof payload.venue_id !== "string") return null;
   if (typeof payload.venue_name !== "string") return null;
   if (typeof payload.role_label !== "string") return null;
@@ -85,6 +86,7 @@ export function decodePeer(payload: unknown): Peer | null {
 
   return {
     personId: payload.person_id,
+    displayName: payload.display_name,
     venueId: payload.venue_id,
     venueName: payload.venue_name,
     roleLabel: payload.role_label,

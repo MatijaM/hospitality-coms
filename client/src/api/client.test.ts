@@ -163,6 +163,7 @@ describe("redeemMagicLink", () => {
         person: {
           id: "8b1b0a3c-0000-4000-8000-000000000001",
           email: "worker@example.com",
+          display_name: "Captain Nemo",
         },
       }),
     );
@@ -176,6 +177,7 @@ describe("redeemMagicLink", () => {
         person: {
           id: "8b1b0a3c-0000-4000-8000-000000000001",
           email: "worker@example.com",
+          displayName: "Captain Nemo",
         },
       },
     });
@@ -199,7 +201,11 @@ describe("redeemMagicLink", () => {
   it("refuses a 201 whose body has no token rather than reporting an undefined session", async () => {
     const { fetch } = stubFetch(
       respond(201, {
-        person: { id: "8b1b0a3c-0000-4000-8000-000000000001", email: null },
+        person: {
+          id: "8b1b0a3c-0000-4000-8000-000000000001",
+          email: null,
+          display_name: "Former colleague",
+        },
       }),
     );
 
@@ -216,6 +222,7 @@ describe("currentPerson", () => {
         person: {
           id: "8b1b0a3c-0000-4000-8000-000000000001",
           email: "worker@example.com",
+          display_name: "Captain Nemo",
         },
       }),
     );
@@ -224,7 +231,11 @@ describe("currentPerson", () => {
 
     expect(result).toEqual({
       ok: true,
-      value: { id: "8b1b0a3c-0000-4000-8000-000000000001", email: "worker@example.com" },
+      value: {
+        id: "8b1b0a3c-0000-4000-8000-000000000001",
+        email: "worker@example.com",
+        displayName: "Captain Nemo",
+      },
     });
     expect(requests[0]?.url).toBe("http://api.test/api/me");
     expect(requests[0]?.init.method).toBe("GET");
@@ -236,7 +247,11 @@ describe("currentPerson", () => {
   it("reads an erased person's null address as null rather than failing to decode", async () => {
     const { fetch } = stubFetch(
       respond(200, {
-        person: { id: "8b1b0a3c-0000-4000-8000-000000000001", email: null },
+        person: {
+          id: "8b1b0a3c-0000-4000-8000-000000000001",
+          email: null,
+          display_name: "Former colleague",
+        },
       }),
     );
 
@@ -244,7 +259,11 @@ describe("currentPerson", () => {
 
     expect(result).toEqual({
       ok: true,
-      value: { id: "8b1b0a3c-0000-4000-8000-000000000001", email: null },
+      value: {
+        id: "8b1b0a3c-0000-4000-8000-000000000001",
+        email: null,
+        displayName: "Former colleague",
+      },
     });
   });
 
@@ -259,6 +278,88 @@ describe("currentPerson", () => {
       ok: false,
       failure: { kind: "api_error", code: "unauthorized" },
     });
+  });
+});
+
+describe("changeDisplayName", () => {
+  it("PATCHes /api/me with the wire key and returns the person the server answered", async () => {
+    // The body is asserted against a **literal**, because it is the whole of
+    // the contract with `PersonController.update/2` and nothing else on this
+    // side pins it: every surface test fakes this method. Measured — sending
+    // `{displayName}` instead of `{display_name}` killed nothing before this
+    // test existed, and the server would have answered 400 in front of a user.
+    const { fetch, requests } = stubFetch(
+      respond(200, {
+        person: {
+          id: "8b1b0a3c-0000-4000-8000-000000000001",
+          email: "worker@example.com",
+          display_name: "Wendy Darling",
+        },
+      }),
+    );
+
+    const result = await createApiClient({ baseUrl, fetch }).changeDisplayName(
+      "Wendy Darling",
+      "c2Vzc2lvbg",
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        id: "8b1b0a3c-0000-4000-8000-000000000001",
+        email: "worker@example.com",
+        displayName: "Wendy Darling",
+      },
+    });
+    expect(requests[0]?.url).toBe("http://api.test/api/me");
+    expect(requests[0]?.init.method).toBe("PATCH");
+    expect(requests[0]?.init.body).toBe(
+      JSON.stringify({ display_name: "Wendy Darling" }),
+    );
+    expect(requests[0]?.init.headers).toMatchObject({
+      Authorization: "Bearer c2Vzc2lvbg",
+    });
+  });
+
+  it("reports a refused name as a field error carrying the server's own words", async () => {
+    const { fetch } = stubFetch(
+      respond(422, {
+        error: {
+          code: "unprocessable_entity",
+          message: "the name was not accepted",
+          fields: { display_name: ["can't be blank"] },
+        },
+      }),
+    );
+
+    const result = await createApiClient({ baseUrl, fetch }).changeDisplayName(
+      "   ",
+      "c2Vzc2lvbg",
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        kind: "api_field_error",
+        status: 422,
+        fields: { display_name: ["can't be blank"] },
+      },
+    });
+  });
+
+  it("refuses a 200 whose person has no name rather than inventing one", async () => {
+    const { fetch } = stubFetch(
+      respond(200, {
+        person: { id: "8b1b0a3c-0000-4000-8000-000000000001", email: null },
+      }),
+    );
+
+    const result = await createApiClient({ baseUrl, fetch }).changeDisplayName(
+      "Wendy Darling",
+      "c2Vzc2lvbg",
+    );
+
+    expect(result).toMatchObject({ ok: false, failure: { kind: "malformed_response" } });
   });
 });
 

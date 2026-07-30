@@ -1,5 +1,6 @@
 /**
- * Who is signed in, and the way to stop being them.
+ * Who is signed in, the name they are shown under, and the way to stop being
+ * them.
  *
  * It was inline in `HomeRoute` and became a component when U4 added two full
  * pages of its own. Hospitality is a shared-terminal industry and the employer
@@ -14,20 +15,69 @@
  * It renders nothing when the session is not authenticated. Every caller is
  * already inside `RequireSession`, so that branch is a type narrowing rather
  * than a state anybody reaches.
+ *
+ * ## Why the display-name control is here (#66)
+ *
+ * A name a person chose about themselves belongs on their profile, and
+ * `/profile` **cannot connect**: `features/profile/contract.ts` exists because
+ * no channel on the server answers a single profile event, and nothing has
+ * changed that. So the control has to live on a surface that works today.
+ *
+ * This is the only place in the client that renders your own identity, and it
+ * is on every screen a session rests on — `HomeRoute`, `EmployerRoute` and
+ * `ClaimPanel` — which is strictly more reach than a tab on the landing page
+ * would have had. Exactly one instance mounts at a time, since one route
+ * renders at a time, so the input's `id` needs no per-instance prefix the way
+ * `DeclaredEntryForm`'s does.
+ *
+ * The form is behind a toggle rather than always open. A bar is a bar, and an
+ * always-visible text input on every screen reads as something that wants
+ * filling in.
+ *
+ * The address keeps an element of its own rather than becoming a bare text node
+ * beside the name. Nine assertions in `app.test.tsx` find it with
+ * `findByText("worker@example.com")`, and that query matches an *element* whose
+ * text is the address — so splitting the sentence around `<strong>` would have
+ * broken all nine for a reason that has nothing to do with what they assert.
+ * The claim each of them makes ("the signed-in address is on screen") is
+ * unchanged, so the markup is what moved.
  */
 
+import { useState } from "react";
+
+import { failureMessage } from "./failure-message";
+import type { RequestFailure } from "../api/errors";
 import { useSession } from "../session/session-context";
 
 export function SessionBar() {
   const { state, logOut } = useSession();
+  const [editing, setEditing] = useState(false);
 
   if (state.status !== "authenticated") return null;
 
   return (
     <>
       <p>
-        You are signed in as <strong>{state.person.email ?? "an erased account"}</strong>.
+        You are signed in as <strong>{state.person.displayName}</strong> (
+        <span>{state.person.email ?? "an erased account"}</span>).
       </p>
+      {editing ? (
+        <DisplayNameForm
+          current={state.person.displayName}
+          onDone={() => {
+            setEditing(false);
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={() => {
+            setEditing(true);
+          }}
+        >
+          Change your name
+        </button>
+      )}
       <button
         type="button"
         onClick={() => {
@@ -38,4 +88,94 @@ export function SessionBar() {
       </button>
     </>
   );
+}
+
+/**
+ * The name, and one attempt to change it.
+ *
+ * `saving` disables the fieldset rather than the button alone, which is
+ * `DeclaredEntryForm`'s shape: a submit that is in flight must not be able to
+ * be re-submitted with a different value.
+ *
+ * A refusal leaves the form open with what was typed still in it and the
+ * server's own sentence beside it. Nothing is rendered optimistically — the
+ * name on the bar changes only when the server has answered with the row, which
+ * is what `rename` puts on the session.
+ */
+function DisplayNameForm({
+  current,
+  onDone,
+}: {
+  readonly current: string;
+  readonly onDone: () => void;
+}) {
+  const { rename } = useSession();
+  const [name, setName] = useState(current);
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState<RequestFailure | null>(null);
+
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        setSaving(true);
+        setFailure(null);
+
+        void rename(name).then((outcome) => {
+          setSaving(false);
+
+          if (outcome.ok) {
+            onDone();
+
+            return;
+          }
+
+          setFailure(outcome.failure);
+        });
+      }}
+    >
+      <fieldset disabled={saving}>
+        <label htmlFor="session-display-name">Your name</label>
+        <input
+          id="session-display-name"
+          name="display_name"
+          type="text"
+          value={name}
+          onChange={(event) => {
+            setName(event.target.value);
+          }}
+        />
+        <button type="submit">Save name</button>
+        <button
+          type="button"
+          onClick={() => {
+            onDone();
+          }}
+        >
+          Cancel
+        </button>
+      </fieldset>
+      {failure === null ? null : <p aria-live="polite">{refusalText(failure)}</p>}
+    </form>
+  );
+}
+
+/**
+ * What to show when a rename is refused.
+ *
+ * A `422` carries `fields.display_name` — Ecto's own words about the thing the
+ * worker typed — and `failure-message.ts` names that as the one exception to
+ * rendering this client's copy instead of the server's. Its generic
+ * `unprocessable_entity` line is "That was not accepted", which does not say
+ * *why*, and "why" here is either "can't be blank" or a character bound.
+ *
+ * `Object.values(...).flat()` is `room-view.tsx`'s and `conversation-view.tsx`'s
+ * spelling of the same thing.
+ */
+function refusalText(failure: RequestFailure): string {
+  if (failure.kind !== "api_field_error") return failureMessage(failure);
+
+  const messages = Object.values(failure.fields).flat();
+
+  return messages.length === 0 ? failureMessage(failure) : messages.join(", ");
 }

@@ -60,6 +60,7 @@ defmodule HospitalityComsWeb.RoomControllerTest do
   alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.Clock
+  alias HospitalityComs.Engagements
   alias HospitalityComs.Rooms
   alias HospitalityComsWeb.PersonAuth
 
@@ -70,7 +71,7 @@ defmodule HospitalityComsWeb.RoomControllerTest do
   @shift_ends DateTime.add(@now, 9, :hour)
   @grace_minutes 30
 
-  @message_keys ~w(id body sent_at author_engagement_id)
+  @message_keys ~w(id body sent_at author_engagement_id author_display_name)
   @venue_room_keys ~w(venue_id name)
   @shift_room_keys ~w(shift_room_id venue_id shift_type_name starts_at ends_at closes_at)
 
@@ -214,7 +215,32 @@ defmodule HospitalityComsWeb.RoomControllerTest do
 
       assert Map.keys(message) |> Enum.sort() == Enum.sort(@message_keys)
       assert message["author_engagement_id"] == engagement.id
+      assert message["author_display_name"] == person.display_name
       refute Map.has_key?(message, "person_id")
+    end
+
+    test "names an author whose engagement has since ended", %{conn: conn} do
+      # **The row #66 turns on.** A venue room keeps full history (R14, KTD14),
+      # so a message whose author's term has closed is ordinary — and a name
+      # resolved against the room's *current* roll, which is the venue's active
+      # engagements, has nothing to find for one. The join reaches `engagements`
+      # and then `people` with no activeness predicate anywhere, and this is the
+      # assertion that fails if somebody adds one.
+      #
+      # The reader is a second person still engaged, because the author cannot
+      # read a room they are no longer a member of.
+      %{employer: employer, person: author, engagement: engagement} = engaged()
+      venue_room_messages_fixture(engagement, 1, @now)
+
+      %{person: reader} = engaged_at(employer)
+
+      assert {:ok, _ended} = Engagements.end_engagement(employer, engagement.id)
+
+      assert %{"messages" => [message]} =
+               json_get(conn, reader, "/api/venue-rooms/#{employer.venue_id}/messages")
+
+      assert message["author_engagement_id"] == engagement.id
+      assert message["author_display_name"] == author.display_name
     end
 
     test "answers extent=recent exactly as the default", %{conn: conn} do

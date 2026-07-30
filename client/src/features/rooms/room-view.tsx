@@ -197,7 +197,7 @@ function Messages({
             <strong>
               {own !== null && message.authorEngagementId === own
                 ? "You"
-                : shortId(message.authorEngagementId)}
+                : authorLabel(message)}
             </strong>{" "}
             <span>{message.body}</span>{" "}
             {/*
@@ -217,11 +217,26 @@ function Messages({
 }
 
 /**
+ * How somebody else's message is attributed: their name, and the id beside it.
+ *
+ * The name is theirs and the server joins it on every read (#66), so it follows
+ * a rename and an erased author reads as a non-identifying constant. It is
+ * **not** unique — a globally unique readable name would be a second
+ * `person_id` in plain text — so the shortened engagement id stays, and it is
+ * what tells two colleagues who drew the same character apart.
+ *
+ * Not the other way round: the id is the thing nobody can read, so it goes
+ * second.
+ */
+function authorLabel(message: RoomMessage): string {
+  return `${message.authorDisplayName} · ${shortId(message.authorEngagementId)}`;
+}
+
+/**
  * An engagement id, shortened for reading.
  *
- * It is the only identity on the wire and it is venue-local by construction
- * (KTD15b) — there is no name to render, because there is no name in the
- * employer zone to put one from.
+ * Venue-local by construction (KTD15b), which is why it is still here beside a
+ * name that is not.
  */
 function shortId(engagementId: string): string {
   return engagementId.slice(0, 8);

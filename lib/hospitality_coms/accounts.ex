@@ -138,6 +138,12 @@ defmodule HospitalityComs.Accounts do
   The scope is anonymous on the only path that matters: nobody holds a session
   for a person who does not exist yet.
 
+  **The display name is given here and nowhere else** (#66). This is the one
+  door a person row comes through, so putting the generator on this changeset is
+  what makes "every person has a name" a property rather than a convention every
+  fixture has to remember — `HospitalityComs.Demo.seed/0` and the five person
+  fixtures all get one without naming it.
+
   ## Examples
 
       iex> register_person(scope, %{email: "foo@example.com"})
@@ -151,7 +157,7 @@ defmodule HospitalityComs.Accounts do
           {:ok, Person.t()} | {:error, Ecto.Changeset.t(Person.t())}
   def register_person(%PersonScope{now: now}, attrs) when is_map(attrs) do
     %Person{}
-    |> Person.email_changeset(attrs, now)
+    |> Person.registration_changeset(attrs, now)
     |> Repo.insert(mode: :savepoint)
   end
 
@@ -310,6 +316,43 @@ defmodule HospitalityComs.Accounts do
   end
 
   def sudo_mode?(%PersonScope{}, _minutes), do: false
+
+  @doc """
+  Changes the name the scope's person is shown under (#66).
+
+  The person is the scope's own and there is no id argument: a session may
+  rename itself and nothing else, which is the same head shape
+  `generate_person_session_token/1` and `update_person_email/2` take —
+  "where the scope's person *is* the subject, destructure it and take no person
+  argument".
+
+  Trimmed, required, and bounded by
+  `HospitalityComs.Accounts.DisplayName.max_length/0`. Two check constraints say
+  the same two things at the database, because the erasure write reaches this
+  column with an `update_all` and meets no changeset.
+
+  ## An erased person is refused, and that arm is unreachable from the API
+
+  Erasure overwrites the name and deletes every token the person holds, so no
+  authenticator can produce a scope carrying an erased person and no request can
+  reach this arm. It is here anyway because the alternative is that KTD15's
+  "nothing identifying is left" rests on the *absence of a caller* rather than
+  on a rule — and a second clause is four lines. `{:error, :erased}` rather than
+  a `FunctionClauseError`, so a future surface that acquires such a scope gets
+  an answer it can render.
+  """
+  @spec update_display_name(PersonScope.t(), String.t()) ::
+          {:ok, Person.t()} | {:error, :erased | Ecto.Changeset.t(Person.t())}
+  def update_display_name(%PersonScope{person: %Person{erased_at: nil} = person, now: now}, name)
+      when is_binary(name) do
+    person
+    |> Person.display_name_changeset(%{display_name: name}, now)
+    |> Repo.update()
+  end
+
+  def update_display_name(%PersonScope{person: %Person{}}, name) when is_binary(name) do
+    {:error, :erased}
+  end
 
   @doc """
   Updates the person's email using the given token.

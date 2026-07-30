@@ -82,6 +82,14 @@ defmodule HospitalityComsWeb.PeerChannelTest do
       assert_reply ref, :ok, %{peers: [peer]}
       assert peer.person_id == second.person.id
       assert peer.venue_name =~ venue_prefix()
+      assert peer.display_name == second.person.display_name
+
+      # The exact key set, because nothing else pins it and the client is
+      # written against it. It is what fails when a field is *added*, which is
+      # the direction an email address would arrive from (#66, #65).
+      assert peer |> Map.keys() |> Enum.sort() ==
+               ~w(display_name person_id role_label venue_id venue_name visible_from
+                  visible_until)a
 
       ref = push(mine, "request", %{"person_id" => second.person.id})
       assert_reply ref, :ok, %{request_id: request_id, state: :pending}

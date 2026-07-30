@@ -47,7 +47,8 @@ defmodule HospitalityComsWeb.RoomChannel do
           id: Ecto.UUID.t(),
           body: String.t(),
           sent_at: String.t(),
-          author_engagement_id: Ecto.UUID.t()
+          author_engagement_id: Ecto.UUID.t(),
+          author_display_name: String.t()
         }
 
   @typedoc """
@@ -181,14 +182,40 @@ defmodule HospitalityComsWeb.RoomChannel do
   attribution the engagement, which is venue-local by construction and is
   already what `room_messages.author_engagement_id` holds. A client that can
   render a message can render a presence entry with the same key.
+
+  ## Both the id and the name, and neither replaces the other
+
+  `author_display_name` is the person's own (#66), joined on the read by
+  `HospitalityComs.Rooms.Records.with_author_display_name/1` and taken off the
+  sender's scope on the write. Display names are deliberately **not unique** —
+  a globally unique readable name would be a second `person_id` in plain text —
+  so the id stays beside it as the disambiguator, and a client renders both.
+  Dropping the id would make two colleagues who drew the same character
+  indistinguishable; dropping the name puts the room back to eight hex
+  characters, which is the issue.
+
+  **One disclosure follows and it is on the record rather than closed.** The id
+  is venue-local by construction; the name is the same string at every venue. So
+  a worker engaged at two venues can tell from the messages alone that one human
+  speaks in both rooms — a capability
+  `HospitalityComs.Rooms.list_venue_room_members/2` already hands out through
+  `person_id`, now reachable without the join.
+  `HospitalityComs.Accounts.Person`'s moduledoc carries the full statement.
+
+  It matches on the field being a binary rather than reading it, so a message
+  read by a path that forgot the join is a `FunctionClauseError` here rather
+  than a `null` on the wire and an `undefined` in a heading. That is
+  `HospitalityComsWeb.RoomController.rendered_shift_room/1`'s manoeuvre against
+  an unloaded association, applied to a virtual field.
   """
   @spec rendered(RoomMessage.t()) :: rendered()
-  def rendered(%RoomMessage{} = message) do
+  def rendered(%RoomMessage{author_display_name: name} = message) when is_binary(name) do
     %{
       id: message.id,
       body: message.body,
       sent_at: DateTime.to_iso8601(message.sent_at),
-      author_engagement_id: message.author_engagement_id
+      author_engagement_id: message.author_engagement_id,
+      author_display_name: name
     }
   end
 end

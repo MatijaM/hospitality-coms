@@ -37,12 +37,19 @@ import type { MessagePage, RoomClosure, RoomMessage, VenueRoomListing } from "./
 export { decodeShiftRoom };
 
 /**
- * `%{id:, body:, sent_at:, author_engagement_id:}` — `RoomChannel.rendered/1`.
+ * `%{id:, body:, sent_at:, author_engagement_id:, author_display_name:}` —
+ * `RoomChannel.rendered/1`.
  *
  * `sent_at` stays a string. It is `DateTime.to_iso8601/1` of an instant the
  * server stamped, and parsing it into a `Date` here would invite this client to
  * compute with it — which is `HospitalityComs.Clock`'s job on the other side,
  * and the one thing KTD5 says a long-lived process must not do for itself.
+ *
+ * `author_display_name` is required. The server joins it on every read and
+ * takes it off the same query on a send, so there is no message it can produce
+ * without one — including a message whose author's engagement has ended and one
+ * whose author has been erased, which are the two cases a client-side join
+ * against the room's roll could not have named.
  */
 export function decodeRoomMessage(payload: unknown): RoomMessage | null {
   if (!isRecord(payload)) return null;
@@ -50,12 +57,14 @@ export function decodeRoomMessage(payload: unknown): RoomMessage | null {
   if (typeof payload.body !== "string") return null;
   if (typeof payload.sent_at !== "string") return null;
   if (typeof payload.author_engagement_id !== "string") return null;
+  if (typeof payload.author_display_name !== "string") return null;
 
   return {
     id: payload.id,
     body: payload.body,
     sentAt: payload.sent_at,
     authorEngagementId: payload.author_engagement_id,
+    authorDisplayName: payload.author_display_name,
   };
 }
 

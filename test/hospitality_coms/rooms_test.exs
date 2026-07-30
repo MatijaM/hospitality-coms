@@ -61,6 +61,7 @@ defmodule HospitalityComs.RoomsTest do
   import HospitalityComs.EngagementsFixtures
   import HospitalityComs.RoomsFixtures
 
+  alias HospitalityComs.Accounts
   alias HospitalityComs.Accounts.EmployerScope
   alias HospitalityComs.Accounts.PersonScope
   alias HospitalityComs.EmployerRepo
@@ -782,6 +783,113 @@ defmodule HospitalityComs.RoomsTest do
 
       assert [%ShiftRoom{id: id}] = Rooms.list_readable_shift_rooms(after_close)
       assert id == room.id
+    end
+  end
+
+  ## The author's name
+
+  describe "a message's author" do
+    test "is named on the send reply and on the read, from one query" do
+      # #66. The reply and the history are produced by
+      # `Records.with_author_display_name/1` in both cases — the send reads the
+      # row back through it rather than taking the name off the scope, because
+      # `ChannelAuth.person_scope/1` builds a stub `%Person{id: _}` and a name
+      # taken from there is correct over HTTP and `nil` on both channels.
+      %{employer: employer, person: person} = engaged()
+
+      assert {:ok, sent} = Rooms.send_venue_room_message(person, employer.venue_id, "just in")
+      assert sent.author_display_name == person.person.display_name
+
+      assert {:ok, %MessagePage{messages: [read]}} =
+               Rooms.list_venue_room_messages(person, employer.venue_id)
+
+      assert read.author_display_name == sent.author_display_name
+    end
+
+    test "is named even after their engagement has ended" do
+      # **The property this unit turns on.** A venue room keeps full history, so
+      # a message whose author's term has closed is ordinary; a name resolved
+      # against the room's *current* roll — which is the venue's **active**
+      # engagements — has nothing to find for one, and the row drops out of the
+      # join entirely. The reader is a second person still engaged, because the
+      # author is no longer a member of the room they wrote in.
+      %{employer: employer, person: author, engagement: engagement} = engaged()
+      {:ok, _sent} = Rooms.send_venue_room_message(author, employer.venue_id, "handing over")
+
+      %{person: reader} = engaged_at(employer, @now)
+
+      assert {:ok, _ended} = Engagements.end_engagement(employer, engagement.id)
+
+      # The control that makes "since ended" mean something: the author is off
+      # the venue's active engagements, which is exactly the set a client-side
+      # join against the room's roll would have had to find them in.
+      assert {:ok, still_engaged} = Engagements.list_engagements(employer)
+      refute Enum.any?(still_engaged, &(&1.id == engagement.id))
+
+      assert {:ok, %MessagePage{messages: [read]}} =
+               Rooms.list_venue_room_messages(reader, employer.venue_id)
+
+      assert read.author_engagement_id == engagement.id
+      assert read.author_display_name == author.person.display_name
+    end
+
+    test "is named under the erased constant once they are erased" do
+      # The other direction, and it is what joining rather than storing buys: no
+      # row in `room_messages` is written by an erasure (KTD15c) and the history
+      # renders differently the moment the person row changes. A stored copy
+      # would still say what they used to be called.
+      %{employer: employer, person: author} = engaged()
+      {:ok, _sent} = Rooms.send_venue_room_message(author, employer.venue_id, "see you")
+
+      %{person: reader} = engaged_at(employer, @now)
+
+      assert {:ok, _erasure} = Lifecycle.erase_person(author)
+
+      assert {:ok, %MessagePage{messages: [read]}} =
+               Rooms.list_venue_room_messages(reader, employer.venue_id)
+
+      assert read.body == "see you"
+      assert read.author_display_name == Lifecycle.erased_display_name()
+    end
+
+    test "is named in a shift room too" do
+      %{employer: employer, person: person, engagement: engagement} = engaged()
+      room = shift_room(employer)
+      roster_entry_fixture(employer, room, engagement.id)
+      sender = person_at(person, @shift_starts)
+
+      assert {:ok, sent} = Rooms.send_shift_room_message(sender, room.id, "table 6 away")
+      assert sent.author_display_name == person.person.display_name
+
+      assert {:ok, %MessagePage{messages: [read]}} =
+               Rooms.list_shift_room_messages(sender, room.id)
+
+      assert read.author_display_name == person.person.display_name
+    end
+
+    test "is not the only thing telling two authors apart" do
+      # Display names are deliberately not unique (#66), so the engagement id
+      # stays beside the name as the disambiguator. Two people renamed to one
+      # string is the case: without `author_engagement_id` on the wire the room
+      # cannot say which of them spoke.
+      %{employer: employer, person: first, engagement: first_engagement} = engaged()
+      %{person: second, engagement: second_engagement} = engaged_at(employer, @now)
+
+      {:ok, _} = Accounts.update_display_name(first, "Captain Nemo")
+      {:ok, _} = Accounts.update_display_name(second, "Captain Nemo")
+
+      {:ok, _} = Rooms.send_venue_room_message(first, employer.venue_id, "mine")
+      {:ok, _} = Rooms.send_venue_room_message(second, employer.venue_id, "mine too")
+
+      assert {:ok, %MessagePage{messages: messages}} =
+               Rooms.list_venue_room_messages(first, employer.venue_id)
+
+      assert Enum.map(messages, & &1.author_display_name) == ["Captain Nemo", "Captain Nemo"]
+
+      # Keyed on the body rather than on position: both were sent at the same
+      # instant, and `oldest_first/1` breaks that tie on a random `binary_id`.
+      assert Map.new(messages, &{&1.body, &1.author_engagement_id}) ==
+               %{"mine" => first_engagement.id, "mine too" => second_engagement.id}
     end
   end
 

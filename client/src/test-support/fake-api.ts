@@ -16,6 +16,10 @@ export function createFakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     requestMagicLink: vi.fn(() => Promise.resolve(ok(null))),
     redeemMagicLink: vi.fn(() => Promise.resolve(fails<Session>(unauthorized()))),
     currentPerson: vi.fn(() => Promise.resolve(fails<Person>(unauthorized()))),
+    // Fails by default like every other call here: a surface that renames must
+    // be testable against a refusal, and #66's control is that a refused save
+    // keeps the old name on screen.
+    changeDisplayName: vi.fn(() => Promise.resolve(fails<Person>(offline()))),
     logOut: vi.fn(() => Promise.resolve(ok(null))),
     // Fails by default, like the other two reads above: a surface that renders
     // whatever `read` gave it must be tested against the failure path having
@@ -161,6 +165,18 @@ export function offline(): RequestFailure {
   };
 }
 
+/** What `PATCH /api/me` answers for a name the schema declines (#66). */
+export function rejectedName(message: string): RequestFailure {
+  return {
+    kind: "api_field_error",
+    status: 422,
+    code: "unprocessable_entity",
+    rawCode: "unprocessable_entity",
+    message: "the name was not accepted",
+    fields: { display_name: [message] },
+  };
+}
+
 export function invalidAddress(): RequestFailure {
   return {
     kind: "api_field_error",
@@ -175,4 +191,5 @@ export function invalidAddress(): RequestFailure {
 export const somePerson: Person = {
   id: "8b1b0a3c-0000-4000-8000-000000000001",
   email: "worker@example.com",
+  displayName: "Captain Nemo",
 };

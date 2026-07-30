@@ -55,6 +55,7 @@ const JOIN_LISTS = ["list_peers", "list_requests", "list_conversations"] as cons
 function peerWire(overrides: Record<string, unknown> = {}) {
   return {
     person_id: PEER_ID,
+    display_name: "Captain Nemo",
     venue_id: VENUE_ID,
     venue_name: "The Anchor",
     role_label: "Bartender",
@@ -150,7 +151,9 @@ function renderPeers(personId: string) {
   const { socket, createSocket } = fakeSocketFactory();
   const api = createFakeApi({
     currentPerson: () =>
-      Promise.resolve(ok({ id: personId, email: "worker@example.com" })),
+      Promise.resolve(
+        ok({ id: personId, email: "worker@example.com", displayName: "Captain Nemo" }),
+      ),
   });
 
   render(
@@ -386,6 +389,20 @@ describe("the topic the peer surface is joined on", () => {
     ]);
   });
 
+  it("names a counterpart, with the id beside the name rather than instead of it", async () => {
+    // #66. The list used to lead with eight hex characters. It leads with the
+    // counterpart's own name now — and keeps the shortened `person_id`, because
+    // display names are deliberately not unique and two colleagues can draw the
+    // same character.
+    await openPeers({ peers: [peerWire()] });
+
+    const list = within(await screen.findByRole("list", { name: /people you can see/i }));
+
+    expect(list.getByText(`Captain Nemo · ${PEER_ID.slice(0, 8)}`)).toBeInTheDocument();
+    // The full id is still never rendered, which is what the shortening is for.
+    expect(list.queryByText(PEER_ID)).toBeNull();
+  });
+
   it("carries the session token as authToken and never in the socket params", async () => {
     const { socket } = await openPeers();
 
@@ -401,7 +418,7 @@ describe("a pending outbound request renders as pending until answered", () => {
     const { channel, server } = await openPeers({ peers: [peerWire()] });
 
     await userEvent.click(
-      await screen.findByRole("button", { name: /ask c3c3c3c3 to connect/i }),
+      await screen.findByRole("button", { name: /ask captain nemo to connect/i }),
     );
 
     expect(pushesOf(channel, "request")).toEqual([
@@ -420,7 +437,9 @@ describe("a pending outbound request renders as pending until answered", () => {
 
     // And the peer entry stops offering the ask, because the server just said
     // there is one outstanding.
-    expect(screen.queryByRole("button", { name: /ask c3c3c3c3 to connect/i })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /ask captain nemo to connect/i }),
+    ).toBeNull();
 
     // It stays pending. Nothing here decides that time has passed: `:lapsed`
     // and `:accepted` are both the server's, derived at the instant it is
@@ -500,7 +519,9 @@ describe("a pending outbound request renders as pending until answered", () => {
     await openPeers({ peers: [peerWire()], incoming: [incomingWire()] });
 
     expect(await screen.findByText(/they asked you to connect/i)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /ask c3c3c3c3 to connect/i })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /ask captain nemo to connect/i }),
+    ).toBeNull();
 
     // The answer is still one click away, which is the point of saying where.
     expect(screen.getByRole("button", { name: /accept c3c3c3c3/i })).toBeEnabled();
@@ -785,7 +806,7 @@ describe("a refusal on the peer channel", () => {
     const { channel } = await openPeers({ peers: [peerWire()] });
 
     await userEvent.click(
-      await screen.findByRole("button", { name: /ask c3c3c3c3 to connect/i }),
+      await screen.findByRole("button", { name: /ask captain nemo to connect/i }),
     );
     answer(channel, "request", "error", refusal("conflict"));
 
@@ -802,7 +823,7 @@ describe("a refusal on the peer channel", () => {
     const { channel } = await openPeers({ peers: [peerWire()] });
 
     await userEvent.click(
-      await screen.findByRole("button", { name: /ask c3c3c3c3 to connect/i }),
+      await screen.findByRole("button", { name: /ask captain nemo to connect/i }),
     );
     answer(channel, "request", "error", refusal("not_found"));
 

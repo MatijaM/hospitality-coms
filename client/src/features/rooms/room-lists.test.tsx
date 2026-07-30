@@ -81,6 +81,7 @@ function message(id: string, body: string) {
     body,
     sent_at: "2026-03-09T14:00:00Z",
     author_engagement_id: OWN_ENGAGEMENT_ID,
+    author_display_name: "Captain Nemo",
   };
 }
 

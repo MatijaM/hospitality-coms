@@ -17,15 +17,22 @@ defmodule HospitalityComs.Accounts.PersonTest do
 
   use HospitalityComs.DataCase, async: true
 
+  import Ecto.Query
+
   alias Ecto.Changeset
+  alias HospitalityComs.Accounts.DisplayName
   alias HospitalityComs.Accounts.Person
 
   @erased_at ~U[2026-03-01 12:00:00Z]
   @now ~U[2026-03-01 12:00:00.000000Z]
 
+  # `display_name` is `NOT NULL` since #66 and is *given* rather than cast, so a
+  # raw changeset has to supply one. It defaults here rather than at each call
+  # site because none of these tests is about the name; the two that are live in
+  # the display-name block below and pass their own.
   defp insert_person(attrs) do
     %Person{}
-    |> Changeset.change(attrs)
+    |> Changeset.change(Map.merge(%{display_name: "Captain Nemo"}, Map.new(attrs)))
     |> Repo.insert()
   end
 
@@ -100,6 +107,58 @@ defmodule HospitalityComs.Accounts.PersonTest do
       changeset = Person.confirm_changeset(person, ~U[2026-03-01 12:00:00.654321Z])
 
       assert Changeset.get_change(changeset, :confirmed_at) == ~U[2026-03-01 12:00:00Z]
+    end
+  end
+
+  describe "the display-name constraints" do
+    # These are the file's own posture applied to #66's column, and here it is
+    # load-bearing rather than stylistic. The one write in the tree that reaches
+    # `display_name` outside `Person` is `Lifecycle.Records.pseudonymise/3`, an
+    # `update_all` with no changeset in front of it — so a bound enforced only
+    # by `display_name_changeset/3` would not be enforced on the erasure path at
+    # all. Written raw, the way erasure writes it.
+
+    test "refuse a blank name whatever wrote it" do
+      assert_raise Ecto.ConstraintError, ~r/people_display_name_present/, fn ->
+        insert_person!(%{email: "blank-name@example.com", display_name: "   "})
+      end
+    end
+
+    test "refuse a name past the bound whatever wrote it" do
+      too_long = String.duplicate("a", DisplayName.max_length() + 1)
+
+      assert_raise Ecto.ConstraintError, ~r/people_display_name_within_bound/, fn ->
+        insert_person!(%{email: "long-name@example.com", display_name: too_long})
+      end
+    end
+
+    test "accept a name at exactly the bound" do
+      # The control for both tests above: a CHECK refusing everything satisfies
+      # them, and `insert_person!/1` would then be raising for its own reasons.
+      at_bound = String.duplicate("a", DisplayName.max_length())
+
+      assert %Person{display_name: ^at_bound} =
+               insert_person!(%{email: "bound-name@example.com", display_name: at_bound})
+    end
+
+    test "refuse a null name outright" do
+      # `NOT NULL`, which is what makes every read path free of a coalesce.
+      assert_raise Postgrex.Error, ~r/not_null_violation/, fn ->
+        insert_person!(%{email: "no-name@example.com", display_name: nil})
+      end
+    end
+
+    test "refuse the update_all that erasure itself uses" do
+      # The sharpest form of the two above, and the reason the CHECKs exist at
+      # all. `Lifecycle.Records.pseudonymise/3` is an `update_all`: no changeset,
+      # so no validation, so nothing in `Person` is consulted. This is that write
+      # with a bad value in it.
+      person = insert_person!(%{email: "erasing@example.com"})
+      query = from(p in Person, where: p.id == ^person.id)
+
+      assert_raise Postgrex.Error, ~r/people_display_name_present/, fn ->
+        Repo.update_all(query, set: [display_name: " "])
+      end
     end
   end
 end

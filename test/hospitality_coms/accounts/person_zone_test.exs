@@ -344,6 +344,7 @@ defmodule HospitalityComs.Accounts.PersonZoneTest do
       {{:sudo_mode?, 1}, [], :anonymous},
       {{:sudo_mode?, 2}, [-20], :anonymous},
       {{:generate_person_session_token, 1}, [], :named},
+      {{:update_display_name, 2}, ["Wendy Darling"], :named},
       {{:update_person_email, 2}, ["not a token"], :named},
       {{:deliver_login_instructions, 2}, [url], :named},
       {{:deliver_person_update_email_instructions, 3}, [unique_person_email(), url], :named}

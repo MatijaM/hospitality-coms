@@ -100,14 +100,24 @@ export type RoomEntry = {
  * A message as `HospitalityComsWeb.RoomChannel.rendered/1` puts it on the wire.
  *
  * Attribution is the **engagement**, never the person (KTD15b), and it is
- * venue-local by construction. There is no name here because there is no name
- * in the employer zone to put one from.
+ * venue-local by construction.
+ *
+ * `authorDisplayName` is the author's own chosen name (#66), joined by the
+ * server on every read rather than stored beside the message — so it follows a
+ * rename, and an erased author's history renders under a non-identifying
+ * constant with no row in `room_messages` having been touched.
+ *
+ * **Both are on the wire and both are rendered.** Display names are
+ * deliberately not unique, so the name alone cannot tell two colleagues who
+ * drew the same character apart; the engagement id is what does, and it is
+ * venue-local where the name is not.
  */
 export type RoomMessage = {
   readonly id: string;
   readonly body: string;
   readonly sentAt: string;
   readonly authorEngagementId: string;
+  readonly authorDisplayName: string;
 };
 
 /**

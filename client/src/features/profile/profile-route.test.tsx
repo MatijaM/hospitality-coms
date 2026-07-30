@@ -156,7 +156,9 @@ function renderProfile(personId: string) {
   const { socket, createSocket } = fakeSocketFactory();
   const api = createFakeApi({
     currentPerson: () =>
-      Promise.resolve(ok({ id: personId, email: "worker@example.com" })),
+      Promise.resolve(
+        ok({ id: personId, email: "worker@example.com", displayName: "Captain Nemo" }),
+      ),
   });
 
   render(
@@ -955,7 +957,9 @@ describe("what a write comes back with", () => {
     const { socket, createSocket } = fakeSocketFactory();
     const api = createFakeApi({
       currentPerson: () =>
-        Promise.resolve(ok({ id: PERSON_ID, email: "worker@example.com" })),
+        Promise.resolve(
+          ok({ id: PERSON_ID, email: "worker@example.com", displayName: "Captain Nemo" }),
+        ),
     });
 
     const { result } = renderHook(() => useProfileSurface(PERSON_ID), {

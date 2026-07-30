@@ -34,13 +34,28 @@ export function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
-/** `{"id": ..., "email": ... | null}` — `render_person/1`'s output. */
+/**
+ * `{"id": ..., "email": ... | null, "display_name": ...}` — what
+ * `HospitalityComsWeb.PersonController.rendered/1` writes.
+ *
+ * `display_name` is **required**, not optional with a fallback. A fallback
+ * would render a person under a placeholder whenever the server stopped
+ * sending the field, which is the failure this decoder exists to turn into a
+ * visible `malformed_response`. The column is `NOT NULL` on the server and the
+ * erased case carries a value rather than a null, so there is no shape this
+ * refuses that the API can produce.
+ *
+ * One decoder for two bodies: `GET /api/me` and the redemption reply both go
+ * through it, and `session_controller_test.exs` asserts the server renders them
+ * identically.
+ */
 export function decodePerson(value: unknown): Person | null {
   if (!isRecord(value)) return null;
   if (typeof value.id !== "string") return null;
   if (!(typeof value.email === "string" || value.email === null)) return null;
+  if (typeof value.display_name !== "string") return null;
 
-  return { id: value.id, email: value.email };
+  return { id: value.id, email: value.email, displayName: value.display_name };
 }
 
 /** `{"person": {...}}` — the body of `GET /api/me`. */

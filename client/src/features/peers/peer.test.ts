@@ -72,6 +72,7 @@ describe("keys and ids", () => {
     // person id alone is not unique across the list.
     const base = {
       personId: ID,
+      displayName: "Captain Nemo",
       venueName: "The Anchor",
       roleLabel: "Bartender",
       visibleFrom: "2026-07-01T00:00:00Z",

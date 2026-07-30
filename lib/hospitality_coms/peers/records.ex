@@ -70,11 +70,14 @@ defmodule HospitalityComs.Peers.Records do
   removed. `visible_peers/2` joins `engagements` and `venues`, which an employer
   session may read — and it is reached only from a `PersonScope`, because what
   it answers is "where else does this person's colleague work", which is the
-  disclosure U9 governs.
+  disclosure U9 governs. Since #66 it also joins `people` for the counterpart's
+  display name, which puts it back with the rest: person zone throughout, so the
+  backstop refuses it for an employer scope rather than the convention doing so.
   """
 
   import Ecto.Query
 
+  alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Engagements.Engagement
   alias HospitalityComs.Peers.Connection
   alias HospitalityComs.Peers.ConnectionRequest
@@ -141,10 +144,13 @@ defmodule HospitalityComs.Peers.Records do
     from [own: own, peer: peer] in co_engagements(instant),
       join: venue in Venue,
       on: venue.id == own.venue_id,
+      join: counterpart in Person,
+      on: counterpart.id == peer.person_id,
       where: own.person_id == ^person_id,
       order_by: [asc: venue.name, asc: peer.person_id, asc: peer.starts_at, asc: peer.id],
       select: %{
         person_id: peer.person_id,
+        display_name: counterpart.display_name,
         venue_id: venue.id,
         venue_name: venue.name,
         role_label: peer.role_label,
