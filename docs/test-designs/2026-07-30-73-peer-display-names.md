@@ -462,5 +462,124 @@ before it is measured.
 
 ## Revisions made during implementation
 
-To be appended in a later commit, per `AGENTS.md`. The sections above are not edited to agree with what
-shipped.
+Recorded rather than silently applied, because the gate exists to be departed from explicitly. The
+sections above are not edited to agree with what shipped.
+
+1. **Decision 3 was the brief's prediction and it held, which is the most useful thing in here.**
+   `CLAUDE.md` recorded the expected fix as widening `Records.connections_of/1` and `connection_of/2`.
+   Two of that query's four callers refuse it — `disconnect/2` composes it into an `update_all`, and
+   `locked_open_connection_of/2` adds `FOR SHARE` over what would become a join. Written down before
+   the code, and nothing during implementation contradicted it.
+
+2. **An erased person has no peer messages, so criterion 3 could only be asserted for two of the three
+   shapes.** The brief assumed an erased counterpart's *message* would render the constant. It cannot:
+   `Lifecycle.erase_person/1` deletes the erasing party's own peer messages and keeps the connection and
+   the request rows (the request row *is* KTD19's block). The test asserts the conversation heading and
+   a **pending incoming request** read `erased_display_name/0`, and asserts the erased party's messages
+   are gone — which is why there is no third case rather than an omission. Found by a red test, not by
+   reading.
+
+3. **The three "activeness predicate" mutations could not be written as join predicates**, and the brief
+   said they would be. `with_pair/1`, `with_parties/1` and `with_author/1` take no instant — they are
+   composables over a queryable — so the only predicates expressible *on the join* are instant-free, and
+   `erased_at IS NULL` is the one worth running (M7). The instant-bearing form was applied where the
+   scope's `now` lives, in the context, and mutated **only the name**: `list_conversations/1`,
+   `list_messages/2` and `with_states/3` blank the name for a counterpart who is no longer visible
+   (M4, M5, M6). That is precisely the failure the decision names — a blanked heading — rather than a
+   different rule wearing its clothes.
+
+4. **Matrix row 27's deduplication half is unreachable, and the reason is a schema decision.**
+   `engagements_no_overlap` refuses a second engagement for one person at one venue over an overlapping
+   term, so two engagements active at one instant cannot exist and `venues_named_by/1`'s set membership
+   has nothing to fold. The fixture failed on the exclusion constraint, which is how this was found.
+   The row became an ordering test with the residue written into it — and it applies equally to
+   `list_managed_venues/1`, whose docstring makes the same claim.
+
+5. **M28a's prediction was wrong, and the reason is that the brief wrote a test for the guard.** It
+   predicted 0 and killed **1** — the `assert_raise FunctionClauseError` test in `peers_test.exs`, which
+   exists for the guard and nothing else. So the number is close to tautological and the honest reading
+   is unchanged: for every *other* path in the tree the guard is insurance, and its value is visible
+   only as the pair with M28b, which kills 6. Same shape #70 found for `RoomChannel.ignored/1`, arrived
+   at from the other direction.
+
+6. **`VisibleDisclosure` did not gain an `audience_name`, and that is a decision rather than an
+   oversight.** The issue's survey names `profile-route.tsx:298` — a stored ledger row rendering
+   `shortId(audienceId)` — and `list_audiences` lets the client resolve that id against the two lists it
+   just fetched. What is left uncovered is an audience that has left both lists: a venue whose term has
+   ended, or a peer who is neither visible nor connected. Closing it needs two nullable left joins for a
+   polymorphic name **and** a third read-back family, because `VisibleDisclosure.of_decision/1` takes the
+   `Disclosure` schema and serves the write path as well as the read. That is a bigger change than the
+   picker the issue asks for; it is reported as a residue instead.
+
+7. **Rows do not map one-to-one onto test bodies**, as every brief since U8 has recorded. Thirty-nine
+   rows became **13** new bodies in `peers_test.exs`, **1** new and **2** extended in
+   `peer_channel_test.exs`, **5** in `profile_channel_test.exs` and **5** in `engagements_test.exs` —
+   27 new tests.
+
+8. **Baseline arithmetic.** Elixir **1275/1279** before, **1302/1306** after — the same four
+   `PostgresRolesTest` failures naming `hospitality_coms_dev` (issue #20). Client **531 passed / 15
+   skipped** before and after, with nothing under `client/` edited.
+
+## Mutation record
+
+Twenty-nine mutations, each applied to the finished tree, run against the whole suite, then restored.
+Counts are failures minus the four `PostgresRolesTest` baseline failures. **No mutation killed zero.**
+
+| # | Mutation | Predicted | Killed |
+|---|----------|-----------|--------|
+| M1 | the message join dropped from `messages_of/1` | ≥3 | 6 |
+| M2 | `with_pair/1` dropped from `connections_of/1` | ≥2 | 14 |
+| M3 | `with_parties/1` dropped from both request lists | ≥2 | 6 |
+| M4 | the conversation's name blanked once the pair stops being visible | ≥1 | 2 |
+| M5 | a message author's name blanked once the author stops being visible | ≥1 | **1** |
+| M6 | a request's names blanked once the pair stops being visible | ≥1 | 2 |
+| M7 | `erased_at IS NULL` added to all three joins | ≥1 | **1** |
+| M8 | `counterpart_display_name/2` answers the **viewer's own** name | ≥2 | 8 |
+| M9 | `rendered_request/1` swaps the two names | ≥1 | **1** |
+| M10 | `rendered_conversation/1` omits `peer_display_name` | ≥1 | **1** |
+| M11 | `rendered_message/1` omits `author_display_name` | ≥2 | 2 |
+| M12 | `rendered_request/1` omits both names | ≥1 | 2 |
+| M13 | the `peer_message` announcement omits the name | ≥1 | **1** |
+| M14 | `send_message/3` drops its read-back | ≥1 | 8 |
+| M15 | `accept_request/2` drops its read-back | ≥1 | 3 |
+| M16 | `disconnect/2` drops its read-back | ≥1 | 2 |
+| M17 | `request_connection/2` drops its read-back | ≥1 | 3 |
+| M18 | `decline_request/2` drops its read-back | ≥1 | 2 |
+| M19 | `decline_request/2` keeps the read-back and loses the re-applied `:declined` | ≥1 | 4 |
+| M20 | the audience venues come from `Rooms.list_venue_rooms/1` | ≥1 | **1** |
+| M21 | the audience venues come from `list_managed_venues/1` | ≥1 | 4 |
+| M22 | `engaged_venues/2` drops `active_at/2` | ≥1 | 6 |
+| M23 | `list_reachable_peers/1` drops the connected half | ≥1 | 3 |
+| M24 | `list_reachable_peers/1` drops the visible half | ≥1 | 6 |
+| M25 | `list_reachable_peers/1` counts closed connections as connected | ≥1 | **1** |
+| M26 | `list_reachable_peers/1` deduplicates on `display_name` | ≥1 | **1** |
+| M27 | the audience venue is spelled `venue_name` | ≥1 | 2 |
+| M28a | every `is_binary` head guard removed, joins intact | **0** | **1**, wrong |
+| M28b | the guards removed **and** `connections_of/1`'s join dropped | ≥1 | 6 |
+
+**Five are worth reading twice.**
+
+- **M28a is the wrong prediction** and the reason is instructive rather than embarrassing: the brief
+  predicted 0 for the rest of the suite and then wrote a test whose whole subject is the guard. The one
+  kill is that test. Everything the prediction was actually about still holds — no other assertion in
+  the tree notices the guard's absence while the joins are intact — and M28b at 6 is what says the guard
+  matters when one is missing.
+- **M9 kills exactly one, and it is the one that could not have been written from one side.** Swapping
+  `requester_display_name` and `addressee_display_name` is invisible to every context test, because
+  `rendered_request/1` is the channel's. The kill is the channel test that renames both people to two
+  known strings and asserts by value. A test asserting `is_binary/1` on both, which is the shape somebody
+  reaches for, would pass.
+- **M8 kills 8, and it is the mutation the whole "ask from both sides" instruction exists for.** Taking
+  the name from the reader rather than the counterpart is one character in a pattern match. Half the
+  kills come from the two-sided assertions; the rest are the `Conversation` shape reaching four other
+  tests.
+- **M5 and M7 kill exactly one each, and each is the test written for it.** A message author's name
+  surviving the author's engagement ending, and an erased counterpart reading as the constant: both are
+  the "no predicate on the join" rule, both are invisible to every other test in the tree, and both
+  would have shipped silently. That is the pattern this project keeps finding — a rule with no test
+  fails nothing.
+- **M20 kills exactly one and M21 kills four**, which is the asymmetry the audience venue list was
+  designed around. Reusing `list_venue_rooms/1` is caught only by the suspended-worker test with its
+  `Rooms.list_venue_rooms(worker) == []` control beside it; reusing `list_managed_venues/1` is caught
+  more widely because an ordinary worker's picker goes empty. The narrow one is the one that would have
+  shipped.
