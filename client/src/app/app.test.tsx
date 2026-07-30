@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { MemoryRouter } from "react-router";
@@ -10,12 +10,19 @@ import { createMemoryRoomStore } from "../features/rooms/room-store";
 import { SessionProvider } from "../session/session-context";
 import type { TokenStore } from "../session/token-store";
 import { createMemoryTokenStore } from "../session/token-store";
+// The venue list's path and body come from the harness the employer tests
+// already share, so there is one spelling of each: a path written inline here
+// would go on passing when the production one changed, because `readsFrom`
+// answers an unstubbed path with a `404` and this panel shows the link on a
+// failure by design.
+import { VENUES as VENUES_PATH, twoVenues } from "../test-support/employer-harness";
 import {
   createFakeApi,
   fails,
   invalidAddress,
   ok,
   offline,
+  readsFrom,
   somePerson,
   unauthorized,
 } from "../test-support/fake-api";
@@ -288,55 +295,47 @@ describe("an authenticated session", () => {
     expect(tokenStore.read()).toBeNull();
   });
 
-  it("names what is deliberately not here yet, rather than pretending it is coming", async () => {
+  /**
+   * This is two former tests inverted rather than deleted.
+   *
+   * One found the "Not reachable from here yet" list by two of its own
+   * sentences; the other found "That tab cannot connect yet" in the paragraph
+   * about the profile. Both blocks were written for whoever was building the
+   * next unit — they cited units, a file path, "no endpoint and no channel"
+   * and an HTTP header — and both are gone from the screen. Turning the
+   * assertions round is what keeps them gone: a presence test simply deleted
+   * leaves the prose one careless paste from coming back with nothing to say
+   * so.
+   *
+   * **The controls come first and they are mandatory.** An absence assertion
+   * passes against a page that rendered nothing at all, which is the one shape
+   * this suite's own header warns about — so the signed-in address and the
+   * four tabs are asserted before anything is asserted to be missing.
+   *
+   * The tab count is a second claim carried in the same line: it is the arity
+   * `neighbour` wraps over, and the keyboard tests below are written against
+   * it.
+   */
+  it("carries no notes about how the product is built", async () => {
     renderApp({
       path: "/",
       api: createFakeApi(signedIn),
       tokenStore: createMemoryTokenStore("c2Vzc2lvbg"),
     });
 
-    expect(
-      await screen.findByRole("heading", { name: /not reachable from here yet/i }),
-    ).toBeVisible();
-    // The heading is not the claim; the two entries under it are. Both went
-    // false when U10 and U11 shipped, and a version of this test that asserted
-    // the heading alone stayed green through it. Asserted on the sentence each
-    // entry makes rather than on its label, because a bullet reduced back to
-    // "erasure" or "the demo controls" is exactly the regression — it names a
-    // unit's leftovers instead of what a worker cannot do.
-    expect(screen.getByText(/no endpoint and no channel/i)).toBeVisible();
-    expect(screen.getByText(/x-demo-control/i)).toBeVisible();
-  });
+    expect(await screen.findByText("worker@example.com")).toBeVisible();
+    expect(screen.getAllByRole("tab")).toHaveLength(4);
 
-  // The previous version of this asserted only that a heading existed, so the
-  // list under it — which said "waiting on U9", "waiting on U10", "waiting on
-  // U11" long after all three shipped — was covered by nothing.
-  //
-  // A heading is not the claim. The claim is which surfaces a signed-in person
-  // cannot use, and the one most likely to come true without anyone editing
-  // this file is the profile: it needs a `profile:*` channel that
-  // `PersonSocket` does not route. `sockets_test.exs` pins that routing table
-  // exactly, with a control, so adding the channel fails there — and this is
-  // the assertion that should then be replaced by an "offers the profile
-  // surface" test, the way rooms got one when its channel landed and the tab
-  // tests below inherited.
-  //
-  // The record is behind a tab now rather than a link, so the door has to be
-  // opened before "Your record" is in the document. That is deliberately not
-  // the weaker test it looks like: the link version proved a door existed,
-  // and this proves the surface behind it mounts — which is what makes "the
-  // screen cannot connect" a claim about something rather than about nothing.
-  it("warns that the profile screen cannot connect, because no channel serves it", async () => {
-    renderApp({
-      path: "/",
-      api: createFakeApi(signedIn),
-      tokenStore: createMemoryTokenStore("c2Vzc2lvbg"),
-    });
-
-    await userEvent.click(await screen.findByRole("tab", { name: "Profile" }));
-
-    expect(await screen.findByRole("heading", { name: /^your record$/i })).toBeVisible();
-    expect(screen.getByText(/cannot connect yet/i)).toBeVisible();
+    for (const developerNote of [
+      /not reachable from here yet/i,
+      /no endpoint and no channel/i,
+      /x-demo-control/i,
+      /nothing is stubbed/i,
+      /cannot connect yet/i,
+      /contract\.ts/i,
+    ]) {
+      expect(screen.queryByText(developerNote)).not.toBeInTheDocument();
+    }
   });
 });
 
@@ -358,6 +357,11 @@ describe("the landing page's tabs", () => {
   const ROOMS = /no rooms yet\. open one from the list above, or add one by its id/i;
   const PEERS = /anybody you worked with at the same place at the same time/i;
   const PROFILE = /no employer has confirmed a job for you yet/i;
+  // The fourth panel mounts no surface, so it has no sentence of its own to be
+  // named by. Its `/claim` link does the same job: it is the one thing in that
+  // panel that is there whatever the venue read answers, which is what makes it
+  // usable as "the venues panel is open" in tests about the *other* link.
+  const VENUES = /claim a job/i;
 
   function landOnHome() {
     return renderApp({
@@ -433,6 +437,16 @@ describe("the landing page's tabs", () => {
     expect(peers.getAttribute("aria-controls")).toBe((await panel()).id);
     expect((await panel()).getAttribute("aria-labelledby")).toBe(peers.id);
     expect(screen.getByRole("tab", { name: "Rooms", selected: false })).toBeVisible();
+
+    // Venues too, because it is the one tab whose panel is not a surface — the
+    // wiring is `TABS`-driven and has no reason to treat it differently, and
+    // this is what says so rather than leaving it assumed.
+    await userEvent.click(screen.getByRole("tab", { name: "Venues" }));
+
+    const venues = await screen.findByRole("tab", { name: "Venues", selected: true });
+    expect(venues.getAttribute("aria-controls")).toBe((await panel()).id);
+    expect((await panel()).getAttribute("aria-labelledby")).toBe(venues.id);
+    expect(screen.getByRole("tab", { name: "Peers", selected: false })).toBeVisible();
   });
 
   it("walks the strip with the arrow keys, wrapping at the end", async () => {
@@ -444,15 +458,22 @@ describe("the landing page's tabs", () => {
     expect(screen.getByRole("tab", { name: "Peers" })).toHaveFocus();
     expect(within(await panel()).getByText(PEERS)).toBeVisible();
 
-    // Wrapping is the half a handler written as `min`/`max` gets wrong, and
-    // the third press is what reaches it.
+    // Through Profile and onto the last tab, so the walk reaches the entry
+    // added last rather than turning round in front of it.
     await userEvent.keyboard("{ArrowRight}{ArrowRight}");
+    expect(screen.getByRole("tab", { name: "Venues" })).toHaveFocus();
+    expect(within(await panel()).getByText(VENUES)).toBeVisible();
+
+    // Wrapping is the half a handler written as `min`/`max` gets wrong, and
+    // with four tabs it is the fourth press that reaches it.
+    await userEvent.keyboard("{ArrowRight}");
     expect(screen.getByRole("tab", { name: "Rooms" })).toHaveFocus();
     expect(within(await panel()).getByText(ROOMS)).toBeVisible();
 
+    // The other end of the same wrap, which a `max` gets wrong independently.
     await userEvent.keyboard("{ArrowLeft}");
-    expect(screen.getByRole("tab", { name: "Profile" })).toHaveFocus();
-    expect(within(await panel()).getByText(PROFILE)).toBeVisible();
+    expect(screen.getByRole("tab", { name: "Venues" })).toHaveFocus();
+    expect(within(await panel()).getByText(VENUES)).toBeVisible();
   });
 
   it("jumps to either end with Home and End", async () => {
@@ -461,8 +482,8 @@ describe("the landing page's tabs", () => {
     (await screen.findByRole("tab", { name: "Rooms" })).focus();
 
     await userEvent.keyboard("{End}");
-    expect(screen.getByRole("tab", { name: "Profile" })).toHaveFocus();
-    expect(within(await panel()).getByText(PROFILE)).toBeVisible();
+    expect(screen.getByRole("tab", { name: "Venues" })).toHaveFocus();
+    expect(within(await panel()).getByText(VENUES)).toBeVisible();
 
     // From the far end rather than from the middle, so a `Home` that returns
     // the tab it was already on cannot pass.
@@ -512,6 +533,154 @@ describe("the landing page's tabs", () => {
 
       unmount();
     }
+  });
+});
+
+/**
+ * The Venues tab, which is the one panel that fetches to decide what it holds.
+ *
+ * `/claim` is offered unconditionally — a code is a code and anybody may hold
+ * one. `/employer` is offered unless the server has said there are no venues to
+ * manage, which is **not** the same rule as "offered once we know there are
+ * some", and the difference is invisible until the network fails. So every one
+ * of the four states `useFetched` can be in is driven here, and the two that
+ * cannot be told apart from the DOM alone — in flight and refused — are reached
+ * by holding the read open and letting it go by hand.
+ *
+ * `flush()` is what makes the refusal test a claim about the refusal rather
+ * than about a request still in flight, and the empty-answer test is its
+ * control: both settle the same way through the same helper, and that one has
+ * something visible to lose. If the flush were not reaching a settled read, the
+ * link would still be on screen there and that test would fail.
+ */
+describe("the venues tab", () => {
+  /**
+   * A `read` this test releases, answering through the real decoders.
+   *
+   * It wraps `readsFrom` rather than resolving a hand-made value, so a fixture
+   * that is not the shape `EmployerController` renders fails here as
+   * `malformed_response` exactly as it would in a browser.
+   */
+  function heldRead(bodies: Readonly<Record<string, unknown>>) {
+    const answer = readsFrom(bodies);
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = () => {
+        resolve();
+      };
+    });
+
+    const read = vi.fn(
+      (path: string, token: string, decode: (body: unknown) => unknown) =>
+        held.then(() => answer(path, token, decode)),
+    ) as ApiClient["read"];
+
+    return {
+      read,
+      release: () => {
+        release();
+      },
+    };
+  }
+
+  /** Every microtask the released read is waiting behind, and the render after. */
+  async function flush(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  function landOn(read: ApiClient["read"]) {
+    return renderApp({
+      path: "/",
+      api: createFakeApi({ ...signedIn, read }),
+      tokenStore: createMemoryTokenStore("c2Vzc2lvbg"),
+    });
+  }
+
+  async function openVenues(): Promise<HTMLElement> {
+    await userEvent.click(await screen.findByRole("tab", { name: "Venues" }));
+
+    return screen.findByRole("tabpanel");
+  }
+
+  const MANAGE = { name: /venues you manage/i };
+  const CLAIM = { name: /claim a job/i };
+
+  it("offers the way into the venues you manage when the server names some", async () => {
+    landOn(readsFrom({ [VENUES_PATH]: twoVenues }));
+
+    const panel = await openVenues();
+
+    expect(await within(panel).findByRole("link", MANAGE)).toBeVisible();
+    expect(within(panel).getByRole("link", CLAIM)).toBeVisible();
+  });
+
+  it("takes that link away once the server answers that there are none", async () => {
+    const { read, release } = heldRead({ [VENUES_PATH]: { venues: [] } });
+    landOn(read);
+
+    const panel = await openVenues();
+
+    // In flight, and the link is there — which is the state the assertion
+    // after the release has to be distinguished from.
+    expect(within(panel).getByRole("link", MANAGE)).toBeVisible();
+
+    release();
+    await flush();
+
+    expect(within(panel).queryByRole("link", MANAGE)).not.toBeInTheDocument();
+    // The control. Without it this passes against a panel that stopped
+    // rendering anything at all.
+    expect(within(panel).getByRole("link", CLAIM)).toBeVisible();
+  });
+
+  it("keeps that link when the read is refused, rather than closing the only door", async () => {
+    // `readsFrom` answers an unstubbed path with a `404`, so this is a refusal
+    // rather than a timeout — and the point is that the panel cannot tell the
+    // difference and must not guess. Hiding here would take a manager's one
+    // route to their venues away over a request that failed; `/employer` has
+    // its own copy for the failure and for the genuinely empty case alike.
+    const { read, release } = heldRead({});
+    landOn(read);
+
+    const panel = await openVenues();
+
+    expect(within(panel).getByRole("link", MANAGE)).toBeVisible();
+
+    release();
+    await flush();
+
+    expect(within(panel).getByRole("link", MANAGE)).toBeVisible();
+    expect(within(panel).getByRole("link", CLAIM)).toBeVisible();
+  });
+
+  it("asks for the list when the tab is opened and not before", async () => {
+    // What "only the open tab is mounted" buys, asserted rather than assumed:
+    // a worker who never manages anywhere never makes this call. It is also
+    // what fails if the hook is ever hoisted into `HomeRoute` to keep the
+    // answer between tab switches.
+    const read = readsFrom({ [VENUES_PATH]: twoVenues });
+    landOn(read);
+
+    await screen.findByRole("tab", { name: "Venues" });
+    expect(read).not.toHaveBeenCalledWith(
+      VENUES_PATH,
+      expect.anything(),
+      expect.anything(),
+    );
+
+    await openVenues();
+
+    // The control for the assertion above: the call is one a tab press makes,
+    // so "never made" has to be the press not having happened yet.
+    await waitFor(() => {
+      expect(read).toHaveBeenCalledWith(
+        VENUES_PATH,
+        expect.anything(),
+        expect.anything(),
+      );
+    });
   });
 });
 
