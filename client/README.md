@@ -10,12 +10,12 @@ disconnect), the **profile surface** (U9's record, per-audience disclosure,
 corrections) and the **handshake** (the crude employer view's U4: the venue
 picker, the venue's people, the offer, and the claim panel that redeems it).
 
-**The profile surface is different from the other four and the difference is
-not small: no channel on the server answers any of its events.** U9 settled the
-shapes and deliberately added no transport, so it is built against the shapes
-with the envelope written down in one place —
-`src/features/profile/contract.ts`. Read that before assuming anything behind
-`/profile` works against a running server. U10 and U11's surfaces are still
+**The profile surface was built before anything answered it**, which is why
+its envelope is written down in one place — `src/features/profile/contract.ts`.
+U9 settled the shapes and deliberately added no transport; #70 added
+`HospitalityComsWeb.ProfileChannel` against that file and changed nothing under
+`client/`. Read the contract before changing either side: it is still the
+specification, and where the channel disagrees with it the channel is wrong. U10 and U11's surfaces are still
 absent, and the table at the bottom says what each is waiting on.
 
 The handshake is the opposite case: `/employer` and `/claim` speak to routes
@@ -466,10 +466,12 @@ entries, so a fourth would be a rewrite of tests about something else. The
 sentence above the links is also the only place this client says out loud that
 managing a venue and working at one are the same account.
 
-**The Profile tab is shown even though nothing answers it**, with the reason on
-the page rather than in this file: the record, its attested entries and the
-disclosure ledger are all built server-side and no channel carries them, so
-that tab renders against `features/profile/contract.ts` and waits. Hiding it
+**The Profile tab connects** as of #70, against the same
+`features/profile/contract.ts` it was written from. It was shown for several
+units before that was true, and the page carried the reason until #68 took the
+developer-facing prose off a worker's screen — which is what turned the gap into
+a bare `Ignoring unmatched topic` line in the server log and got it fixed.
+Hiding it
 would make the product look smaller than it is.
 
 ## The rooms
@@ -1061,10 +1063,10 @@ next unit more to find and undo than it costs to write from nothing.
 | Archived engagements, erasure   | U10        | Endpoints                                                                     |
 | Demo controls                   | U11        | The control surface, which is not employer-scoped                             |
 
-The worker-facing profile surface is **built** and its transport is not; that is
-`src/features/profile/contract.ts` rather than a row here, because a row saying
-"waiting on U9" would be wrong in both directions — U9 has landed, and the
-events still do not exist.
+The worker-facing profile surface has both halves now: U9's contexts and #70's
+channel. Its events are in `src/features/profile/contract.ts` rather than a row
+here, because that file is the specification both sides are tested against and a
+second listing would be a second thing to keep true.
 
 `lib/hospitality_coms_web/router.ex` declares the four session routes, the four
 room reads issue #48 added, the three employer routes and `POST /api/claims`,
