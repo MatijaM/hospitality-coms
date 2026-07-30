@@ -664,7 +664,14 @@ defmodule HospitalityComs.Peers do
        }}
     )
 
-    {:ok, request |> named() |> Map.put(:state, :declined)}
+    # `%{… | state: …}` rather than `Map.put/3`, and the compile-time half is
+    # the reason rather than the Dialyzer one: a misspelled key silently becomes
+    # a new one under `Map.put/3` and `state` would stay `nil`, which is exactly
+    # the shape M19 exists to catch — the read-back succeeding while the answer
+    # it carries is lost. The struct update refuses to compile instead. That it
+    # also keeps the type as `ConnectionRequest.t()` rather than `map()` is the
+    # smaller gain, since the `@spec` above already claims it.
+    {:ok, %{named(request) | state: :declined}}
   end
 
   defp declined({:error, :not_found} = failure), do: failure
