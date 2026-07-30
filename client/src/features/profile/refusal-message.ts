@@ -8,7 +8,7 @@
  * and the copy is keyed on the code. `fields` is the one exception and is shown
  * as it arrives, because those messages come from Ecto's changeset traversal
  * and name an input the worker actually filled in — which on this surface is
- * most of what can go wrong, since two of the seven events carry worker-authored
+ * most of what can go wrong, since two of the eight events carry worker-authored
  * text.
  *
  * ## The vocabulary is this surface's, and it is the smallest of the three

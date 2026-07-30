@@ -548,6 +548,18 @@ function DisclosureControl({
           setValue(event.target.value);
         }}
       >
+        {/*
+          Every option carries `· <short id>`, for the reason the answer buttons
+          on the peer surface do: **neither name is unique**. A display-name
+          collision is deliberate — a globally unique readable name would be a
+          second `person_id` in plain text — and `venues.name` has no unique
+          index either, so two venues may share one as easily as two people.
+          Without the id, two audiences collapse into two identical `<option>`s
+          that a sighted worker cannot tell apart and a screen reader announces
+          identically, while the `value` quietly carries the right id for
+          whichever one happened to be picked. Getting the *wrong* audience is
+          the failure here, and it is silent.
+        */}
         <option value="">Choose somebody</option>
         {audiences.venues.length > 0 && (
           <optgroup label={audienceKindLabel("venue")}>
@@ -556,7 +568,7 @@ function DisclosureControl({
                 key={venue.venueId}
                 value={audienceValue({ kind: "venue", id: venue.venueId })}
               >
-                {venue.name}
+                {venue.name} · {shortId(venue.venueId)}
               </option>
             ))}
           </optgroup>
@@ -568,7 +580,7 @@ function DisclosureControl({
                 key={person.personId}
                 value={audienceValue({ kind: "person", id: person.personId })}
               >
-                {person.displayName}
+                {person.displayName} · {shortId(person.personId)}
               </option>
             ))}
           </optgroup>

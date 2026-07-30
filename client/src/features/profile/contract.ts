@@ -60,9 +60,11 @@
  * ## What a transport author has to write, exactly
  *
  * Every event below traces to one exported function of `HospitalityComs.Profiles`
- * and one render shape. Nothing here needs a context change. Three of the seven
+ * and one render shape. Nothing here needs a context change. Four of the eight
  * do need a **render function** written next to the channel, because the context
- * answers an Ecto schema struct rather than a render struct — see
+ * answers an Ecto schema struct rather than a render struct — `listAudiences` is
+ * the fourth and needs two, since both halves of its reply are schema structs
+ * (`ProfileChannel.rendered_venue/1` and `rendered_person/1`) — see
  * "Three entities have no render struct" below, which is the one thing in this
  * contract that is a finding rather than a choice.
  *

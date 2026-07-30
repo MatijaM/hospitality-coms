@@ -91,6 +91,22 @@ const AUDIENCE_VENUE_NAME = "The Bell";
 const OTHER_AUDIENCE_VENUE_NAME = "The Crown";
 const AUDIENCE_PERSON_NAME = "Allan Quatermain";
 
+/**
+ * What an option is actually *called*, which is the name plus the first eight
+ * characters of the id — neither `venues.name` nor `people.display_name` is
+ * unique, so the name alone does not identify a row.
+ *
+ * **Written out as literals rather than built with `shortId`.** Composing the
+ * expectation from the same function the component calls makes the assertion
+ * agree with itself for any implementation of it, including one that returns
+ * the empty string — the defect `peers_test.exs` keeps its own `@tail_days`
+ * to avoid. These are read off `AUDIENCE_VENUE_ID` and friends above by eye,
+ * and a change to either end fails here.
+ */
+const AUDIENCE_VENUE_OPTION = "The Bell · 77777777";
+const OTHER_AUDIENCE_VENUE_OPTION = "The Crown · 88888888";
+const AUDIENCE_PERSON_OPTION = "Allan Quatermain · c3c3c3c3";
+
 /** `Profiles.incompleteness_notice/0`, verbatim. */
 const NOTICE =
   "This record may be incomplete. A worker chooses which of their entries each employer and each peer can see.";
@@ -521,13 +537,13 @@ describe("each attested entry renders its current audience", () => {
 
     await userEvent.selectOptions(
       control,
-      within(control).getByRole("option", { name: OTHER_AUDIENCE_VENUE_NAME }),
+      within(control).getByRole("option", { name: OTHER_AUDIENCE_VENUE_OPTION }),
     );
     expect(await screen.findByText("Not decided")).toBeInTheDocument();
 
     await userEvent.selectOptions(
       control,
-      within(control).getByRole("option", { name: AUDIENCE_VENUE_NAME }),
+      within(control).getByRole("option", { name: AUDIENCE_VENUE_OPTION }),
     );
 
     // The same control, a different audience, and now there *is* a row.
@@ -562,10 +578,10 @@ describe("the audience is picked from a list rather than typed as a uuid", () =>
     // Both halves, and they are asserted separately: a picker built from one
     // list works perfectly against every fixture that carries both.
     expect(
-      within(control).getByRole("option", { name: AUDIENCE_VENUE_NAME }),
+      within(control).getByRole("option", { name: AUDIENCE_VENUE_OPTION }),
     ).toBeInTheDocument();
     expect(
-      within(control).getByRole("option", { name: AUDIENCE_PERSON_NAME }),
+      within(control).getByRole("option", { name: AUDIENCE_PERSON_OPTION }),
     ).toBeInTheDocument();
 
     // `audienceKindLabel` names them, and the grouping is what tells a worker
@@ -574,6 +590,49 @@ describe("the audience is picked from a list rather than typed as a uuid", () =>
       group.getAttribute("label"),
     );
     expect(groups).toEqual(["Employer", "Peer"]);
+  });
+
+  it("keeps two audiences apart when they share a name", async () => {
+    // The reason the short id is there at all, and the case the rest of this
+    // block cannot reach: every other fixture has one venue and one person, so
+    // dropping the id changes a *label* and nothing becomes ambiguous. Here two
+    // people hold one name — deliberate, since a globally unique readable name
+    // would be a second `person_id` in plain text — and two venues do too,
+    // because `venues.name` carries no unique index either.
+    //
+    // `peers.test.tsx`'s "keeps the two answer buttons apart when two
+    // requesters share a name" is the same test on the other surface. Getting
+    // this wrong is silent: the `value` still carries the right id, so the
+    // *sent* payload is correct for whichever row happened to be picked, and
+    // the worker hides their record from the wrong person with no way to tell.
+    const twin = "b0b0b0b0-c1c1-4d2d-8e3e-f4f4f4f4f4f4";
+    const otherVenue = "a0a0a0a0-b1b1-4c2c-8d3d-e4e4e4e4e4e4";
+
+    await openProfile({
+      attested: [entryWire()],
+      people: [
+        audiencePersonWire(),
+        audiencePersonWire({ person_id: twin, display_name: AUDIENCE_PERSON_NAME }),
+      ],
+      venues: [
+        audienceVenueWire(),
+        audienceVenueWire({ venue_id: otherVenue, name: AUDIENCE_VENUE_NAME }),
+      ],
+    });
+
+    const control = await picker("bartender at the anchor");
+    const names = [...control.querySelectorAll("option")].map((option) => option.text);
+
+    // An inequality rather than two literals: what matters is that the two are
+    // *distinguishable*, and asserting the exact strings passes for any format
+    // that happens to differ — including one that stops being a short id.
+    expect(names).toContain(AUDIENCE_PERSON_OPTION);
+    expect(names).toContain("Allan Quatermain · b0b0b0b0");
+    expect(names).toContain(AUDIENCE_VENUE_OPTION);
+    expect(names).toContain("The Bell · a0a0a0a0");
+
+    // The control on all four: no two options read alike, which is the claim.
+    expect(new Set(names).size).toBe(names.length);
   });
 
   it("chooses nobody until the worker does, and keeps both buttons shut", async () => {
@@ -594,7 +653,7 @@ describe("the audience is picked from a list rather than typed as a uuid", () =>
     // above is a state and not the only state this control has.
     await userEvent.selectOptions(
       control,
-      within(control).getByRole("option", { name: AUDIENCE_VENUE_NAME }),
+      within(control).getByRole("option", { name: AUDIENCE_VENUE_OPTION }),
     );
     expect(screen.getByRole("button", { name: /^hide bartender/i })).toBeEnabled();
   });
@@ -607,7 +666,7 @@ describe("the audience is picked from a list rather than typed as a uuid", () =>
     // has to come off the row.
     const { channel } = await openProfile({ attested: [entryWire()], disclosures: [] });
 
-    await decide("bartender at the anchor", AUDIENCE_PERSON_NAME, "Hide");
+    await decide("bartender at the anchor", AUDIENCE_PERSON_OPTION, "Hide");
 
     expect(pushesOf(channel, PROFILE_EVENTS.setDisclosure)).toEqual([
       {
@@ -664,10 +723,10 @@ describe("the audience is picked from a list rather than typed as a uuid", () =>
     const control = await picker("bartender at the anchor");
 
     expect(
-      within(control).getByRole("option", { name: AUDIENCE_PERSON_NAME }),
+      within(control).getByRole("option", { name: AUDIENCE_PERSON_OPTION }),
     ).toBeInTheDocument();
     expect(
-      within(control).queryByRole("option", { name: AUDIENCE_VENUE_NAME }),
+      within(control).queryByRole("option", { name: AUDIENCE_VENUE_OPTION }),
     ).toBeNull();
     expect(screen.queryByText(/there is nobody to name yet/i)).toBeNull();
   });
@@ -731,7 +790,7 @@ describe("changing a disclosure setting confirms the new state", () => {
 
     expect(await screen.findByText(/you have not made a decision/i)).toBeInTheDocument();
 
-    await decide("bartender at the anchor", AUDIENCE_VENUE_NAME, "Hide");
+    await decide("bartender at the anchor", AUDIENCE_VENUE_OPTION, "Hide");
 
     expect(pushesOf(channel, PROFILE_EVENTS.setDisclosure)).toEqual([
       {
@@ -770,7 +829,7 @@ describe("changing a disclosure setting confirms the new state", () => {
       disclosures: [],
     });
 
-    await decide("bartender at the anchor", AUDIENCE_VENUE_NAME, "Show");
+    await decide("bartender at the anchor", AUDIENCE_VENUE_OPTION, "Show");
     answer(
       channel,
       PROFILE_EVENTS.setDisclosure,
@@ -788,7 +847,7 @@ describe("changing a disclosure setting confirms the new state", () => {
   it("closes both controls while a decision is in flight", async () => {
     const { channel } = await openProfile({ attested: [entryWire()], disclosures: [] });
 
-    await decide("bartender at the anchor", AUDIENCE_VENUE_NAME, "Hide");
+    await decide("bartender at the anchor", AUDIENCE_VENUE_OPTION, "Hide");
 
     const show = screen.getByRole("button", { name: /^show bartender/i });
     const hide = screen.getByRole("button", { name: /^hide bartender/i });
@@ -806,7 +865,7 @@ describe("changing a disclosure setting confirms the new state", () => {
   it("renders the refusal rather than the state it asked for", async () => {
     const { channel } = await openProfile({ attested: [entryWire()], disclosures: [] });
 
-    await decide("bartender at the anchor", AUDIENCE_VENUE_NAME, "Hide");
+    await decide("bartender at the anchor", AUDIENCE_VENUE_OPTION, "Hide");
     answer(channel, PROFILE_EVENTS.setDisclosure, "error", refusal("not_found"));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/not one of yours/i);
