@@ -343,9 +343,20 @@ function IncomingRequest({
     setAnswering(false);
   }
 
+  // The requester is the side this reader is not. `rendered_request/1` sends
+  // both names because it takes no viewer; picking the right one is this
+  // list's job and the outgoing list picks the other.
+  //
+  // **The short id is on the two buttons and not only on the heading**, which
+  // is a departure from `VisiblePeer`'s "Open conversation with <name>" above.
+  // Names collide by design, so two outstanding requests from two people who
+  // drew the same character would otherwise produce two buttons with one
+  // accessible name — nothing for a screen-reader user to choose between.
+  const requester = `${request.requesterDisplayName} · ${shortId(request.requesterId)}`;
+
   return (
     <>
-      <strong>{shortId(request.requesterId)}</strong>{" "}
+      <strong>{requester}</strong>{" "}
       <span>
         asked on <time dateTime={request.requestedAt}>{request.requestedAt}</time>
       </span>{" "}
@@ -358,7 +369,7 @@ function IncomingRequest({
           void answer(() => surface.acceptRequest(request.requestId));
         }}
       >
-        Accept {shortId(request.requesterId)}
+        Accept {requester}
       </button>
       <button
         type="button"
@@ -367,7 +378,7 @@ function IncomingRequest({
           void answer(() => surface.declineRequest(request.requestId));
         }}
       >
-        Decline {shortId(request.requesterId)}
+        Decline {requester}
       </button>
     </>
   );
@@ -383,7 +394,13 @@ function OutgoingRequests({ requests }: { readonly requests: readonly PeerReques
         <ul aria-label="Requests you sent">
           {requests.map((request) => (
             <li key={request.requestId}>
-              <strong>{shortId(request.addresseeId)}</strong>{" "}
+              {/*
+                The addressee, because the reader is the requester here. The
+                incoming list renders the other side of the same shape.
+              */}
+              <strong>
+                {request.addresseeDisplayName} · {shortId(request.addresseeId)}
+              </strong>{" "}
               <span>{requestStateLabel(request.state)}</span>{" "}
               <span>{requestStateMessage(request.state)}</span>{" "}
               <time dateTime={request.requestedAt}>{request.requestedAt}</time>
@@ -425,7 +442,8 @@ function Conversations({
                   onOpen(conversation.connectionId);
                 }}
               >
-                Open conversation {shortId(conversation.peerId)}
+                Open conversation {conversation.peerDisplayName} ·{" "}
+                {shortId(conversation.peerId)}
               </button>{" "}
               <span>{conversation.open ? "Open" : "Closed"}</span>
             </li>

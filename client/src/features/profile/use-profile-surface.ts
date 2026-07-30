@@ -56,6 +56,7 @@ import type { PushOutcome, TopicSubscription } from "../../socket/session-socket
 import { useSessionSocket } from "../../socket/socket-context";
 import { PROFILE_EVENTS } from "./contract";
 import {
+  decodeAudiences,
   decodeCorrectionRequest,
   decodeDeclaredEntry,
   decodeDisclosure,
@@ -65,6 +66,7 @@ import {
 } from "./decode";
 import type {
   AudienceKind,
+  Audiences,
   CorrectionRequest,
   DeclaredEntry,
   Disclosure,
@@ -130,6 +132,22 @@ export type ProfileSurface = {
   readonly own: Profile;
   /** Their decisions, which are overrides and not an answer to "who sees it". */
   readonly disclosures: readonly Disclosure[];
+  /**
+   * Everybody a decision can be about, or `null` for **not answered yet**.
+   *
+   * The `null` is load-bearing and is not a convenience. A picker has at least
+   * four states — idle, in flight, refused, ready — and *ready with nothing*
+   * renders identically to the first three unless one of the two is not an
+   * empty pair. Initialised to `{venues: [], people: []}` this surface would
+   * tell a worker there is nobody they can name for as long as one round trip
+   * takes, which is #68's venue link exactly: correct until the network is
+   * slow, and wrong in the direction that takes the control away.
+   *
+   * A refusal leaves it `null` and raises the notice, rather than falling back
+   * to a typed-id box: a fallback path reached once a year is a path nothing
+   * tests, and the worker is told either way.
+   */
+  readonly audiences: Audiences | null;
   /** How many times this surface has been admitted. See the header. */
   readonly joinGeneration: number;
   /** One at a time, and always the most recent. Rendered in one place. */
@@ -180,6 +198,7 @@ export function useProfileSurface(personId: string): ProfileSurface {
   const [joinGeneration, setJoinGeneration] = useState(0);
   const [own, setOwn] = useState<Profile>(EMPTY_PROFILE);
   const [disclosures, setDisclosures] = useState<readonly Disclosure[]>(NO_DISCLOSURES);
+  const [audiences, setAudiences] = useState<Audiences | null>(null);
   const [notice, setNotice] = useState<ProfileNotice | null>(null);
 
   // Derived rather than stored, as `usePeerSurface` derives `no_socket`:
@@ -238,6 +257,38 @@ export function useProfileSurface(personId: string): ProfileSurface {
     setDisclosures(decoded);
   }, []);
 
+  /**
+   * Who the worker can name, read once on the join beside the record and the
+   * ledger.
+   *
+   * It stays `null` on a refusal and on a reply this client cannot read, which
+   * is the opposite of `loadOwn`'s rule and deliberately so. There, the
+   * previous record is left on screen because it was true a moment ago and a
+   * profile blanking itself reads as "you have never worked anywhere". Here
+   * there is nothing to leave: the failure state and the never-asked state are
+   * the same state, and both must render as "not known" rather than as "there
+   * is nobody".
+   */
+  const loadAudiences = useCallback(async (open: TopicSubscription): Promise<void> => {
+    const outcome = await open.push(PROFILE_EVENTS.listAudiences, {});
+
+    if (outcome.status !== "ok") {
+      report("audiences", outcome, setNotice);
+
+      return;
+    }
+
+    const decoded = decodeAudiences(outcome.payload);
+
+    if (decoded === null) {
+      setNotice({ kind: "malformed_reply", action: "audiences" });
+
+      return;
+    }
+
+    setAudiences(decoded);
+  }, []);
+
   useEffect(() => {
     if (socket === null || topic === null) return;
 
@@ -272,6 +323,7 @@ export function useProfileSurface(personId: string): ProfileSurface {
 
         void loadOwn(open);
         void loadDisclosures(open);
+        void loadAudiences(open);
       },
       onRefused: (payload) => {
         // `createSessionSocket` has already left the topic: a refusal is a
@@ -297,6 +349,10 @@ export function useProfileSurface(personId: string): ProfileSurface {
 
         setOwn(EMPTY_PROFILE);
         setDisclosures(NO_DISCLOSURES);
+        // Back to "not known" rather than to an empty pair, for the reason
+        // `audiences` is nullable at all — and here it is also the honest
+        // answer, since this session is gone and nothing has been asked since.
+        setAudiences(null);
       },
       onTimeout: () => {
         setJoinState({ status: "timed_out" });
@@ -310,7 +366,7 @@ export function useProfileSurface(personId: string): ProfileSurface {
       opened.leave();
       subscription.current = null;
     };
-  }, [socket, topic, ownId, loadOwn, loadDisclosures]);
+  }, [socket, topic, ownId, loadOwn, loadDisclosures, loadAudiences]);
 
   const run = useCallback(
     async <Value>(
@@ -555,6 +611,7 @@ export function useProfileSurface(personId: string): ProfileSurface {
     connection,
     own,
     disclosures,
+    audiences,
     joinGeneration,
     notice,
     clearNotice,

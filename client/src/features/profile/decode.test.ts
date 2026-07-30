@@ -360,7 +360,10 @@ describe("the audiences a disclosure can name", () => {
       decodeAudiences({ ...audiences, venues: [...audiences.venues, { venue_id: "x" }] }),
     ).toBeNull();
     expect(
-      decodeAudiences({ ...audiences, people: [...audiences.people, { person_id: "x" }] }),
+      decodeAudiences({
+        ...audiences,
+        people: [...audiences.people, { person_id: "x" }],
+      }),
     ).toBeNull();
   });
 

@@ -73,7 +73,6 @@ function peerWire(overrides: Record<string, unknown> = {}) {
  * makes the author render's own-message branch observable.
  */
 const PEER_NAME = "Captain Nemo";
-const OTHER_PEER_NAME = "Allan Quatermain";
 const OWN_NAME = "Doctor Watson";
 
 /** `rendered_request/1`, as this person's own outgoing approach. */
@@ -663,7 +662,7 @@ describe("a pending outbound request renders as pending until answered", () => {
     expect(
       within(screen.getByRole("list", { name: /your conversations/i })).getByRole(
         "button",
-        { name: /open conversation c3c3c3c3/i },
+        { name: /open conversation .*c3c3c3c3/i },
       ),
     ).toBeInTheDocument();
   });
@@ -703,7 +702,7 @@ describe("a pending outbound request renders as pending until answered", () => {
     ).toBeNull();
 
     // The answer is still one click away, which is the point of saying where.
-    expect(screen.getByRole("button", { name: /accept c3c3c3c3/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /accept .*c3c3c3c3/i })).toBeEnabled();
   });
 });
 
@@ -716,7 +715,7 @@ describe("two workers exchanging peer messages see them in order", () => {
     const { channel } = await openPeers({ conversations: [conversationWire()] });
 
     await userEvent.click(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /open conversation .*c3c3c3c3/i }),
     );
 
     expect(pushesOf(channel, "history")).toEqual([
@@ -773,8 +772,10 @@ describe("two workers exchanging peer messages see them in order", () => {
     expect(bodies[3]).toContain("see you there");
 
     // Attribution is the person here — the peer graph is person zone and the
-    // counterpart's id is already in the peer list. There is still no name.
-    expect(bodies[1]).toMatch(/^c3c3c3c3/);
+    // counterpart's id is already in the peer list. Since #73 the name leads
+    // and the shortened id follows it, which is the ordering every render on
+    // this surface uses; the full id is still never on screen.
+    expect(bodies[1]).toMatch(new RegExp(`^${PEER_NAME} · c3c3c3c3`));
     expect(bodies[1]).not.toContain(PEER_ID);
     expect(bodies[2]).toMatch(/^You/);
   });
@@ -1204,7 +1205,7 @@ describe("answering a request", () => {
     const { channel, server } = await openPeers({ incoming: [incomingWire()] });
 
     await userEvent.click(
-      await screen.findByRole("button", { name: /accept c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /accept .*c3c3c3c3/i }),
     );
 
     expect(pushesOf(channel, "accept")).toEqual([
@@ -1219,7 +1220,7 @@ describe("answering a request", () => {
     });
 
     expect(
-      await screen.findByRole("button", { name: /open conversation c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /open conversation .*c3c3c3c3/i }),
     ).toBeInTheDocument();
     expect(screen.getByText(/nobody has asked you to connect/i)).toBeInTheDocument();
   });
@@ -1232,14 +1233,14 @@ describe("answering a request", () => {
     const { channel } = await openPeers({ incoming: [incomingWire()] });
 
     await userEvent.click(
-      await screen.findByRole("button", { name: /accept c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /accept .*c3c3c3c3/i }),
     );
 
-    expect(screen.getByRole("button", { name: /accept c3c3c3c3/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /decline c3c3c3c3/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /accept .*c3c3c3c3/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /decline .*c3c3c3c3/i })).toBeDisabled();
 
-    await userEvent.click(screen.getByRole("button", { name: /accept c3c3c3c3/i }));
-    await userEvent.click(screen.getByRole("button", { name: /decline c3c3c3c3/i }));
+    await userEvent.click(screen.getByRole("button", { name: /accept .*c3c3c3c3/i }));
+    await userEvent.click(screen.getByRole("button", { name: /decline .*c3c3c3c3/i }));
 
     expect(pushesOf(channel, "accept")).toHaveLength(1);
     expect(pushesOf(channel, "decline")).toHaveLength(0);
@@ -1249,7 +1250,7 @@ describe("answering a request", () => {
     const { channel, server } = await openPeers({ incoming: [incomingWire()] });
 
     await userEvent.click(
-      await screen.findByRole("button", { name: /decline c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /decline .*c3c3c3c3/i }),
     );
 
     expect(pushesOf(channel, "decline")).toEqual([
@@ -1280,10 +1281,10 @@ describe("answering a request", () => {
     });
 
     expect(
-      await screen.findByRole("button", { name: /decline c3c3c3c3/i }),
+      await screen.findByRole("button", { name: /decline .*c3c3c3c3/i }),
     ).toBeEnabled();
 
-    await userEvent.click(screen.getByRole("button", { name: /accept c3c3c3c3/i }));
+    await userEvent.click(screen.getByRole("button", { name: /accept .*c3c3c3c3/i }));
     answer(channel, "accept", "error", refusal("gone"));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/expired/i);

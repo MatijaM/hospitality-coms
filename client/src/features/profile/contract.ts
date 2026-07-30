@@ -1,5 +1,5 @@
 /**
- * `HospitalityComsWeb.ProfileChannel` answers all of this (#70).
+ * `HospitalityComsWeb.ProfileChannel` answers all of this (#70, #73).
  *
  * This file is the whole of what the profile surface asks a Phoenix channel
  * for. It was written *before* any channel answered it — the one clearly-marked
@@ -8,6 +8,15 @@
  * engineer. That happened in #70, and **not one line under `client/` changed**,
  * which is the strongest thing that can be said for a contract written ahead of
  * its implementation.
+ *
+ * **`listAudiences` is the one event here that went the other way**, and the
+ * distinction is worth keeping straight. The seven below were this file asking
+ * and #70 answering. The eighth was #76 *offering* something no version of this
+ * file had asked for, because it could not: `DisclosureControl` made the worker
+ * type a raw uuid for an audience, and the two lists that would have let it
+ * offer a picker existed in `Engagements` and `Peers` with no transport. So its
+ * shape was read out of `profile_channel.ex` rather than specified here, which
+ * is the posture `features/peers/decode.ts` has for the whole peer surface.
  *
  * It stays the specification rather than becoming a record of one. The channel
  * is tested against these payloads; where the two disagree, this file is right
@@ -63,15 +72,15 @@
  * `PersonSocket`, with the suffix matched against the joining scope's own
  * person exactly as `PeerChannel.admitted/3` matches its own.
  *
- * Putting these seven events on `PeerChannel` instead is the real alternative
- * and it is a **one-constant change here**: none of the seven names collides
+ * Putting these eight events on `PeerChannel` instead is the real alternative
+ * and it is a **one-constant change here**: none of the eight names collides
  * with any of `PeerChannel`'s nine, deliberately, so the client would need this
  * file's prefix changed and nothing else.
  *
  * It is written as a separate topic rather than as more clauses on `PeerChannel`
  * for a reason that is in `PeerChannel`'s own moduledoc: "a crash on this
  * channel takes every one of that person's conversations with it (KTD10,
- * deliberate)". Two of these seven events carry worker-authored text into an
+ * deliberate)". Two of these eight events carry worker-authored text into an
  * Ecto changeset, which is the most likely thing on this surface to raise. A
  * profile is also not a conversation, so it is not what that multiplexing point
  * exists for. And `PersonSocket` gaining a route is a change `sockets_test.exs`
@@ -246,6 +255,38 @@ export const PROFILE_EVENTS = {
    * viewer one. What a worker has decided about their own record is theirs.
    */
   peerProfile: "peer_profile",
+
+  /**
+   * `Engagements.list_engaged_venues/1` and `Peers.list_reachable_peers/1`.
+   *
+   * Payload `{}`. Reply
+   * `%{venues: [%{venue_id, name}], people: [%{person_id, display_name}]}`.
+   *
+   * The two kinds `Disclosure.audience/0` has, which is what
+   * `setDisclosure`'s `audience_kind` + `audience_id` names. **Added by #76
+   * rather than asked for here** — see this file's banner.
+   *
+   * **One event and not two**, so both halves share an instant: neither is
+   * stored, both are derived, and a picker showing a venue from 10:00 beside a
+   * peer from 10:05 would be two answers to one question.
+   *
+   * Each list is exactly the set that can read the record, and neither is a
+   * list that already existed. The venues are engagements **active at the
+   * instant**, which is the employer view's own predicate — not
+   * `list_managed_venues/1`, which needs a live grant and would leave an
+   * ordinary worker's picker empty, and not `VisibleEntry.venue_id`, which is
+   * the venue that *asserted* an entry rather than one that could be an
+   * audience for it. The people are visible **or connected**, which is the pair
+   * `fetch_peer_profile/2` gates on; the connected half is what makes the
+   * remedy for the peer-disclosure residue reachable, since the person a worker
+   * most wants to hide an entry from is one who is connected and no longer
+   * co-rostered.
+   *
+   * **Both are answers about *now*, and the ledger is for ever.** So a decision
+   * already taken can name an audience on neither list, and the surface renders
+   * that rather than resolving it to nothing. See `EntryAudiences`.
+   */
+  listAudiences: "list_audiences",
 } as const;
 
 export type ProfileEvent = (typeof PROFILE_EVENTS)[keyof typeof PROFILE_EVENTS];

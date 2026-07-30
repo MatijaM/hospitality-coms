@@ -36,6 +36,9 @@ import { isRecord } from "../../api/decode";
 import type {
   AttestedEntry,
   AudienceKind,
+  AudiencePerson,
+  Audiences,
+  AudienceVenue,
   CorrectionRequest,
   DeclaredEntry,
   Disclosure,
@@ -245,6 +248,49 @@ export function decodeDisclosures(payload: unknown): readonly Disclosure[] | nul
   if (!isRecord(payload)) return null;
 
   return decodeList(payload.disclosures, decodeDisclosure);
+}
+
+/** `%{venue_id:, name:}` — `ProfileChannel.rendered_venue/1`. */
+function decodeAudienceVenue(payload: unknown): AudienceVenue | null {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.venue_id !== "string") return null;
+  if (typeof payload.name !== "string") return null;
+
+  return { venueId: payload.venue_id, name: payload.name };
+}
+
+/** `%{person_id:, display_name:}` — `ProfileChannel.rendered_person/1`. */
+function decodeAudiencePerson(payload: unknown): AudiencePerson | null {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.person_id !== "string") return null;
+  if (typeof payload.display_name !== "string") return null;
+
+  return { personId: payload.person_id, displayName: payload.display_name };
+}
+
+/**
+ * `%{venues: [...], people: [...]}` — the reply to `list_audiences`.
+ *
+ * **Both halves are required, and neither defaults to empty.** They are the
+ * two kinds `Disclosure.audience/0` has, answered in one event so that they
+ * share an instant; a `?? []` on either would turn a transport that answered
+ * one of them into a picker that silently offered one group, with a worker no
+ * way to notice the other was missing.
+ *
+ * Empty is a real answer and is not the same as a refusal — a worker between
+ * jobs with nobody visible has two empty lists — which is why the surface holds
+ * `Audiences | null` and this decoder never invents the pair.
+ */
+export function decodeAudiences(payload: unknown): Audiences | null {
+  if (!isRecord(payload)) return null;
+
+  const venues = decodeList(payload.venues, decodeAudienceVenue);
+  if (venues === null) return null;
+
+  const people = decodeList(payload.people, decodeAudiencePerson);
+  if (people === null) return null;
+
+  return { venues, people };
 }
 
 /**

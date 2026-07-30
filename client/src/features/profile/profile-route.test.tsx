@@ -507,10 +507,13 @@ describe("each attested entry renders its current audience", () => {
     // third value at all.
     await openProfile({
       attested: [entryWire()],
-      venues: [audienceVenueWire(), audienceVenueWire({
-        venue_id: OTHER_AUDIENCE_VENUE_ID,
-        name: OTHER_AUDIENCE_VENUE_NAME,
-      })],
+      venues: [
+        audienceVenueWire(),
+        audienceVenueWire({
+          venue_id: OTHER_AUDIENCE_VENUE_ID,
+          name: OTHER_AUDIENCE_VENUE_NAME,
+        }),
+      ],
       disclosures: [disclosureWire({ audience_id: AUDIENCE_VENUE_ID })],
     });
 
@@ -640,7 +643,9 @@ describe("the audience is picked from a list rather than typed as a uuid", () =>
     expect(
       within(control).getByRole("option", { name: AUDIENCE_PERSON_NAME }),
     ).toBeInTheDocument();
-    expect(within(control).queryByRole("option", { name: AUDIENCE_VENUE_NAME })).toBeNull();
+    expect(
+      within(control).queryByRole("option", { name: AUDIENCE_VENUE_NAME }),
+    ).toBeNull();
     expect(screen.queryByText(/there is nobody to name yet/i)).toBeNull();
   });
 
@@ -913,8 +918,12 @@ describe("somebody else's record", () => {
     expect(
       screen.getByRole("button", { name: /ask the anchor for a correction/i }),
     ).toBeInTheDocument();
+    // #73's second half renamed this: it was `audience-id-…`, a text box for a
+    // raw uuid, and is now `audience-…`, the picker that replaced it. Still
+    // here as the control on the cut below — the surface's *other* control has
+    // to be shown standing before the peer lookup is asserted gone.
     expect(
-      document.getElementById(`audience-id-${entryWire().attested_entry_id}`),
+      document.getElementById(`audience-${entryWire().attested_entry_id}`),
     ).not.toBeNull();
     expect(pushesOf(channel, PROFILE_EVENTS.ownProfile)).toHaveLength(1);
 
