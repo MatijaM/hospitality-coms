@@ -52,6 +52,7 @@
  * anywhere derives anything else from what a profile does not contain.
  */
 
+import { shortId } from "../../app/short-id";
 import { PROFILE_TOPIC_PREFIX } from "./contract";
 
 export { normaliseTopicId as normalisePersonId } from "../../socket/topic-id";
@@ -281,7 +282,10 @@ export function resolutionMessage(resolution: Resolution | null): string {
   }
 }
 
-/** How long an id is shown for. Never a name: there is no name on the wire. */
-export function shortId(id: string): string {
-  return id.slice(0, 8);
-}
+/**
+ * How long an id is shown for. Never a name: there is no name on the wire.
+ *
+ * Hoisted to `src/app/short-id.ts` on its third caller, with `peer.ts`'s
+ * identical copy — see there. Re-exported so no profile call site moved.
+ */
+export { shortId };

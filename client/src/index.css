@@ -210,32 +210,11 @@ code {
   color: var(--ink);
 }
 
-/* The room list and the conversation. Both are lists and neither reads as one:
-   the first is a row of controls, the second is a transcript. */
+/* The conversation is a list and does not read as one: it is a transcript. */
 
-[aria-label="Your rooms"],
 [aria-label="Messages"] {
   list-style: none;
   padding-left: 0;
-}
-
-[aria-label="Your rooms"] li {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-  margin-bottom: 0.4rem;
-}
-
-[aria-label="Your rooms"] button {
-  margin-top: 0;
-  font-size: 0.9rem;
-}
-
-/* Forgetting a room is destructive and should not look like opening one. */
-[aria-label="Your rooms"] button + button {
-  background: transparent;
-  border-color: var(--line);
-  color: var(--muted);
 }
 
 /* Every list whose rows carry a control, stacked rather than laid out in a row.
@@ -245,9 +224,14 @@ code {
    to the wrong entry. Smaller than a form's submit for the same reason: these
    are navigation, not the page's action.
 
-   `[aria-label="Your rooms"]` above is deliberately not in this set — it is a
-   row of two controls over one short bookmark and fits. */
+   `[aria-label="Recently opened chats"]` was excluded from this set when it was
+   "Your rooms" — a row of two short controls over a bookmark, which fitted. It
+   is one control now and it carries the room's *name*, which is the same string
+   the browse list puts on the same-shaped button directly above it. So the
+   exclusion had stopped being true of it, and the row it produced was the one
+   that was reported. */
 [aria-label="Rooms you are in"],
+[aria-label="Recently opened chats"],
 [aria-label="Venues you can act for"],
 [aria-label="People here now"],
 [aria-label="Shifts at this venue"],
@@ -257,6 +241,7 @@ code {
 }
 
 [aria-label="Rooms you are in"] li,
+[aria-label="Recently opened chats"] li,
 [aria-label="Venues you can act for"] li,
 [aria-label="People here now"] li,
 [aria-label="Shifts at this venue"] li,
@@ -269,6 +254,7 @@ code {
 }
 
 [aria-label="Rooms you are in"] button,
+[aria-label="Recently opened chats"] button,
 [aria-label="Venues you can act for"] button,
 [aria-label="Shifts at this venue"] button,
 [aria-label="On this shift"] button {

@@ -33,6 +33,7 @@
 
 import type { ListExtent } from "../../api/types";
 import { instantLabel, termLabel } from "../../app/instant";
+import { shortId } from "../../app/short-id";
 import type { ShiftRoomListing } from "../../app/shift-room";
 import { shiftRoomLabel } from "../../app/shift-room";
 import { isTopicId, normaliseTopicId } from "../../socket/topic-id";
@@ -94,6 +95,26 @@ export type RoomEntry = {
   readonly ref: RoomRef;
   /** What the server has told this client it may not do here, if anything. */
   readonly barred: SendBar | null;
+  /**
+   * What this room was called the last time it was opened, or `null` when this
+   * client has never known.
+   *
+   * **It is stored because a shift room's name is not otherwise recoverable.**
+   * A venue room's arrives with `GET /api/venue-rooms`, so one is available for
+   * every venue room this worker can reach; a shift room's arrives only with
+   * `GET /api/venues/:venue_id/shift-rooms`, which needs a venue to have been
+   * chosen. So a shift room opened, then reached again after a reload with its
+   * venue never expanded, has no name anywhere in this client — and the row
+   * would be the uuid this list exists to stop showing.
+   *
+   * It is a **remembered** value and never an authority: the live list wins
+   * wherever there is one, so a renamed venue corrects itself on the next load
+   * rather than keeping whatever this browser last saw. See `roomLabel`.
+   *
+   * Optional on the way in — see `room-store.ts` — because a list written
+   * before this field existed is still that worker's list.
+   */
+  readonly name: string | null;
 };
 
 /**
@@ -200,6 +221,44 @@ export function roomKindLabel(kind: RoomKind): string {
     case "shift":
       return "Shift room";
   }
+}
+
+/**
+ * What a row is called when nothing has ever told this client its name.
+ *
+ * **Reachable rather than theoretical**: a shift room bookmarked and then met
+ * again after a reload, with its venue never expanded, has no name on this
+ * device and none on the way (`RoomEntry.name` says why). A room pasted into
+ * `AddRoomForm` that the browse list does not carry is the other case.
+ *
+ * **Why it is not the bare kind.** Two nameless shift rooms is exactly the
+ * reachable case above — bookmark two of one venue's shifts, reload — and
+ * "Shift room" twice is two identical rows over two different chats, which is
+ * worse than the uuid it replaced rather than better. Eight characters is what
+ * tells them apart.
+ *
+ * **And why it is not the whole id.** The complaint that produced this list was
+ * a row that was a uuid and nothing else. `shortId` is what this client already
+ * puts in front of people where there is no name at all — `Captain Nemo ·
+ * 4a3f1b2c` on a peer row — so a degenerate room row reads like the rest of the
+ * product rather than like the thing that was reported.
+ */
+export function roomFallbackLabel(ref: RoomRef): string {
+  return `${roomKindLabel(ref.kind).toLowerCase()} ${shortId(ref.id)}`;
+}
+
+/**
+ * What one row of the recently-opened list is called, in the order that keeps
+ * it true.
+ *
+ * The **live** name is the server's answer at this instant and wins outright,
+ * so a venue renamed since the bookmark was written corrects itself with
+ * nothing having to invalidate anything. The **stored** name is second, and is
+ * the only thing standing between a shift room and its uuid once its venue is
+ * collapsed. The fallback is last and says why it exists.
+ */
+export function roomLabel(entry: RoomEntry, live: string | null): string {
+  return live ?? entry.name ?? roomFallbackLabel(entry.ref);
 }
 
 /**

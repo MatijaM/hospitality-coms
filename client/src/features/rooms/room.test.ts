@@ -5,8 +5,10 @@ import {
   isRoomId,
   mergeMessages,
   normaliseRoomId,
+  roomFallbackLabel,
   roomKey,
   roomKindLabel,
+  roomLabel,
   roomTopic,
   sameRoom,
   shiftRoomLabel,
@@ -80,6 +82,58 @@ describe("a room's topic", () => {
   it("names each kind for a reader", () => {
     expect(roomKindLabel("venue")).toBe("Venue room");
     expect(roomKindLabel("shift")).toBe("Shift room");
+  });
+});
+
+describe("what a row in the recently-opened list is called", () => {
+  const listed = { ref: { kind: "venue", id: ID }, barred: null } as const;
+
+  it("prefers the live name, so a renamed venue corrects itself", () => {
+    // The stored name is what this browser last saw and the live one is the
+    // server's answer now. Reversing the two leaves a venue renamed six months
+    // ago reading under its old name for as long as the bookmark survives,
+    // with nothing to invalidate it and no way to notice.
+    expect(roomLabel({ ...listed, name: "The Old Anchor" }, "The Anchor")).toBe(
+      "The Anchor",
+    );
+  });
+
+  it("falls back to the stored name, which is all a collapsed shift room has", () => {
+    expect(roomLabel({ ...listed, name: "Kitchen · Mon" }, null)).toBe("Kitchen · Mon");
+  });
+
+  it("falls back to the kind and eight characters when it has never had a name", () => {
+    // Written out rather than composed from `shortId`, and both kinds, because
+    // this is the string the row shows when everything else is absent.
+    expect(roomLabel({ ...listed, name: null }, null)).toBe("venue room 11111111");
+    expect(
+      roomFallbackLabel({ kind: "shift", id: "22222222-2222-4222-8222-222222222222" }),
+    ).toBe("shift room 22222222");
+  });
+
+  it("tells two nameless rooms of one kind apart, which is why it is not the bare kind", () => {
+    // The reachable case: two of a venue's shifts bookmarked, then a reload
+    // with that venue never expanded. "Shift room" twice would be two
+    // identical rows over two different conversations.
+    const one = roomFallbackLabel({
+      kind: "shift",
+      id: "22222222-2222-4222-8222-222222222222",
+    });
+    const other = roomFallbackLabel({
+      kind: "shift",
+      id: "33333333-3333-4333-8333-333333333333",
+    });
+
+    expect(one).not.toBe(other);
+  });
+
+  it("never puts a whole uuid in a row, which is what was reported", () => {
+    // The control is the positive assertion beside it: the label is a real
+    // string, so "contains no uuid" is not passing against an empty one.
+    const label = roomLabel({ ...listed, name: null }, null);
+
+    expect(label).not.toContain(ID);
+    expect(label).toContain("11111111");
   });
 });
 

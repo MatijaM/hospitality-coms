@@ -11,16 +11,45 @@
  * prefix. Before U12 there was no such endpoint and a room could only be added
  * by pasting an id, which `room.ts` said in its own moduledoc.
  *
- * **Your list** is this browser's bookmarks. It is kept, and it is not a stale
- * copy of the first: it holds `barred`, the one thing on this surface that was
- * *learned* rather than fetched — nothing on the wire says in advance that a
- * shift room is past its `closes_at` — and it is what survives a reload. Adding
- * a room from the browse list is the same operation as pasting one, so a room
- * reached either way takes exactly the same path into a channel.
+ * **Recently opened chats** is this browser's own, newest first. It is kept,
+ * and it is not a stale copy of the first: it holds `barred`, the one thing on
+ * this surface that was *learned* rather than fetched — nothing on the wire
+ * says in advance that a shift room is past its `closes_at` — and it is what
+ * survives a reload. Opening a room from the browse list is the same operation
+ * as pasting one, so a room reached either way takes exactly the same path into
+ * a channel and lands in the same list.
  *
  * The paste box stays for the same reason the local list does: it is the only
  * way into a room the browse list does not show, and removing a working
  * affordance to celebrate a new one is a regression wearing a feature's hat.
+ *
+ * ## One control per row, and what that cost
+ *
+ * The row was `[Open <uuid>] [Forget <uuid>]`. It is one button now and it
+ * carries the room's **name**, which is the whole of what was reported. Two
+ * consequences, neither cosmetic:
+ *
+ *   * With no "Forget" there is nothing that shrinks the list, so the store
+ *     bounds it and evicts the oldest — `RECENT_ROOM_LIMIT` in `room-store.ts`
+ *     carries the number and the reasoning. Nothing here may pass one.
+ *   * "Recently opened" is a claim about order, so opening a room reorders this
+ *     list. Both entry points therefore go through `openAndKeep` rather than
+ *     only the browse one, which is why `RoomList` hands back a `RoomRef` where
+ *     it used to hand back a key.
+ *
+ * ## Where a row's name comes from, and why the lists are fetched up here
+ *
+ * A row prefers the **live** name — the browse list's answer at this instant,
+ * so a renamed venue corrects itself — then the one stored when it was last
+ * opened, then `roomFallbackLabel`. `roomLabel` is that order and the reasoning.
+ *
+ * The stored name is not a cache of the live one and cannot be dropped: a
+ * venue room's name arrives with the venue-room list and is therefore always
+ * available, but a **shift** room's arrives only for the venue currently
+ * expanded, so a bookmarked shift room met after a reload has no live name at
+ * all. That is why `useVenueRooms` and `useShiftRooms` are called here rather
+ * than inside `Browse`, where they used to be: two lists on this screen need
+ * their answers and only one of them is `Browse`.
  *
  * ## One room is joined at a time, on purpose
  *
@@ -57,7 +86,7 @@
  * important one harder to find rather than the secondary one easier.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import type {
   RoomClosure,
@@ -72,14 +101,16 @@ import {
   instantLabel,
   normaliseRoomId,
   roomKey,
-  roomKindLabel,
+  roomLabel,
   shiftRoomLabel,
 } from "./room";
 import type { RoomStore } from "./room-store";
-import { addRoom, findRoom, removeRoom, setRoomBar } from "./room-store";
+import { findRoom, recordOpening, removeRoom, setRoomBar } from "./room-store";
 import { RoomView } from "./room-view";
 import { readFailureMessage } from "./refusal-message";
-import type { Loaded } from "./use-room-lists";
+// `RoomList` is this file's own component, so the hook's type of that name
+// comes in under the one it is: a fetched list plus its `reload`.
+import type { Loaded, RoomList as FetchedList } from "./use-room-lists";
 import { useShiftRooms, useVenueRooms } from "./use-room-lists";
 
 export type RoomsRouteProps = {
@@ -89,6 +120,18 @@ export type RoomsRouteProps = {
 export function RoomsRoute({ store }: RoomsRouteProps) {
   const [entries, setEntries] = useState<readonly RoomEntry[]>(() => store.read());
   const [openKey, setOpenKey] = useState<string | null>(null);
+
+  // The browse lists, and the venue whose shift rooms are showing. Both live
+  // here rather than in `Browse` because the recently-opened list needs their
+  // names too — see this file's header.
+  const [chosen, setChosen] = useState<string | null>(null);
+  const venueRooms = useVenueRooms();
+  const shiftRooms = useShiftRooms(chosen);
+
+  const liveNames = useMemo(
+    () => currentNames(venueRooms.state, shiftRooms.state),
+    [venueRooms.state, shiftRooms.state],
+  );
 
   // Counts opens rather than naming a room, and it is part of `RoomView`'s
   // `key`. Without it, opening the room already open set `openKey` to the value
@@ -110,6 +153,13 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
     (change: (current: readonly RoomEntry[]) => readonly RoomEntry[]) => {
       setEntries((current) => {
         const next = change(current);
+
+        // `recordOpening` answers the identical array when re-opening the room
+        // already at the front changes nothing about the list, and every open
+        // now goes through it. Writing regardless would be a `localStorage`
+        // write on every click and a store callback with nothing in it.
+        if (next === current) return current;
+
         store.write(next);
 
         return next;
@@ -124,13 +174,21 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
 
   // Bookmarking and opening are one action, so a room found in the browse list
   // is in the local list from the moment it is first opened — which is what
-  // makes `barred` and the reload survival apply to it too.
+  // makes `barred` and the reload survival apply to it too. **Every** open goes
+  // through here, the recently-opened list's own included, because opening is
+  // what that list orders itself by.
+  //
+  // The name is taken at this instant and stored, which is the only chance:
+  // a shift room's is on screen while its venue is expanded and nowhere at all
+  // afterwards. `null` when there is none, which leaves whatever was stored.
   const openAndKeep = useCallback(
     (ref: RoomRef) => {
-      update((current) => addRoom(current, ref));
+      const name = liveNames.get(roomKey(ref)) ?? null;
+
+      update((current) => recordOpening(current, ref, name));
       openRoom(roomKey(ref));
     },
-    [update, openRoom],
+    [update, openRoom, liveNames],
   );
 
   const onEnded = useCallback(
@@ -156,19 +214,25 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
     <section>
       <h1>Rooms</h1>
 
-      <Browse onOpen={openAndKeep} />
+      <Browse
+        venueRooms={venueRooms}
+        shiftRooms={shiftRooms.state}
+        chosen={chosen}
+        onChoose={setChosen}
+        onOpen={openAndKeep}
+      />
 
-      <h2>Your list</h2>
-      <p>This list lives in this browser. It is what is open when you come back.</p>
+      <h2>Recently opened chats</h2>
+      <p>
+        This list lives in this browser, newest first. It is a shortcut back — everything
+        you can reach is in the list above.
+      </p>
 
       <RoomList
         entries={entries}
         openKey={openKey}
-        onOpen={openRoom}
-        onForget={(entry) => {
-          update((current) => removeRoom(current, entry.ref));
-          closeIfOpen(entry.ref);
-        }}
+        liveNames={liveNames}
+        onOpen={openAndKeep}
       />
 
       <AddRoomForm onAdd={openAndKeep} />
@@ -191,18 +255,60 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
 }
 
 /**
+ * Every name this client currently has from the server, keyed the way the
+ * stored list is keyed.
+ *
+ * Venue rooms are always in it once that list has loaded; shift rooms are in it
+ * only for the venue expanded right now, which is exactly why the store keeps a
+ * copy. A shift room is named the way the browse list names it, through
+ * `shiftRoomLabel`, so one room does not read two ways on one screen.
+ */
+function currentNames(
+  venueRooms: Loaded<readonly VenueRoomListing[]>,
+  shiftRooms: Loaded<readonly ShiftRoomListing[]>,
+): ReadonlyMap<string, string> {
+  const names = new Map<string, string>();
+
+  if (venueRooms.status === "ready") {
+    for (const room of venueRooms.value) {
+      names.set(roomKey({ kind: "venue", id: room.venueId }), room.name);
+    }
+  }
+
+  if (shiftRooms.status === "ready") {
+    for (const room of shiftRooms.value) {
+      names.set(roomKey({ kind: "shift", id: room.shiftRoomId }), shiftRoomLabel(room));
+    }
+  }
+
+  return names;
+}
+
+/**
  * The server's list: the venue rooms this person is in, and one venue's shift
  * rooms at a time.
  *
  * One venue expanded at a time, because a shift-room list is a request per
  * venue and expanding all of them on arrival would be a request per venue on
  * arrival. Choosing is the asking.
+ *
+ * Both answers and the chosen venue are the route's state rather than this
+ * component's, because the recently-opened list needs the names too. Nothing
+ * else about the panel moved.
  */
-function Browse({ onOpen }: { readonly onOpen: (ref: RoomRef) => void }) {
-  const [chosen, setChosen] = useState<string | null>(null);
-  const venueRooms = useVenueRooms();
-  const shiftRooms = useShiftRooms(chosen);
-
+function Browse({
+  venueRooms,
+  shiftRooms,
+  chosen,
+  onChoose,
+  onOpen,
+}: {
+  readonly venueRooms: FetchedList<VenueRoomListing>;
+  readonly shiftRooms: Loaded<readonly ShiftRoomListing[]>;
+  readonly chosen: string | null;
+  readonly onChoose: (venueId: string | null) => void;
+  readonly onOpen: (ref: RoomRef) => void;
+}) {
   return (
     <section aria-label="Rooms you are in">
       <h2>Rooms you are in</h2>
@@ -220,10 +326,10 @@ function Browse({ onOpen }: { readonly onOpen: (ref: RoomRef) => void }) {
               key={room.venueId}
               room={room}
               chosen={chosen === room.venueId}
-              shiftRooms={shiftRooms.state}
+              shiftRooms={shiftRooms}
               onOpen={onOpen}
               onChoose={() => {
-                setChosen((current) => (current === room.venueId ? null : room.venueId));
+                onChoose(chosen === room.venueId ? null : room.venueId);
               }}
             />
           ))}
@@ -335,41 +441,44 @@ function ListState<T>({
   }
 }
 
+/**
+ * The recently-opened list: one row per room, one control on it, named.
+ *
+ * **The empty-state sentence is load-bearing beyond this file.**
+ * `app/app.test.tsx` names the rooms panel by it — it is the one sentence only
+ * this surface renders — so moving it means moving that sentinel with it, and
+ * the failure looks like the tab strip breaking rather than like copy changing.
+ * It still says "rooms" rather than "chats" because every other string on this
+ * screen does; the heading is the user's word and the vocabulary underneath it
+ * did not change.
+ */
 function RoomList({
   entries,
   openKey,
+  liveNames,
   onOpen,
-  onForget,
 }: {
   readonly entries: readonly RoomEntry[];
   readonly openKey: string | null;
-  readonly onOpen: (key: string) => void;
-  readonly onForget: (entry: RoomEntry) => void;
+  readonly liveNames: ReadonlyMap<string, string>;
+  readonly onOpen: (ref: RoomRef) => void;
 }) {
   if (entries.length === 0) {
     return <p>No rooms yet. Open one from the list above, or add one by its id.</p>;
   }
 
   return (
-    <ul aria-label="Your rooms">
+    <ul aria-label="Recently opened chats">
       {entries.map((entry) => (
         <li key={roomKey(entry.ref)}>
           <button
             type="button"
             aria-current={roomKey(entry.ref) === openKey}
             onClick={() => {
-              onOpen(roomKey(entry.ref));
+              onOpen(entry.ref);
             }}
           >
-            Open {roomKindLabel(entry.ref.kind).toLowerCase()} {entry.ref.id}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onForget(entry);
-            }}
-          >
-            Forget {entry.ref.id}
+            Open {roomLabel(entry, liveNames.get(roomKey(entry.ref)) ?? null)}
           </button>
         </li>
       ))}

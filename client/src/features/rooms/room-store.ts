@@ -1,5 +1,21 @@
 /**
- * The worker's own list of rooms, and what this client has learned about each.
+ * The rooms this browser has opened most recently, and what this client has
+ * learned about each.
+ *
+ * ## It is a recency list now, and the two halves of that arrived together
+ *
+ * It was a hand-curated set: a room was added by opening it and removed with a
+ * "Forget" control beside every row. The control went because a list of chats
+ * wants one action per row and the second one was noise on a surface a worker
+ * reads mid-shift — and removing the only way to shrink the list is what makes
+ * `RECENT_ROOM_LIMIT` mandatory rather than tidy. Nothing else evicts.
+ *
+ * With no curation left, order has to carry the claim the heading makes.
+ * `recordOpening` puts the room just opened at the front, so position **is** the
+ * recency; nothing stores an instant, which is deliberate — this browser's clock
+ * and `HospitalityComs.Clock` are different clocks (see `room.ts`), and a
+ * persisted local timestamp would be the one value here that could not be
+ * checked against anything.
  *
  * ## Why the list is local
  *
@@ -59,6 +75,11 @@
  * A stored value that is not the shape this module writes is **discarded, not
  * repaired**. It is a bookmark list; losing it costs a paste, and half-reading
  * it would put a room reference with no kind on a socket.
+ *
+ * **`name` is the one field that may be absent**, and that is a compatibility
+ * rule rather than a softening of the one above: entries written before names
+ * were stored carry no `name` key, and a decoder that required one would empty
+ * every real browser's list on the deploy that added it. See `decodeName`.
  */
 
 import { isRecord } from "../../api/decode";
@@ -80,6 +101,32 @@ export const ROOM_LIST_KEY = "hospitality-coms.rooms";
 const ROOM_KINDS: readonly RoomKind[] = ["venue", "shift"];
 const SEND_BARS: readonly SendBar[] = ["room_closed", "not_rostered"];
 
+/**
+ * A stored bar, `null` for an entry that carries none, and `undefined` for a
+ * value this module did not write — which discards the whole entry.
+ */
+function decodeBar(value: unknown): SendBar | null | undefined {
+  if (value === null || value === undefined) return null;
+
+  return SEND_BARS.find((candidate) => candidate === value);
+}
+
+/**
+ * A stored name, on the same three-way contract as `decodeBar`.
+ *
+ * **A missing one is `null` rather than a discard**, and that is the whole of
+ * what keeps a real browser's list alive across this change: every entry
+ * written before names were stored has no `name` key, and requiring one would
+ * empty everybody's list on the deploy that added it. A `name` that is present
+ * and is not a string is still a discard — that is the module's "not repaired"
+ * rule, and no build of this client ever wrote one.
+ */
+function decodeName(value: unknown): string | null | undefined {
+  if (value === null || value === undefined) return null;
+
+  return typeof value === "string" ? value : undefined;
+}
+
 function decodeEntry(value: unknown): RoomEntry | null {
   if (!isRecord(value)) return null;
   if (typeof value.id !== "string") return null;
@@ -94,14 +141,13 @@ function decodeEntry(value: unknown): RoomEntry | null {
   const id = normaliseRoomId(value.id);
   if (id === null) return null;
 
-  if (value.barred === null || value.barred === undefined) {
-    return { ref: { kind, id }, barred: null };
-  }
-
-  const barred = SEND_BARS.find((candidate) => candidate === value.barred);
+  const barred = decodeBar(value.barred);
   if (barred === undefined) return null;
 
-  return { ref: { kind, id }, barred };
+  const name = decodeName(value.name);
+  if (name === undefined) return null;
+
+  return { ref: { kind, id }, barred, name };
 }
 
 export function decodeRoomEntries(value: unknown): readonly RoomEntry[] | null {
@@ -124,6 +170,7 @@ function encodeEntries(entries: readonly RoomEntry[]): string {
       kind: entry.ref.kind,
       id: entry.ref.id,
       barred: entry.barred,
+      name: entry.name,
     })),
   );
 }
@@ -192,19 +239,73 @@ export function createMemoryRoomStore(initial: readonly RoomEntry[] = []): RoomS
 }
 
 /**
- * Adds a room, or leaves the list alone if it is already there.
+ * How many rooms the list keeps.
  *
- * Adding an existing room must not reset what has been learned about it: the
- * bar is the only thing in the list that came from the server, and a paste of
- * an id already present is not new information about it.
+ * **The bound is only mandatory because there is no longer a way to remove an
+ * entry.** While the list was curated by hand it could be as long as somebody
+ * chose to make it; with every open adding a row and nothing taking one away it
+ * would grow for as long as the session lasted, in `localStorage`, where the
+ * cost is paid on every read by every page load.
+ *
+ * Twelve, and the reasoning is about what the list is *for* rather than about
+ * storage. It is a shortcut back to a conversation, not a record of anything:
+ * every room in it that still exists is also in "Rooms you are in" above, which
+ * is the server's answer and is complete. So the number wants to be larger than
+ * the rooms one worker touches across a couple of shifts — a venue room and a
+ * shift room at each of two or three places is six to eight — and small enough
+ * that the list is still scannable at a glance on a phone, which is where this
+ * is read. Past a dozen rows, finding a room by scrolling this list is slower
+ * than finding it in the one above.
+ *
+ * **It lives here and no caller may pass one**, which is the rule
+ * `HospitalityComs.Rooms.recent_message_limit/0` and `recent_shift_room_limit/0`
+ * hold on the server. As there, **no relationship to either of those numbers is
+ * asserted** and none should be: they bound how much of a room's history one
+ * request carries, and this bounds how many rooms one browser remembers.
  */
-export function addRoom(
+export const RECENT_ROOM_LIMIT = 12;
+
+/**
+ * Records that a room was just opened: newest first, once each, bounded.
+ *
+ * **Move to the front rather than append**, because "recently opened" is a
+ * claim about order and the list is the only thing that can make it true —
+ * nothing stores an instant, so position *is* the recency. Opening a room
+ * already listed therefore reorders it rather than duplicating it, which is the
+ * same call and the same guarantee the old `addRoom` gave by refusing to add
+ * twice.
+ *
+ * **What was learned survives the reorder.** `barred` is the one thing in this
+ * list that came from the server, and re-opening a room is not new information
+ * about whether it takes messages. The name survives too when the caller has
+ * none to offer: a room re-opened from this list while its venue is collapsed
+ * passes `null`, and wiping the stored name there would put the uuid back on
+ * screen at the exact moment the worker used the shortcut.
+ *
+ * It answers the **same array** when nothing about the list changed, so that
+ * re-opening the room already at the front is not a `localStorage` write per
+ * click. `RoomsRoute` leans on that identity — see `update` there.
+ */
+export function recordOpening(
   entries: readonly RoomEntry[],
   ref: RoomRef,
+  name: string | null = null,
 ): readonly RoomEntry[] {
-  if (entries.some((entry) => sameRoom(entry.ref, ref))) return entries;
+  const existing = entries.find((entry) => sameRoom(entry.ref, ref)) ?? null;
+  const opened: RoomEntry = {
+    ref,
+    barred: existing?.barred ?? null,
+    name: name ?? existing?.name ?? null,
+  };
 
-  return [...entries, { ref, barred: null }];
+  if (existing !== null && entries[0] === existing && existing.name === opened.name) {
+    return entries;
+  }
+
+  return [opened, ...entries.filter((entry) => !sameRoom(entry.ref, ref))].slice(
+    0,
+    RECENT_ROOM_LIMIT,
+  );
 }
 
 export function removeRoom(
@@ -220,7 +321,7 @@ export function setRoomBar(
   barred: SendBar | null,
 ): readonly RoomEntry[] {
   return entries.map((entry) =>
-    sameRoom(entry.ref, ref) ? { ref: entry.ref, barred } : entry,
+    sameRoom(entry.ref, ref) ? { ...entry, barred } : entry,
   );
 }
 

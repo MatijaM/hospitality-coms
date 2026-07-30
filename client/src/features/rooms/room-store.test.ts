@@ -2,20 +2,33 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RoomEntry, RoomRef } from "./room";
 import {
-  addRoom,
+  RECENT_ROOM_LIMIT,
   createBrowserRoomStore,
   createLocalStorageRoomStore,
   decodeRoomEntries,
   findRoom,
+  recordOpening,
   removeRoom,
   setRoomBar,
 } from "./room-store";
 
 const VENUE: RoomRef = { kind: "venue", id: "11111111-1111-4111-8111-111111111111" };
 const SHIFT: RoomRef = { kind: "shift", id: "22222222-2222-4222-8222-222222222222" };
+const OTHER: RoomRef = { kind: "venue", id: "33333333-3333-4333-8333-333333333333" };
 
-function entry(ref: RoomRef, barred: RoomEntry["barred"] = null): RoomEntry {
-  return { ref, barred };
+function entry(
+  ref: RoomRef,
+  barred: RoomEntry["barred"] = null,
+  name: string | null = null,
+): RoomEntry {
+  return { ref, barred, name };
+}
+
+/** A distinct venue room per index, so a list's order can be read back. */
+function numbered(index: number): RoomRef {
+  const digits = index.toString().padStart(4, "0");
+
+  return { kind: "venue", id: `${digits}0000-0000-4000-8000-000000000000` };
 }
 
 /** A `Storage` that keeps its own map, so no global is touched. */
@@ -59,32 +72,117 @@ function refusingStorage(): Storage {
 }
 
 describe("the list", () => {
-  it("adds a room", () => {
-    expect(addRoom([], VENUE)).toEqual([entry(VENUE)]);
+  it("adds a room, with the name it was opened under", () => {
+    expect(recordOpening([], VENUE, "The Anchor")).toEqual([
+      entry(VENUE, null, "The Anchor"),
+    ]);
   });
 
-  it("does not reset what was learned when a room is added twice", () => {
-    // The bar is the only thing in the list that came from the server. A paste
-    // of an id already present is not new information about it.
-    const existing = [entry(SHIFT, "room_closed")];
+  it("adds a room that has no name to offer", () => {
+    expect(recordOpening([], VENUE)).toEqual([entry(VENUE)]);
+  });
 
-    expect(addRoom(existing, SHIFT)).toBe(existing);
+  it("moves a room already listed to the front rather than listing it twice", () => {
+    // "Recently opened" is a claim about order and nothing stores an instant,
+    // so position is the only thing that can carry it. The count is asserted
+    // too, because a duplicate at the front satisfies the order on its own.
+    const entries = [entry(VENUE), entry(SHIFT), entry(OTHER)];
+
+    const reopened = recordOpening(entries, OTHER);
+
+    expect(reopened.map((each) => each.ref)).toEqual([OTHER, VENUE, SHIFT]);
+    expect(reopened).toHaveLength(3);
+  });
+
+  it("does not reset what was learned when a room is opened again", () => {
+    // The bar is the only thing in the list that came from the server, and
+    // re-opening a room is not new information about whether it takes
+    // messages. It travels with the row to the front.
+    const entries = [entry(VENUE), entry(SHIFT, "room_closed")];
+
+    expect(recordOpening(entries, SHIFT)).toEqual([
+      entry(SHIFT, "room_closed"),
+      entry(VENUE),
+    ]);
+  });
+
+  it("keeps the stored name when the caller has none, and takes a fresh one", () => {
+    // The first half is what a shift room re-opened from this list depends on:
+    // its venue is collapsed, so there is no live name to pass, and wiping the
+    // stored one would put the uuid back at the moment the shortcut was used.
+    const stored = [entry(SHIFT, null, "Kitchen · Mon")];
+
+    expect(recordOpening(stored, SHIFT)).toEqual([entry(SHIFT, null, "Kitchen · Mon")]);
+    expect(recordOpening(stored, SHIFT, "Kitchen · Tue")).toEqual([
+      entry(SHIFT, null, "Kitchen · Tue"),
+    ]);
+  });
+
+  it("answers the same list when re-opening the room already at the front", () => {
+    // `RoomsRoute` writes to storage only when this changes something, so this
+    // identity is what stops a `localStorage` write on every click.
+    const entries = [entry(VENUE, null, "The Anchor"), entry(SHIFT)];
+
+    expect(recordOpening(entries, VENUE, "The Anchor")).toBe(entries);
+    expect(recordOpening(entries, VENUE)).toBe(entries);
+
+    // And it is an identity about the list, not about the room: a new name is
+    // a change, and so is a room that is listed but not at the front.
+    expect(recordOpening(entries, VENUE, "The Anchor Inn")).not.toBe(entries);
+    expect(recordOpening(entries, SHIFT)).not.toBe(entries);
+  });
+
+  it("evicts the oldest when the list is full, never the newest", () => {
+    // Nothing removes an entry any more — the "Forget" control went — so this
+    // bound is the only thing between the list and unbounded growth in
+    // `localStorage`.
+    //
+    // The surviving ids are named rather than counted: a cap that kept the
+    // *oldest* `RECENT_ROOM_LIMIT` rooms and dropped the room just opened
+    // satisfies a length assertion exactly as well as this one does.
+    let entries: readonly RoomEntry[] = [];
+
+    // One more than fits, oldest first — room 0 is opened first.
+    for (let index = 0; index <= RECENT_ROOM_LIMIT; index += 1) {
+      entries = recordOpening(entries, numbered(index));
+    }
+
+    const listed = entries.map((each) => each.ref.id);
+
+    expect(listed).toHaveLength(RECENT_ROOM_LIMIT);
+    // The one just opened is at the front and the first one opened is gone.
+    expect(listed[0]).toBe(numbered(RECENT_ROOM_LIMIT).id);
+    expect(listed).not.toContain(numbered(0).id);
+    // The control on that absence: everything between the two is still here,
+    // so "the oldest went" is distinguishable from "all but the newest went".
+    expect(listed).toContain(numbered(1).id);
+    expect(listed[listed.length - 1]).toBe(numbered(1).id);
+  });
+
+  it("keeps twelve rooms, which is written here and in one place in the source", () => {
+    // Deliberately a literal rather than anything derived: every other
+    // assertion in this file builds its fixture *from* the constant, so all of
+    // them pass for any value of it.
+    expect(RECENT_ROOM_LIMIT).toBe(12);
   });
 
   it("removes a room without touching the others", () => {
     expect(removeRoom([entry(VENUE), entry(SHIFT)], VENUE)).toEqual([entry(SHIFT)]);
   });
 
-  it("sets and clears a bar on one room only", () => {
-    const entries = [entry(VENUE), entry(SHIFT)];
+  it("sets and clears a bar on one room only, and keeps its name", () => {
+    // The name is in the fixture because this function rebuilds the entry it
+    // touches: written as `{ ref, barred }` it silently dropped the name, and
+    // the row it had just learned something about became a uuid.
+    const entries = [entry(VENUE), entry(SHIFT, null, "Kitchen · Mon")];
 
     expect(setRoomBar(entries, SHIFT, "not_rostered")).toEqual([
       entry(VENUE),
-      entry(SHIFT, "not_rostered"),
+      entry(SHIFT, "not_rostered", "Kitchen · Mon"),
     ]);
-    expect(setRoomBar([entry(SHIFT, "room_closed")], SHIFT, null)).toEqual([
-      entry(SHIFT),
-    ]);
+    expect(
+      setRoomBar([entry(SHIFT, "room_closed", "Kitchen · Mon")], SHIFT, null),
+    ).toEqual([entry(SHIFT, null, "Kitchen · Mon")]);
   });
 
   it("finds a room by its topic, and answers null for one that is not there", () => {
@@ -96,14 +194,28 @@ describe("the list", () => {
 });
 
 describe("what survives a reload", () => {
-  it("round-trips a list with and without a bar", () => {
+  it("round-trips a list with and without a bar, and with and without a name", () => {
     const storage = memoryStorage();
     const store = createLocalStorageRoomStore(storage);
-    const entries = [entry(VENUE), entry(SHIFT, "room_closed")];
+    const entries = [entry(VENUE), entry(SHIFT, "room_closed", "Kitchen · Mon")];
 
     store.write(entries);
 
     expect(store.read()).toEqual(entries);
+  });
+
+  it("carries a name across the reload a shift room's name cannot survive without", () => {
+    // The point of storing it at all. A venue room's name arrives with
+    // `GET /api/venue-rooms` and is therefore always available; a shift room's
+    // arrives only for the venue currently expanded, so after a reload with
+    // that venue collapsed this is the only copy anywhere in the client.
+    const storage = memoryStorage();
+
+    createLocalStorageRoomStore(storage).write([entry(SHIFT, null, "Kitchen · Mon")]);
+
+    expect(createLocalStorageRoomStore(storage).read()).toEqual([
+      entry(SHIFT, null, "Kitchen · Mon"),
+    ]);
   });
 
   it("forgets the list outright when the session ends", () => {
@@ -146,6 +258,11 @@ describe("what survives a reload", () => {
       '[{"id": "x"}]',
       '[{"kind": "peer", "id": "11111111-1111-4111-8111-111111111111"}]',
       '[{"kind": "venue", "id": "11111111-1111-4111-8111-111111111111", "barred": "nope"}]',
+      // A `name` that is present and is not a string. No build of this client
+      // ever wrote one, so it is devtools or corruption, and the rule is the
+      // same as for every other field: discarded, not repaired. It is the
+      // *absent* name that is tolerated, and that is the next test.
+      '[{"kind": "venue", "id": "11111111-1111-4111-8111-111111111111", "name": 7}]',
     ]) {
       const store = createLocalStorageRoomStore(
         memoryStorage({ "hospitality-coms.rooms": stored }),
@@ -175,6 +292,26 @@ describe("what survives a reload", () => {
     expect(
       decodeRoomEntries([{ kind: "venue", id: "11111111-1111-4111-8111-111111111111" }]),
     ).toEqual([entry(VENUE)]);
+  });
+
+  it("reads an entry written before names were stored, rather than dropping it", () => {
+    // Every entry in every real browser is this shape. A decoder that required
+    // `name` would answer `null` for the whole array — `decodeRoomEntries`
+    // discards the list, not the row — so the deploy that added the field would
+    // have silently emptied everybody's list, which is exactly the failure that
+    // looks like nothing having happened.
+    //
+    // Written as the JSON an older build actually wrote, through the whole
+    // store, because that is the path that runs on somebody's phone.
+    const oldShape =
+      '[{"kind":"venue","id":"11111111-1111-4111-8111-111111111111","barred":null},' +
+      '{"kind":"shift","id":"22222222-2222-4222-8222-222222222222","barred":"room_closed"}]';
+
+    const store = createLocalStorageRoomStore(
+      memoryStorage({ "hospitality-coms.rooms": oldShape }),
+    );
+
+    expect(store.read()).toEqual([entry(VENUE), entry(SHIFT, "room_closed")]);
   });
 });
 
