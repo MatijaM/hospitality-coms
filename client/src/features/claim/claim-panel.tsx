@@ -139,9 +139,9 @@ function Claimed({ engagement }: { readonly engagement: ClaimedEngagement }) {
       </p>
       <p>Accepted {instantLabel(engagement.acceptedAt)}.</p>
       <p>
-        The venue is <code>{engagement.venueId}</code>. Its name is not on this reply — it
-        appears under <Link to="/rooms">your rooms</Link> once the term is open, and the
-        venue room comes with it.
+        The venue is <code>{engagement.venueId}</code>. Its name appears under{" "}
+        <Link to="/rooms">your rooms</Link> once the term is open, and the venue room
+        comes with it.
       </p>
       <p>
         Engagement <code>{engagement.engagementId}</code>. That id belongs to this venue

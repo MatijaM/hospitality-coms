@@ -305,11 +305,11 @@ function EntryAudiences({
         </ul>
       )}
       <p>
-        Anybody not named above sees this entry according to a rule worked out on the
-        server from the dates themselves, and this page cannot work out what that comes
-        to. An employer is not shown a job whose dates overlapped one of theirs; a
-        workmate is shown it unless a place they are bound to would hide it. Naming
-        somebody below overrides whichever rule would otherwise apply to them.
+        Anybody not named above sees this entry according to a rule worked out from the
+        dates themselves, and this page cannot work out what that comes to. An employer is
+        not shown a job whose dates overlapped one of theirs; a workmate is shown it
+        unless a place they are bound to would hide it. Naming somebody below overrides
+        whichever rule would otherwise apply to them.
       </p>
     </>
   );

@@ -159,11 +159,7 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
       <Browse onOpen={openAndKeep} />
 
       <h2>Your list</h2>
-      <p>
-        This list lives in this browser. It is what is open when you come back, and it is
-        where this client remembers a room it has been told is read-only — nothing on the
-        wire says that in advance.
-      </p>
+      <p>This list lives in this browser. It is what is open when you come back.</p>
 
       <RoomList
         entries={entries}
