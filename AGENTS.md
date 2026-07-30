@@ -4,7 +4,14 @@ project_tracker: github
 
 ## Project Overview
 
+A proof of concept for worker-owned identity in hospitality communications: the person owns the
+identity record and an employer holds a fixed-term, revocable engagement against it. Two zones,
+one bridge — `employer_role` holds no privilege on any person-zone table, so the separation is a
+Postgres grant rather than a filter somebody has to remember.
 
+[`README.md`](README.md) is the orientation and the vocabulary; [`CLAUDE.md`](CLAUDE.md) is the
+tree as it stands, subsystem by subsystem. **This file is the standards** — read it for how to
+work, those for what is there.
 
 ## Commands
 

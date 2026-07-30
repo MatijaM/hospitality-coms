@@ -677,7 +677,7 @@ The API token *is* the generated session token: a row in `people_tokens`, base64
 
 Every error the API returns is one envelope, built only by `HospitalityComsWeb.ErrorEnvelope`: `{"error": {"code": <status atom>, "message": ..., "fields": {...}}}`, with `fields` present only for per-field validation failures. Controllers, `PersonAuth`, `ErrorJSON` and every channel refusal go through it; do not hand-roll a body. `ErrorEnvelope.for_changeset/3` is the one place Ecto's `%{count}` placeholders are interpolated.
 
-Production requires `MAGIC_LINK_BASE_URL` — `config/runtime.exs` raises without it, because the `localhost:4000` default in `config/config.exs` fails silently by mailing links to the wrong host.
+Production requires `MAGIC_LINK_BASE_URL` — `config/runtime.exs` raises without it, because the `http://localhost:5173/log-in/` default in `config/config.exs` fails silently by mailing links to a host that is not there. That default was `localhost:4000` until #46, which is Phoenix and serves no page: the link arrived unclickable and had to be pasted into a box. It points at the client now, so the link works by being followed.
 
 **`POST /api/log-in` is rate limited per caller and nothing else on the router is.** `HospitalityComsWeb.LoginRateLimit` is one ETS table, a fixed window, and no dependency — ten attempts per remote address per fifteen minutes, `429` in the standard envelope with a `retry-after`. It is a pipeline of its own rather than a line in `:api`, because that route is the only one an anonymous caller can use to write a row and send an email; redemption needs a link and everything else needs a session.
 

@@ -42,8 +42,10 @@
  * `/rooms` route gets, so a room added through one door is listed at the other.
  *
  * `/log-in/:linkToken` matches the shape of a real magic link:
- * `MAGIC_LINK_BASE_URL` defaults to `http://localhost:4000/log-in/` and the
- * token is appended to it, so a link that points at this client lands here.
+ * `MAGIC_LINK_BASE_URL` defaults to `http://localhost:5173/log-in/` — this
+ * client — and the token is appended to it, so a mailed link lands here and
+ * redeems on arrival. It pointed at Phoenix until #46, which is why the paste
+ * box under the log-in form exists and why it is kept.
  */
 
 import { Route, Routes } from "react-router";
