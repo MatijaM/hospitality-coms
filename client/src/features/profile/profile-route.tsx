@@ -1,9 +1,31 @@
 /**
- * The profile surface: the worker's own record, what they have decided about
- * who sees it, and one peer's record at a time.
+ * The profile surface: the worker's own record, and what they have decided
+ * about who sees it.
  *
- * **Nothing on the server answers any of the events behind this.** See
- * `contract.ts`, which is the one place that says so.
+ * ## Somebody else's record is not on this screen, and that is #73
+ *
+ * There was a third section — a text box for a person's uuid and a button
+ * reading "Read their record". The surface behind it is real and works:
+ * `peer_profile` is one of `ProfileChannel`'s seven events, `#71` verified it
+ * end to end against a live server, and `useProfileSurface`'s `loadPeerProfile`
+ * is untouched and still tested. **What was wrong was the way in.** The only
+ * peers a worker can name are the ones whose uuid they have somehow already
+ * got, and nothing on this channel enumerates one — so the control asked for
+ * the answer as its input.
+ *
+ * So it is **not rendered** rather than hidden with a style rule or a flag: a
+ * component still mounted still joins, still fetches, and still leaves a
+ * focusable input in the accessibility tree, which is a uuid box a screen
+ * reader can find and a sighted worker cannot.
+ *
+ * **What brings it back is a picker**, and the picker needs a list of people
+ * this worker may read — the same gap `DisclosureControl` records for the
+ * audience it cannot enumerate. `Peers.list_visible_peers/1` is the nearest
+ * thing and it lives on another channel; the server half of #73 is building
+ * the lists that would make one possible. When it lands, this section comes
+ * back with a chooser where the text box was, and `ProfileView` comes back with
+ * it — see below for the rule that component existed to hold, which has to be
+ * re-asserted at the same time.
  *
  * ## The one rule this file exists to not break
  *
@@ -19,16 +41,19 @@
  * slot where a hidden entry would sit — any of them turns a guarantee the
  * database and the context both hold into a claim the screen contradicts. So:
  *
- *   * **`ProfileView` is the only thing that renders somebody else's record,
- *     and its props carry no ledger and no counts.** Not "it does not use
- *     them" — it cannot be handed them, which is a property a reviewer can
- *     check from the type and a test can check from the DOM.
+ *   * **Nothing here renders somebody else's record at all**, which is the
+ *     render-layer half of that rule holding vacuously rather than by
+ *     construction. It used to hold by construction: `ProfileView` took a
+ *     heading, a profile and the notice, and could not be handed a ledger or a
+ *     count. That component and the tests that read its DOM went with the
+ *     section, deliberately — an assertion that a component nothing renders
+ *     discloses nothing is the "both operands empty" shape this project keeps
+ *     finding — and the property has to be **re-asserted, not assumed**, by
+ *     whoever puts a peer's record back on screen.
  *   * The notice comes off the **connection**, so it is one string per session
- *     rather than one per subject, and the same object is rendered beside a
- *     record with three entries and one with none.
+ *     rather than one per subject, and it cannot be influenced by a profile
+ *     reply.
  *   * No list here is numbered and none renders its length.
- *
- * `profile.test.tsx` asserts the first two against the rendered output.
  *
  * ## An attested entry has no edit control, and that is R16
  *
@@ -44,7 +69,7 @@
  * reason rather than for tidiness.
  */
 
-import { useEffect, useId, useState } from "react";
+import { useId, useState } from "react";
 
 import { useSession } from "../../session/session-context";
 import type {
@@ -53,7 +78,6 @@ import type {
   CorrectionRequest,
   DeclaredEntry,
   Disclosure,
-  Profile,
 } from "./profile";
 import {
   audienceKindLabel,
@@ -100,18 +124,24 @@ function ProfileSurfaceScreen({ personId }: { readonly personId: string }) {
       <AttestedEntries surface={surface} />
       <DeclaredEntries surface={surface} />
       <CorrectionRequests requests={surface.own.correctionRequests} />
-      <PeerLookup surface={surface} notice={notice} />
+      {/*
+        A fourth section, "Somebody else's record", was here until #73. It is
+        gone rather than hidden, `surface.loadPeerProfile` is untouched, and
+        what brings it back is a picker — this file's header carries the whole
+        argument and the obligation that comes with reviving it.
+      */}
     </section>
   );
 }
 
 /**
- * The standing notice, rendered beside every record this surface shows.
+ * The standing notice, rendered above the worker's record.
  *
- * One component and one caller-supplied string, used for the worker's own
- * record and for a peer's. Two copies would be two places for one of them to
- * start depending on what it sits beside, which is the whole thing arity zero
- * is protecting.
+ * One component and one caller-supplied string. It took the string from a
+ * caller because a peer's record was shown beside the identical one, and it
+ * keeps doing so with that section gone: the alternative is reading the
+ * connection here, which is one more place for a per-subject notice to be
+ * introduced later, and per-subject is exactly what arity zero forbids.
  */
 function IncompletenessNotice({ notice }: { readonly notice: string }) {
   if (notice === "") return null;
@@ -705,197 +735,5 @@ function CorrectionRequests({
         </ul>
       )}
     </>
-  );
-}
-
-/* ------------------------------------------------- *
- * Somebody else's record, read one at a time.       *
- * ------------------------------------------------- */
-
-function PeerLookup({
-  surface,
-  notice,
-}: {
-  readonly surface: ProfileSurface;
-  readonly notice: string;
-}) {
-  const [personId, setPersonId] = useState("");
-  const [asked, setAsked] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState(0);
-  const [looking, setLooking] = useState(false);
-  const [shown, setShown] = useState<Profile | null>(null);
-
-  const { joinGeneration, loadPeerProfile } = surface;
-
-  /**
-   * The read, and the three things that can start it.
-   *
-   * Written as an effect over `asked` rather than as work inside the button's
-   * handler, and the shape is `ConversationView`'s: the state this writes
-   * (`shown`) is not state it reads, so every dependency can be listed and
-   * there is no `exhaustive-deps` suppression. A handler that fetched *and*
-   * stored had the effect reading what it had just written, which is the shape
-   * that needs one.
-   *
-   *   * `asked` — a different person.
-   *   * `attempt` — the same person again. `RoomView`'s key carries an attempt
-   *     counter for the same reason: without it, asking twice about one id sets
-   *     the same state, React keeps the mount, and the second press does
-   *     nothing. Every "try it again" this client offers was a dead end until
-   *     that was understood.
-   *   * `joinGeneration` — a rejoin. `onJoined` re-derives the worker's own
-   *     record and cannot reach this one, because `useProfileSurface`
-   *     deliberately caches nobody else's; so the component that knows whose
-   *     record is open is the one that re-asks, exactly as `ConversationView`
-   *     re-asks the open conversation's history and only that one.
-   *
-   * The in-flight flag is **raised by the handler and lowered here**, rather
-   * than raised in this body. `react-hooks/set-state-in-effect` refuses the
-   * latter and is right to: a synchronous `setState` in an effect body is a
-   * second render pass every time this runs, including the rejoin pass where
-   * nothing on screen would change. It also lands somewhere better than it
-   * started — a rejoin's background re-read no longer greys out a control the
-   * worker did not touch, while their own press still does.
-   */
-  useEffect(() => {
-    if (asked === null) return;
-
-    let current = true;
-
-    void loadPeerProfile(asked).then((outcome) => {
-      if (!current) return;
-
-      setLooking(false);
-      // A refusal and an answer this client could not read both clear it. The
-      // gate is derived at the instant of the event — visibility lapses (R13)
-      // — so a record left on screen after a refusal is one the server has
-      // just declined to send.
-      setShown(outcome.status === "ok" ? outcome.value : null);
-    });
-
-    return () => {
-      current = false;
-    };
-  }, [asked, attempt, joinGeneration, loadPeerProfile]);
-
-  function look(): void {
-    setLooking(true);
-    setAsked(personId.trim().toLowerCase());
-    setAttempt((previous) => previous + 1);
-  }
-
-  return (
-    <>
-      <h2>Somebody else&rsquo;s record</h2>
-      <p>
-        You can read the record of anybody you have worked with recently, or anybody you
-        are connected to. What you see is what they have chosen to let you see, and there
-        is no way to tell how much that is.
-      </p>
-
-      <label htmlFor="peer-profile-id">Their id</label>
-      <input
-        id="peer-profile-id"
-        value={personId}
-        disabled={looking}
-        onChange={(event) => {
-          setPersonId(event.target.value);
-        }}
-      />
-      <button type="button" disabled={looking || personId.trim() === ""} onClick={look}>
-        Read their record
-      </button>
-
-      {shown !== null && asked !== null && (
-        <ProfileView
-          key={asked}
-          heading={`Record of ${shortId(asked)}`}
-          profile={shown}
-          notice={notice}
-        />
-      )}
-    </>
-  );
-}
-
-/**
- * Somebody else's record, and the only thing that renders one.
- *
- * **Its props are the guarantee.** There is no ledger here, no count, no total
- * and no way to pass one — so no rendering of somebody else's record can
- * distinguish a worker concealing three jobs from a worker who has only ever
- * had the one, whatever a later edit to this file does inside these lists. That
- * is the render-layer half of a rule the view's pinned column list and
- * `incompleteness_notice/0`'s arity hold on the other side; the type is what
- * makes it checkable, and `profile.test.tsx` checks the DOM as well.
- *
- * `notice` is passed in rather than read here so that it is the *same* string
- * the worker's own record is shown beside — one value per session, off the join
- * reply.
- */
-function ProfileView({
-  heading,
-  profile,
-  notice,
-}: {
-  readonly heading: string;
-  readonly profile: Profile;
-  readonly notice: string;
-}) {
-  return (
-    <section aria-label={heading}>
-      <h3>{heading}</h3>
-      <IncompletenessNotice notice={notice} />
-
-      <h4>Jobs an employer confirmed</h4>
-      {profile.attestedEntries.length === 0 ? (
-        <p>Nothing here.</p>
-      ) : (
-        <ul aria-label={`${heading}: jobs an employer confirmed`}>
-          {profile.attestedEntries.map((entry) => (
-            <li key={entry.attestedEntryId}>
-              <strong>{entry.roleLabel}</strong> <span>at {entry.venueName}</span>{" "}
-              <Term startsAt={entry.startsAt} endsAt={entry.endsAt} />
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <h4>Jobs they have written down themselves</h4>
-      {profile.declaredEntries.length === 0 ? (
-        <p>Nothing here.</p>
-      ) : (
-        <ul aria-label={`${heading}: jobs they have written down themselves`}>
-          {profile.declaredEntries.map((entry) => (
-            <li key={entry.declaredEntryId}>
-              <strong>{entry.roleLabel}</strong> <span>at {entry.organisationName}</span>{" "}
-              <Term startsAt={entry.startsAt} endsAt={entry.endsAt} />
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {/*
-        R16 makes a correction request visible to any viewer of the entry it
-        contests, which is why it is here rather than confined to the worker's
-        own screen. `Records.peer_disclosure/4` composes over both reads for
-        exactly that reason: a rule that reached the entries and not the
-        requests would hand back the worker's own words about what it had just
-        withheld.
-      */}
-      <h4>Corrections they have asked for</h4>
-      {profile.correctionRequests.length === 0 ? (
-        <p>Nothing here.</p>
-      ) : (
-        <ul aria-label={`${heading}: corrections they have asked for`}>
-          {profile.correctionRequests.map((request) => (
-            <li key={request.correctionRequestId}>
-              <p>{request.body}</p>
-              <strong>{resolutionLabel(request.resolution)}</strong>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
   );
 }

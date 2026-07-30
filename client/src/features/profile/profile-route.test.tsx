@@ -10,32 +10,50 @@
  *
  * ## What these tests are actually for
  *
- * Three of the properties below are U9's rules holding at the render layer,
+ * Two of the properties below are U9's rules holding at the render layer,
  * which is the one place the database and the context cannot reach:
  *
- *   * a viewer of somebody else's record cannot tell a worker concealing three
- *     jobs from one who has only ever had the one;
- *   * the standing notice is one string per session, off the join, and no
- *     profile reply can influence it;
+ *   * the standing notice is one string per session, off the join, and neither
+ *     a profile reply nor the record it sits beside can influence it;
  *   * an audience the worker has not decided about renders as undecided and
  *     never as visible.
+ *
+ * A third was here and is not: *a viewer of somebody else's record cannot tell
+ * a worker concealing three jobs from one who has only ever had the one*. #73
+ * took the surface that rendered somebody else's record off the screen, so
+ * that rule has no render layer to hold and asserting it would be an empty
+ * region measured against an empty rule. The block below records the
+ * obligation to bring it back with the section.
  *
  * The rest are this client's own conventions: the shared-terminal clear, the
  * in-flight guards, and which reads an action is allowed to issue.
  *
- * ## One block drives the hook rather than the components
+ * ## Two blocks drive the hook rather than the components
  *
- * The last one, and only that one. What a write **comes back with** is part of
+ * The last two, and only those. What a write **comes back with** is part of
  * `ProfileSurface`'s type and is deliberately rendered nowhere — appending a
  * declared entry the server has just confirmed would put it at the end of a
  * list ordered by term — so there is no DOM through which it can be observed.
  * It is asserted anyway, because it is the half of `contract.ts` this client
- * can check: no channel answers these events, so the first thing a real
- * transport will do wrong is answer one in a shape this feature did not
- * describe.
+ * can check: the first thing a transport will do wrong is answer an event in a
+ * shape this feature did not describe.
+ *
+ * `peer_profile` is in the second of the two for a different reason and it is
+ * the load-bearing one: since #73 nothing on screen asks it, so the hook is the
+ * only place the capability is reachable at all. Driving it there is what makes
+ * "the section is hidden" distinguishable from "the feature was deleted", which
+ * is the claim #73 rests on.
  */
 
-import { act, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
@@ -548,177 +566,139 @@ describe("the standing incompleteness notice", () => {
     expect(screen.queryByText(/HIDING SOMETHING/)).not.toBeInTheDocument();
   });
 
-  it("is the same string beside a full record and an empty one", async () => {
-    // A worker with two jobs is looking at somebody whose record comes back
-    // empty. Both notices must be the identical string: a viewer who could read
-    // "how much is missing" off *which* notice they were shown would have the
-    // oracle back, and it would be this client that handed it to them.
-    const { channel } = await openProfile({
+  it("is the same string beside a record with entries and one with none", async () => {
+    // The oracle this forbids is a notice that varies with what it sits beside
+    // — "this record may be incomplete" against a full record and something
+    // else against an empty one is `hidden_count` spelled as prose.
+    //
+    // It used to be asserted on one screen, because a peer's record was shown
+    // under the identical notice and the two could be compared in one DOM. #73
+    // took that section off, so the comparison is made across two mounts of the
+    // same surface with two different records, which is what the property
+    // actually says. The full record is asserted full before anything is
+    // compared: two empty records would satisfy the equality for the wrong
+    // reason, which is this suite's own recurring shape.
+    await openProfile({
       attested: [entryWire(), secondJobWire()],
       declared: [declaredWire()],
     });
 
     expect(await screen.findByText("Supervisor")).toBeInTheDocument();
-    expect(screen.getAllByRole("note").map((node) => node.textContent)).toEqual([NOTICE]);
+    const beside = screen.getAllByRole("note").map((node) => node.textContent);
+    expect(beside).toEqual([NOTICE]);
 
-    await userEvent.type(screen.getByLabelText("Their id"), PEER_ID);
-    await userEvent.click(screen.getByRole("button", { name: /read their record/i }));
-    answer(channel, PROFILE_EVENTS.peerProfile, "ok", profilePayload({}));
+    cleanup();
 
-    await screen.findByRole("region", { name: /record of c3c3c3c3/i });
+    await openProfile({});
 
-    const notices = screen.getAllByRole("note").map((node) => node.textContent);
-    expect(notices).toHaveLength(2);
-    expect(new Set(notices).size).toBe(1);
-    expect(notices[0]).toBe(NOTICE);
+    expect(
+      await screen.findByText(/no employer has confirmed a job for you yet/i),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("note").map((node) => node.textContent)).toEqual(beside);
   });
 });
 
+/**
+ * The section that read somebody else's record, inverted rather than deleted.
+ *
+ * Six tests here drove a text box for a peer's uuid and the `ProfileView` its
+ * answer rendered. #73 took that section off the screen — the way in was a
+ * paste box for the one thing a worker cannot look up — and the surface behind
+ * it is untouched: `peer_profile` is still one of `ProfileChannel`'s seven
+ * events and `loadPeerProfile` still serves it, which the last block in this
+ * file drives directly. **That block is the control on this one.** Without it,
+ * "the section is gone" and "the capability is gone" are the same green.
+ *
+ * The six are not simply deleted, for the reason #68's inversion gives: a
+ * presence test removed leaves the markup one careless paste from coming back
+ * with nothing to say so. What replaces them is one absence test whose
+ * controls come first — the surface is proved up, populated, and queryable by
+ * each of the shapes the absences use.
+ *
+ * **Two of the six could not be turned round and are recorded rather than
+ * reworded.** "Renders no ledger, even while the viewer is holding one" and
+ * "says nothing about how much was withheld" were about `ProfileView`'s own
+ * DOM; with nothing rendering a peer's record they would compare an empty
+ * region against an empty rule, which is the "both operands empty" shape this
+ * project keeps finding. `profile-route.tsx`'s header carries the obligation
+ * to re-assert them when a picker brings the section back.
+ */
 describe("somebody else's record", () => {
-  async function openPeerRecord(record: Record_) {
-    const opened = await openProfile();
+  /**
+   * Every string that section put on screen, written out rather than matched
+   * loosely.
+   *
+   * A regex over prose is where an absence assertion goes quietly vacuous — a
+   * `/somebody else's record/i` written with a straight apostrophe never
+   * matched the `&rsquo;` the heading rendered, and would have passed on the
+   * day the heading was still there. These are compared as substrings of the
+   * document's own text, and the control below proves that comparison finds
+   * what *is* on the page.
+   */
+  const PEER_LOOKUP_COPY = [
+    "Somebody else’s record",
+    "You can read the record of anybody you have worked with recently",
+    "Read their record",
+  ] as const;
 
-    await userEvent.type(screen.getByLabelText("Their id"), PEER_ID);
-    await userEvent.click(screen.getByRole("button", { name: /read their record/i }));
-
-    answer(opened.channel, PROFILE_EVENTS.peerProfile, "ok", profilePayload(record));
-
-    return opened;
-  }
-
-  it("asks for it by person and renders the three lists", async () => {
-    const { channel } = await openPeerRecord({
+  it("is not on this screen, and the worker's own record is", async () => {
+    const { channel } = await openProfile({
       attested: [entryWire()],
       declared: [declaredWire()],
       corrections: [correctionWire()],
-    });
-
-    expect(pushesOf(channel, PROFILE_EVENTS.peerProfile)).toEqual([
-      { event: PROFILE_EVENTS.peerProfile, payload: { person_id: PEER_ID } },
-    ]);
-
-    const record = await screen.findByRole("region", { name: /record of c3c3c3c3/i });
-    expect(within(record).getByText("Bartender")).toBeInTheDocument();
-    expect(within(record).getByText("Chef")).toBeInTheDocument();
-    expect(within(record).getByText(correctionWire().body)).toBeInTheDocument();
-  });
-
-  it("renders no ledger, even while the viewer is holding one", async () => {
-    // This is the render-layer half of the rule `incompleteness_notice/0`'s
-    // arity and the views' pinned column lists hold on the other side.
-    //
-    // The fixture is the point. The viewer *is* holding a ledger — their own,
-    // loaded for their own record — and it carries a decision keyed on the
-    // engagement the peer's visible entry names, so a `ProfileView` that
-    // reached for `surface.disclosures` would have something real to render
-    // rather than an empty list that renders as nothing either way. A fixture
-    // that is empty exactly where the property lives cannot fail, which is the
-    // lesson `peers.test.tsx` records in its own header.
-    //
-    // `ProfileView`'s props carry no ledger and cannot be handed one; that is
-    // the structural half, and this is the observable one.
-    const { channel } = await openProfile({
-      attested: [entryWire()],
       disclosures: [disclosureWire()],
     });
 
-    expect(await screen.findByText("Hidden")).toBeInTheDocument();
+    // The controls, and they are mandatory: an absence assertion passes
+    // against a page that rendered nothing at all. The surface is up, it is
+    // populated from both reads, and each query shape used below is shown to
+    // find something on this DOM before it is asked to find nothing.
+    expect(await screen.findByText("Bartender")).toBeInTheDocument();
+    expect(screen.getByText("Chef")).toBeInTheDocument();
+    expect(screen.getByText(correctionWire().body)).toBeInTheDocument();
+    expect(screen.getByText("Hidden")).toBeInTheDocument();
 
-    await userEvent.type(screen.getByLabelText("Their id"), PEER_ID);
-    await userEvent.click(screen.getByRole("button", { name: /read their record/i }));
-    answer(
-      channel,
-      PROFILE_EVENTS.peerProfile,
-      "ok",
-      profilePayload({
-        attested: [entryWire()],
-      }),
-    );
-
-    const region = await screen.findByRole("region", { name: /record of c3c3c3c3/i });
-
-    // `Shown`, `Hidden` and `Not decided` are the disclosure vocabulary and
-    // none of it belongs to a viewer — nor do the controls that write it.
-    expect(within(region).queryByText("Hidden")).not.toBeInTheDocument();
-    expect(within(region).queryByText("Shown")).not.toBeInTheDocument();
-    expect(within(region).queryByText("Not decided")).not.toBeInTheDocument();
+    const text = document.body.textContent;
+    expect(text).toContain("Jobs an employer confirmed");
     expect(
-      within(region).queryByRole("button", { name: /^hide |^show /i }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: /ask the anchor for a correction/i }),
+    ).toBeInTheDocument();
     expect(
-      within(region).queryByText(/you have not made a decision/i),
-    ).not.toBeInTheDocument();
-  });
+      document.getElementById(`audience-id-${entryWire().attested_entry_id}`),
+    ).not.toBeNull();
+    expect(pushesOf(channel, PROFILE_EVENTS.ownProfile)).toHaveLength(1);
 
-  it("says nothing about how much was withheld", async () => {
-    await openPeerRecord({ attested: [entryWire()] });
-
-    const region = await screen.findByRole("region", { name: /record of c3c3c3c3/i });
-
-    // No count, no total, no ordinal, and no word that could only come from
-    // knowing what was left out. A surface that rendered "1 of 3" here would
-    // defeat the unit at the render layer with the database and the context
-    // both still correct.
-    expect(region.textContent).not.toMatch(/hidden|concealed|of \d|\d+ entr/i);
-  });
-
-  it("renders one AE1 sentence for a refusal and shows no record", async () => {
-    const { channel } = await openProfile();
-
-    await userEvent.type(screen.getByLabelText("Their id"), PEER_ID);
-    await userEvent.click(screen.getByRole("button", { name: /read their record/i }));
-
-    answer(channel, PROFILE_EVENTS.peerProfile, "error", refusal("not_found"));
-
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(/no record here for you to read/i);
-    expect(alert).toHaveTextContent(
-      /same answer you would get for a person who does not exist/i,
-    );
-    expect(screen.queryByRole("region", { name: /record of/i })).not.toBeInTheDocument();
-  });
-
-  it("takes a record off the screen when a later read of it is refused", async () => {
-    // The test above asserts no record is shown after a refusal, and on its own
-    // that is worth very little: no record had ever been shown, so "cleared"
-    // and "never set" are the same DOM. Measured — a mutation that dropped the
-    // clear entirely survived it.
+    // And now the section, by each route it had onto the page. All three were
+    // measured against a build with the component put back: each of the three
+    // strings, the button and the id kill it on its own.
     //
-    // This is the case the clear exists for. `fetch_peer_profile/2`'s gate is
-    // derived at the instant of the event and visibility lapses thirty days
-    // after the first of the two engagements ends (R13), so the second read of
-    // a record that was readable a moment ago is genuinely refused — and a
-    // record left on screen then is one the server has just declined to send.
-    const { channel } = await openPeerRecord({ attested: [entryWire()] });
-
-    const region = await screen.findByRole("region", { name: /record of c3c3c3c3/i });
-    expect(within(region).getByText("Bartender")).toBeInTheDocument();
-
-    // The same person again, which is what the attempt counter is for: without
-    // it the second press sets identical state and the effect never re-runs.
-    await userEvent.click(screen.getByRole("button", { name: /read their record/i }));
-    answer(channel, PROFILE_EVENTS.peerProfile, "error", refusal("not_found"));
-
-    await waitFor(() => {
-      expect(
-        screen.queryByRole("region", { name: /record of/i }),
-      ).not.toBeInTheDocument();
-    });
-    expect(pushesOf(channel, PROFILE_EVENTS.peerProfile)).toHaveLength(2);
+    // **Two more were written here and removed for killing nothing.** A
+    // `queryByRole("region", { name: /record of/i })` cannot fail, because that
+    // region only ever appeared *after* a lookup nothing can now start; and
+    // `pushesOf(channel, peerProfile)` being empty is already pinned by this
+    // file's first test, which compares the whole push list against `READS`.
+    for (const copy of PEER_LOOKUP_COPY) {
+      expect(text).not.toContain(copy);
+    }
+    expect(
+      screen.queryByRole("button", { name: /read their record/i }),
+    ).not.toBeInTheDocument();
+    expect(document.getElementById("peer-profile-id")).toBeNull();
   });
 
-  it("refuses an id that is not one without sending anything", async () => {
-    const { channel } = await openProfile();
+  it("leaves the disclosure control's own id field alone", async () => {
+    // The two controls both asked for an id, and the removed one was the other
+    // place on this surface with a label beginning "Their id" — so a cut that
+    // reached one field too far would take the audience box with it. Every
+    // disclosure test in this file names that field by a *scoped* label
+    // (`their id, for <entry>`), which the wrong survivor would not satisfy;
+    // this asks unscoped, so it fails if either box is the one still standing.
+    await openProfile({ attested: [entryWire()], disclosures: [] });
 
-    await userEvent.type(screen.getByLabelText("Their id"), "not-an-id");
-    await userEvent.click(screen.getByRole("button", { name: /read their record/i }));
+    const fields = await screen.findAllByLabelText(/^their id/i);
 
-    await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent(
-        /could not be sent as written/i,
-      );
-    });
-    expect(pushesOf(channel, PROFILE_EVENTS.peerProfile)).toHaveLength(0);
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toHaveAccessibleName("Their id, for Bartender at The Anchor");
   });
 });
 
@@ -944,6 +924,60 @@ describe("the worker's own word", () => {
   });
 });
 
+/**
+ * The hook on its own, joined, with the channel to answer it on.
+ *
+ * At module scope because two blocks need it: the three writes, whose replies
+ * are rendered nowhere, and `peer_profile`, which since #73 is *asked* nowhere.
+ */
+async function openSurface() {
+  const { socket, createSocket } = fakeSocketFactory();
+  const api = createFakeApi({
+    currentPerson: () =>
+      Promise.resolve(
+        ok({ id: PERSON_ID, email: "worker@example.com", displayName: "Captain Nemo" }),
+      ),
+  });
+
+  const { result } = renderHook(() => useProfileSurface(PERSON_ID), {
+    wrapper: ({ children }: { readonly children: ReactNode }) => (
+      <SessionProvider api={api} tokenStore={createMemoryTokenStore("c2Vzc2lvbg")}>
+        <SocketProvider createSocket={createSocket}>{children}</SocketProvider>
+      </SessionProvider>
+    ),
+  });
+
+  const topic = profileTopic(PERSON_ID);
+  const channel = await waitFor(() => {
+    const opened = socket.channelFor(topic);
+    if (opened === undefined) throw new Error(`nothing joined ${topic}`);
+
+    return opened;
+  });
+
+  act(() => {
+    channel.joinPush.trigger("ok", {
+      person_id: PERSON_ID,
+      incompleteness_notice: NOTICE,
+    });
+  });
+
+  return { channel, surface: result };
+}
+
+/** Starts an action inside `act`, and hands back the promise to await. */
+function start<Value>(work: () => Promise<Value>): Promise<Value> {
+  let started: Promise<Value> | undefined;
+
+  act(() => {
+    started = work();
+  });
+
+  if (started === undefined) throw new Error("nothing was started");
+
+  return started;
+}
+
 describe("what a write comes back with", () => {
   const DRAFT = {
     roleLabel: "Chef",
@@ -951,55 +985,6 @@ describe("what a write comes back with", () => {
     startsAt: "2024-01-01T00:00:00Z",
     endsAt: "2025-01-01T00:00:00Z",
   };
-
-  /** The hook on its own, joined, with the channel to answer it on. */
-  async function openSurface() {
-    const { socket, createSocket } = fakeSocketFactory();
-    const api = createFakeApi({
-      currentPerson: () =>
-        Promise.resolve(
-          ok({ id: PERSON_ID, email: "worker@example.com", displayName: "Captain Nemo" }),
-        ),
-    });
-
-    const { result } = renderHook(() => useProfileSurface(PERSON_ID), {
-      wrapper: ({ children }: { readonly children: ReactNode }) => (
-        <SessionProvider api={api} tokenStore={createMemoryTokenStore("c2Vzc2lvbg")}>
-          <SocketProvider createSocket={createSocket}>{children}</SocketProvider>
-        </SessionProvider>
-      ),
-    });
-
-    const topic = profileTopic(PERSON_ID);
-    const channel = await waitFor(() => {
-      const opened = socket.channelFor(topic);
-      if (opened === undefined) throw new Error(`nothing joined ${topic}`);
-
-      return opened;
-    });
-
-    act(() => {
-      channel.joinPush.trigger("ok", {
-        person_id: PERSON_ID,
-        incompleteness_notice: NOTICE,
-      });
-    });
-
-    return { channel, surface: result };
-  }
-
-  /** Starts an action inside `act`, and hands back the promise to await. */
-  function start<Value>(work: () => Promise<Value>): Promise<Value> {
-    let started: Promise<Value> | undefined;
-
-    act(() => {
-      started = work();
-    });
-
-    if (started === undefined) throw new Error("nothing was started");
-
-    return started;
-  }
 
   it("hands back the entity, decoded, for each of the three writes", async () => {
     // All three passed `() => null` as their decoder while being typed
@@ -1078,5 +1063,117 @@ describe("what a write comes back with", () => {
     });
 
     await expect(declared).resolves.toEqual({ status: "ok", value: null });
+  });
+});
+
+/**
+ * The read no screen asks for, and the reason it is asserted here.
+ *
+ * #73 took the peer-lookup section off the profile surface. Nothing else calls
+ * `loadPeerProfile`, so without this block the capability would be uncovered
+ * from the moment that section went — and "hidden" and "deleted" would be
+ * indistinguishable to anybody reading the suite. It is asked, refused and
+ * decoded here exactly as the removed component asked it, so the day a picker
+ * puts it back on screen the contract it has to meet is already written down.
+ *
+ * The three cases are the three the component drove: an answer, a refusal, and
+ * an id this client will not send. The last one is the only one that reaches no
+ * transport, and it is the one a picker makes unreachable — which is worth
+ * knowing before it is deleted as dead.
+ */
+describe("the peer read the surface still serves", () => {
+  it("asks `peer_profile` by person and decodes the three lists", async () => {
+    const { channel, surface } = await openSurface();
+
+    const read = start(() => surface.current.loadPeerProfile(PEER_ID));
+
+    // Named on the wire before it is answered: the event and the payload are
+    // `contract.ts`'s, and a picker replacing the text box must send the same.
+    expect(pushesOf(channel, PROFILE_EVENTS.peerProfile)).toEqual([
+      { event: PROFILE_EVENTS.peerProfile, payload: { person_id: PEER_ID } },
+    ]);
+
+    answer(
+      channel,
+      PROFILE_EVENTS.peerProfile,
+      "ok",
+      profilePayload({
+        attested: [entryWire()],
+        declared: [declaredWire()],
+        corrections: [correctionWire()],
+      }),
+    );
+
+    await expect(read).resolves.toEqual({
+      status: "ok",
+      value: {
+        attestedEntries: [
+          {
+            attestedEntryId: entryWire().attested_entry_id,
+            entryEngagementId: ENGAGEMENT_ID,
+            venueId: entryWire().venue_id,
+            venueName: "The Anchor",
+            roleLabel: "Bartender",
+            startsAt: "2026-01-01T00:00:00Z",
+            endsAt: "2026-06-01T00:00:00Z",
+            attestedAt: "2026-01-01T00:00:00Z",
+          },
+        ],
+        declaredEntries: [
+          {
+            declaredEntryId: declaredWire().declared_entry_id,
+            roleLabel: "Chef",
+            organisationName: "A kitchen with no account here",
+            startsAt: "2024-01-01T00:00:00Z",
+            endsAt: "2025-01-01T00:00:00Z",
+            declaredAt: "2026-07-01T00:00:00Z",
+          },
+        ],
+        correctionRequests: [
+          {
+            correctionRequestId: correctionWire().correction_request_id,
+            entryEngagementId: ENGAGEMENT_ID,
+            venueId: correctionWire().venue_id,
+            body: correctionWire().body,
+            requestedAt: "2026-07-02T00:00:00Z",
+            resolvedAt: null,
+            resolution: null,
+          },
+        ],
+      },
+    });
+  });
+
+  it("hands back the refusal rather than an empty record", async () => {
+    // AE1 is the server's: an id that names nobody, a person this viewer may
+    // not read, and one that is not an id all come back `not_found`. What this
+    // side must not do is turn that into an empty profile, which reads as
+    // "they have never worked anywhere" rather than "you cannot see this".
+    const { channel, surface } = await openSurface();
+
+    const read = start(() => surface.current.loadPeerProfile(PEER_ID));
+    answer(channel, PROFILE_EVENTS.peerProfile, "error", refusal("not_found"));
+
+    await expect(read).resolves.toEqual({
+      status: "refused",
+      failure: {
+        kind: "channel_error",
+        code: "not_found",
+        rawCode: "not_found",
+        message: "SERVER-SIDE LOG SENTENCE",
+      },
+    });
+  });
+
+  it("refuses an id that is not one without sending anything", async () => {
+    const { channel, surface } = await openSurface();
+
+    const read = start(() => surface.current.loadPeerProfile("not-an-id"));
+
+    await expect(read).resolves.toMatchObject({
+      status: "refused",
+      failure: { code: "bad_request" },
+    });
+    expect(pushesOf(channel, PROFILE_EVENTS.peerProfile)).toHaveLength(0);
   });
 });

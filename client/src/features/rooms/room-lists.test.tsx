@@ -41,8 +41,8 @@ import {
   somePerson,
 } from "../../test-support/fake-api";
 import { fakeSocketFactory } from "../../test-support/fake-socket";
-import type { RoomEntry } from "./room";
-import { instantLabel, roomTopic } from "./room";
+import type { RoomEntry, RoomRef, ShiftRoomListing } from "./room";
+import { instantLabel, roomTopic, shiftRoomLabel } from "./room";
 import { createMemoryRoomStore } from "./room-store";
 
 const VENUE_ID = "11111111-1111-4111-8111-111111111111";
@@ -139,6 +139,32 @@ function messageBodies(): (string | null)[] {
   return within(screen.getByRole("list", { name: /messages/i }))
     .queryAllByRole("listitem")
     .map((item) => item.textContent);
+}
+
+/**
+ * The open room's own section, found by something that is not its name.
+ *
+ * The composer is the one control only the open room renders, so reaching the
+ * panel through it keeps the query independent of the string under test. A
+ * `getByRole("region", { name })` would have derived the lookup from the
+ * assertion, which is the shape that agrees with itself for any value.
+ */
+function openRoomPanel(): HTMLElement {
+  const panel = screen.getByLabelText(/^message$/i).closest("section");
+
+  if (panel === null) throw new Error("no open room on screen");
+
+  return panel;
+}
+
+/** What the open room calls itself, on screen and to a screen reader. */
+function openRoomHeader(): { readonly heading: string; readonly region: string } {
+  const panel = openRoomPanel();
+
+  return {
+    heading: within(panel).getByRole("heading", { level: 2 }).textContent,
+    region: panel.getAttribute("aria-label") ?? "",
+  };
 }
 
 describe("the list of venue rooms", () => {
@@ -383,6 +409,93 @@ describe("what a recently-opened row is called", () => {
 
     expect(within(recent).getByRole("button", { name: /open kitchen/i })).toBeVisible();
     expect(recent.textContent).not.toContain(SHIFT_ROOM_ID);
+  });
+});
+
+/**
+ * The open room's header, which was the last uuid on this surface (#73).
+ *
+ * It rendered `<h2>Venue room</h2>` over `<code>{ref.id}</code>`. #72 named
+ * every row of both lists and left this one, which is the largest of the three
+ * — it sits over the conversation rather than in a list.
+ *
+ * **The order is what is under test here, not the strings.** `roomLabel` is
+ * live → stored → fallback and `room.test.ts` pins what each one reads; what
+ * this file has to show is that the header goes through all three of them, in
+ * that order, on a real screen. Each assertion below is the one that fails when
+ * one step of the order is dropped, and the panel is found through the composer
+ * rather than by its name so that no query here is derived from the answer.
+ */
+describe("what the open room's header is called", () => {
+  const shiftRef: RoomRef = { kind: "shift", id: SHIFT_ROOM_ID };
+
+  /** `oneShiftRoom`'s single row, decoded — so the label has one spelling. */
+  const kitchen: ShiftRoomListing = {
+    shiftRoomId: SHIFT_ROOM_ID,
+    venueId: VENUE_ID,
+    shiftTypeName: "Kitchen",
+    startsAt: "2026-03-09T13:00:00Z",
+    endsAt: "2026-03-09T21:00:00Z",
+    closesAt: "2026-03-09T21:30:00Z",
+  };
+
+  const STALE = "What this browser last saw";
+
+  it("prefers the live name over the stored one, and stops at the stored one first", async () => {
+    // Both halves in one flow, because the flow is what makes them
+    // distinguishable. A room *opened* while a live name is on screen has that
+    // name written into the store by `recordOpening`, so the two agree from
+    // then on and neither preference is observable. This opens a bookmarked
+    // shift room with its venue collapsed — no live name anywhere in this
+    // client, which is the case `RoomEntry.name` exists for — and then expands
+    // the venue, at which point the list arrives and the two disagree.
+    const bodies = {
+      [VENUE_ROOMS]: twoVenueRooms,
+      [SHIFT_ROOMS]: oneShiftRoom,
+      [SHIFT_HISTORY]: { messages: [], complete: true },
+    };
+    const { socket } = renderRooms(bodies, readsFrom(bodies), [
+      { ref: shiftRef, barred: null, name: STALE },
+    ]);
+
+    await open(socket, new RegExp(`^open ${STALE}$`, "i"), roomTopic(shiftRef));
+
+    // The stored name, which is all there is. A header that went straight to
+    // the fallback would read `shift room 22222222` here.
+    expect(openRoomHeader()).toEqual({ heading: STALE, region: STALE });
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /shift rooms at the anchor/i }),
+    );
+
+    // And now the server's answer, which wins outright — the same string the
+    // browse list above puts on its own row, so one room does not read two
+    // ways on one screen.
+    await waitFor(() => {
+      expect(openRoomHeader().heading).toBe(shiftRoomLabel(kitchen));
+    });
+    expect(openRoomHeader().region).toBe(shiftRoomLabel(kitchen));
+    expect(openRoomPanel().textContent).not.toContain(STALE);
+  });
+
+  it("renders the venue's name where the uuid was, and the kind under it", async () => {
+    // The reported symptom, from the other kind of room. The control is the
+    // heading itself: an absence assertion about an id passes against a header
+    // that rendered nothing at all, and "" contains no uuid either.
+    const bodies = {
+      [VENUE_ROOMS]: twoVenueRooms,
+      [VENUE_HISTORY]: { messages: [], complete: true },
+    };
+    const { socket } = renderRooms(bodies);
+
+    await open(socket, /^open the anchor$/i, roomTopic({ kind: "venue", id: VENUE_ID }));
+
+    expect(openRoomHeader()).toEqual({ heading: "The Anchor", region: "The Anchor" });
+    // The kind survives the swap: a venue room and a shift room refuse a send
+    // for different reasons, and one of them closes.
+    expect(within(openRoomPanel()).getByText("Venue room")).toBeVisible();
+    expect(openRoomPanel().textContent).not.toContain(VENUE_ID);
+    expect(openRoomPanel().outerHTML).not.toContain(VENUE_ID);
   });
 });
 

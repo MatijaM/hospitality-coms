@@ -51,6 +51,13 @@
  * than inside `Browse`, where they used to be: two lists on this screen need
  * their answers and only one of them is `Browse`.
  *
+ * **Three now, and the third is the open room's own header** (#73). It rendered
+ * `<code>{ref.id}</code>` under a heading that was the kind, which was the last
+ * uuid on this surface and the biggest — over the conversation rather than in a
+ * list. `RoomView` takes the live name as a prop and calls the same `roomLabel`
+ * the rows do; nothing in that component fetches a list or re-decides the
+ * order.
+ *
  * ## One room is joined at a time, on purpose
  *
  * `max_channels_per_transport` is at Phoenix's default of 100, and
@@ -241,6 +248,7 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
         <RoomView
           key={`${roomKey(open.ref)}#${openAttempt.toString()}`}
           entry={open}
+          liveName={liveNames.get(roomKey(open.ref)) ?? null}
           onEnded={onEnded}
           onBarred={(entry, bar: SendBar) => {
             update((current) => setRoomBar(current, entry.ref, bar));
