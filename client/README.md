@@ -512,6 +512,15 @@ join and every send, which is where KTD8 puts it. A browsed room and a pasted
 one take exactly the same path into a channel, and a room this session may not
 read is refused like any other.
 
+**The open room's own header is the third place a name is needed** and was the
+last uuid on this surface (#73): `<h2>Venue room</h2>` over `<code>{ref.id}</code>`,
+larger than either list's rows because it sits over the conversation. It is the
+name now, over the kind. The order is **`roomLabel`'s and is not restated**:
+live wins, so a venue renamed since the bookmark corrects itself; the stored one
+is all a collapsed shift room has; `roomFallbackLabel` is last. `RoomView` takes
+the live name as a prop rather than fetching a list — both lists already live in
+`RoomsRoute`, because the recently-opened list needs them too.
+
 **It is emptied when the session ends**, on both paths that drop the token — the
 explicit log out and the 401. Hospitality is a shared-terminal industry, and
 although the list is bookmarks rather than content and a re-join is refused
@@ -829,8 +838,15 @@ stamped decides nothing.
 ## The profile
 
 `src/features/profile/` is U9's worker-facing surface: the record, the ledger of
-disclosure decisions, declared entries, correction requests, and one peer's
-record at a time.
+disclosure decisions, declared entries and correction requests.
+
+It read one peer's record at a time until #73, which took that section off the
+screen. The way in was a text box for a person's uuid — the one thing about a
+peer a worker cannot look up anywhere in this client — so the control asked for
+its own answer as input. `loadPeerProfile` is untouched and the `peer_profile`
+event is unchanged; what is missing is a **picker**, which needs a list of the
+people a worker may read, and that is the same gap the disclosure audience has.
+The section comes back with the list, and the rule below comes back with it.
 
 ### It is built against a transport that does not exist, and that was a choice
 
@@ -941,22 +957,25 @@ who has never worked anywhere else.
 count, an ordinal, a gap where a hidden entry would sit, a different notice.
 Three things hold it here:
 
-- **`ProfileView` is the only component that renders somebody else's record, and
-  its props carry no ledger and no counts.** Not "it does not use them" — it
-  cannot be handed them, which a reviewer can check from the type.
+- **Nothing renders somebody else's record at all** since #73, so the rule holds
+  vacuously rather than by construction. It used to hold by construction:
+  `ProfileView` took a heading, a profile and the notice, and could not be
+  handed a ledger or a count — a property a reviewer could check from the type.
+  That component and the two tests that read its DOM went with the section,
+  deliberately: an assertion that a component nothing renders discloses nothing
+  compares an empty region against an empty rule. **Whoever puts a peer's record
+  back has to re-assert it**, and `profile-route.tsx`'s header says so.
 - **The notice arrives on the join reply, never on a profile reply.** That is
   arity zero expressed on a transport: a join is about the session, so no
-  profile read can influence one, and the same string is rendered beside a
-  record with three entries and one with none. A per-profile field would be
-  arity one however carefully the server computed it.
+  profile read can influence one. A per-profile field would be arity one however
+  carefully the server computed it.
+- **The notice is also the same string beside a record with entries and one with
+  none** — it used to be compared on one screen, against the peer's record shown
+  under the identical notice, and is now compared across two mounts of the same
+  surface with two different records. `profile-route.test.tsx` asserts the full
+  record is full before it compares anything: two empty ones satisfy the
+  equality for the wrong reason.
 - No list is numbered and none renders its length.
-
-`profile-route.test.tsx` asserts the first two against the DOM, and the fixture
-for the first is the point of it: the viewer _is_ holding a ledger — their own —
-carrying a decision keyed on the engagement the peer's visible entry names, so a
-view that reached for `surface.disclosures` would have something real to render.
-A fixture that is empty exactly where the property lives cannot fail, which is
-the lesson `peers.test.tsx` already records.
 
 ### There are no announcements, and that is U9 rather than a gap
 
