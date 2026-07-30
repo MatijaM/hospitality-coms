@@ -217,19 +217,26 @@ function Messages({
 }
 
 /**
- * How somebody else's message is attributed: their name, and the id beside it.
+ * How somebody else's message is attributed: who they are, what they do here,
+ * and the id beside both.
  *
- * The name is theirs and the server joins it on every read (#66), so it follows
- * a rename and an erased author reads as a non-identifying constant. It is
- * **not** unique — a globally unique readable name would be a second
- * `person_id` in plain text — so the shortened engagement id stays, and it is
- * what tells two colleagues who drew the same character apart.
+ * The name is theirs (#66) and the label is the venue's own words for their job
+ * (#65); the server joins both on every read, so they follow a rename and a
+ * corrected engagement, and an erased author reads as two non-identifying
+ * constants. **Neither is unique** — a globally unique readable name would be a
+ * second `person_id` in plain text, and a venue can hold two Bartenders — so
+ * the shortened engagement id stays, and it is the only one of the three that
+ * tells two speakers apart.
  *
- * Not the other way round: the id is the thing nobody can read, so it goes
- * second.
+ * The order is who, then what, then the id nobody can read. Reversing the first
+ * two would put a job title where a name belongs in a sentence about a person.
  */
 function authorLabel(message: RoomMessage): string {
-  return `${message.authorDisplayName} · ${shortId(message.authorEngagementId)}`;
+  return [
+    message.authorDisplayName,
+    message.authorRoleLabel,
+    shortId(message.authorEngagementId),
+  ].join(" · ");
 }
 
 /**

@@ -71,7 +71,7 @@ defmodule HospitalityComsWeb.RoomControllerTest do
   @shift_ends DateTime.add(@now, 9, :hour)
   @grace_minutes 30
 
-  @message_keys ~w(id body sent_at author_engagement_id author_display_name)
+  @message_keys ~w(id body sent_at author_engagement_id author_display_name author_role_label)
   @venue_room_keys ~w(venue_id name)
   @shift_room_keys ~w(shift_room_id venue_id shift_type_name starts_at ends_at closes_at)
 
@@ -216,6 +216,7 @@ defmodule HospitalityComsWeb.RoomControllerTest do
       assert Map.keys(message) |> Enum.sort() == Enum.sort(@message_keys)
       assert message["author_engagement_id"] == engagement.id
       assert message["author_display_name"] == person.display_name
+      assert message["author_role_label"] == engagement.role_label
       refute Map.has_key?(message, "person_id")
     end
 
@@ -241,6 +242,10 @@ defmodule HospitalityComsWeb.RoomControllerTest do
 
       assert message["author_engagement_id"] == engagement.id
       assert message["author_display_name"] == author.display_name
+
+      # #65 rides on the same absent predicate — the label is a column on the
+      # very row a roll-based join would have filtered out.
+      assert message["author_role_label"] == engagement.role_label
     end
 
     test "answers extent=recent exactly as the default", %{conn: conn} do

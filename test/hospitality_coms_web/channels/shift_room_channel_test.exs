@@ -34,6 +34,10 @@ defmodule HospitalityComsWeb.ShiftRoomChannelTest do
 
   @unreadable %{code: "unauthorized", message: "this session cannot read that shift room"}
 
+  # `RoomChannel.rendered/1`'s whole shape. The same literal
+  # `HospitalityComsWeb.VenueRoomChannelTest` writes; see the test that uses it.
+  @message_keys ~w(author_display_name author_engagement_id author_role_label body id sent_at)a
+
   describe "joining a shift room" do
     test "succeeds for a roster period that overlaps the room's open window" do
       %{room: room, engagement: engagement, socket: socket} = rostered()
@@ -114,6 +118,30 @@ defmodule HospitalityComsWeb.ShiftRoomChannelTest do
       assert sent.author_engagement_id == engagement.id
       assert_broadcast "message", broadcast
       assert broadcast.id == sent.id
+    end
+
+    test "names and labels the author, with the venue room's key set" do
+      # The control on `HospitalityComsWeb.VenueRoomChannelTest`'s own key-set
+      # pin, and it is a control rather than a copy: the literal is the same
+      # string in both files, so one room kind gaining or losing a field fails
+      # here as well as there. `RoomChannel.rendered/1` is the single spelling
+      # of a message and this is the half of it a shift room reaches.
+      %{room: room, person: person, engagement: engagement, socket: socket} = rostered()
+
+      at(@during)
+      {:ok, _reply, channel} = subscribe_and_join(socket, topic(room), %{})
+
+      ref = push(channel, "send", %{"body" => "two on the pass"})
+
+      assert_reply ref, :ok, sent
+      assert sent.author_display_name == person.person.display_name
+      assert sent.author_role_label == engagement.role_label
+      assert_broadcast "message", broadcast
+      assert broadcast.author_display_name == person.person.display_name
+      assert broadcast.author_role_label == engagement.role_label
+      assert Enum.sort(Map.keys(broadcast)) == Enum.sort(Map.keys(sent))
+
+      assert Enum.sort(Map.keys(sent)) == @message_keys
     end
 
     test "is refused at exactly closes_at, on a channel joined before it" do

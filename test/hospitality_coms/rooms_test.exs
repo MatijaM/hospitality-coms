@@ -786,15 +786,15 @@ defmodule HospitalityComs.RoomsTest do
     end
   end
 
-  ## The author's name
+  ## The author's name and role
 
   describe "a message's author" do
     test "is named on the send reply and on the read, from one query" do
-      # #66. The reply and the history are produced by
-      # `Records.with_author_display_name/1` in both cases — the send reads the
-      # row back through it rather than taking the name off the scope, because
-      # `ChannelAuth.person_scope/1` builds a stub `%Person{id: _}` and a name
-      # taken from there is correct over HTTP and `nil` on both channels.
+      # #66. The reply and the history are produced by `Records.with_author/1`
+      # in both cases — the send reads the row back through it rather than
+      # taking the name off the scope, because `ChannelAuth.person_scope/1`
+      # builds a stub `%Person{id: _}` and a name taken from there is correct
+      # over HTTP and `nil` on both channels.
       %{employer: employer, person: person} = engaged()
 
       assert {:ok, sent} = Rooms.send_venue_room_message(person, employer.venue_id, "just in")
@@ -804,6 +804,56 @@ defmodule HospitalityComs.RoomsTest do
                Rooms.list_venue_room_messages(person, employer.venue_id)
 
       assert read.author_display_name == sent.author_display_name
+    end
+
+    test "carries what they do at this venue, on the send reply and on the read" do
+      # #65, and the half #66 did not answer. A name says who spoke; the
+      # employer-authored `role_label` says what they do here, which in a work
+      # chat is often the part that decides whether you act on it. It arrives
+      # on the same `select_merge` as the name, so a send reply and a history
+      # read cannot disagree about it.
+      %{employer: employer, person: person} = engaged()
+
+      assert {:ok, sent} = Rooms.send_venue_room_message(person, employer.venue_id, "just in")
+      assert sent.author_role_label == "Bartender"
+
+      assert {:ok, %MessagePage{messages: [read]}} =
+               Rooms.list_venue_room_messages(person, employer.venue_id)
+
+      assert read.author_role_label == sent.author_role_label
+    end
+
+    test "is labelled by the engagement they wrote under, not by the person" do
+      # **What venue-local means, asserted rather than described.** A label
+      # belongs to one engagement at one venue, so one person holding two jobs
+      # is a Bartender in one room and a Head Chef in the other. Every other
+      # fixture in this block gives each person exactly one engagement, so a
+      # label resolved through `people` — the table the join already reaches
+      # for the display name — satisfies all of them and fails only this.
+      {harbour, _harbour_creation} = scoped_venue_fixture(@now)
+      {kitchen, _kitchen_creation} = scoped_venue_fixture(@now)
+      person = person_scope_fixture(@now)
+
+      _bar_job = engagement_at(harbour, person, @now, "Bartender")
+      _pass_job = engagement_at(kitchen, person, @now, "Head Chef")
+
+      {:ok, _} = Rooms.send_venue_room_message(person, harbour.venue_id, "behind the bar")
+      {:ok, _} = Rooms.send_venue_room_message(person, kitchen.venue_id, "service in five")
+
+      assert {:ok, %MessagePage{messages: [bar]}} =
+               Rooms.list_venue_room_messages(person, harbour.venue_id)
+
+      assert {:ok, %MessagePage{messages: [pass]}} =
+               Rooms.list_venue_room_messages(person, kitchen.venue_id)
+
+      assert bar.author_role_label == "Bartender"
+      assert pass.author_role_label == "Head Chef"
+
+      # And the control that says the two rooms are looking at one human: the
+      # name is global and is the same string in both, so the labels differing
+      # is the label being venue-local rather than the fixture being two people.
+      assert bar.author_display_name == pass.author_display_name
+      assert bar.author_display_name == person.person.display_name
     end
 
     test "is named even after their engagement has ended" do
@@ -831,6 +881,11 @@ defmodule HospitalityComs.RoomsTest do
 
       assert read.author_engagement_id == engagement.id
       assert read.author_display_name == author.person.display_name
+
+      # #65 rides on the same absent predicate. The label lives on the very row
+      # the activeness predicate would have filtered, so a join through the
+      # room's roll loses the role as well as the name.
+      assert read.author_role_label == "Bartender"
     end
 
     test "is named under the erased constant once they are erased" do
@@ -850,9 +905,22 @@ defmodule HospitalityComs.RoomsTest do
 
       assert read.body == "see you"
       assert read.author_display_name == Lifecycle.erased_display_name()
+
+      # **Both constants, and the doubling is the decision** (#65). Erasure
+      # overwrites two columns with two separate constants — who they were and
+      # what they did — so the line reads `Former colleague · Former team
+      # member · 4a3f…`. Suppressing one would be the only special case in a
+      # render that has none.
+      assert read.author_role_label == Lifecycle.erased_label()
+
+      # The control that makes the pair above distinguishing: with one constant
+      # for both columns, a render that collapsed the two fields would satisfy
+      # them. `lifecycle_test.exs` pins the same inequality where the two
+      # constants are written; this is it restated where the doubling shows.
+      refute Lifecycle.erased_display_name() == Lifecycle.erased_label()
     end
 
-    test "is named in a shift room too" do
+    test "is named and labelled in a shift room too" do
       %{employer: employer, person: person, engagement: engagement} = engaged()
       room = shift_room(employer)
       roster_entry_fixture(employer, room, engagement.id)
@@ -860,18 +928,22 @@ defmodule HospitalityComs.RoomsTest do
 
       assert {:ok, sent} = Rooms.send_shift_room_message(sender, room.id, "table 6 away")
       assert sent.author_display_name == person.person.display_name
+      assert sent.author_role_label == "Bartender"
 
       assert {:ok, %MessagePage{messages: [read]}} =
                Rooms.list_shift_room_messages(sender, room.id)
 
       assert read.author_display_name == person.person.display_name
+      assert read.author_role_label == "Bartender"
     end
 
     test "is not the only thing telling two authors apart" do
-      # Display names are deliberately not unique (#66), so the engagement id
-      # stays beside the name as the disambiguator. Two people renamed to one
-      # string is the case: without `author_engagement_id` on the wire the room
-      # cannot say which of them spoke.
+      # Neither field disambiguates and both together still do not. Display
+      # names are deliberately not unique (#66), and two people can hold one
+      # `role_label` at one venue (#65) — these two are both Bartenders, which
+      # is the fixture's default rather than an arrangement. Renaming them to
+      # one string makes the whole rendered attribution identical except for
+      # the engagement id, which is what has to tell them apart.
       %{employer: employer, person: first, engagement: first_engagement} = engaged()
       %{person: second, engagement: second_engagement} = engaged_at(employer, @now)
 
@@ -885,6 +957,7 @@ defmodule HospitalityComs.RoomsTest do
                Rooms.list_venue_room_messages(first, employer.venue_id)
 
       assert Enum.map(messages, & &1.author_display_name) == ["Captain Nemo", "Captain Nemo"]
+      assert Enum.map(messages, & &1.author_role_label) == ["Bartender", "Bartender"]
 
       # Keyed on the body rather than on position: both were sent at the same
       # instant, and `oldest_first/1` breaks that tie on a random `binary_id`.
@@ -1453,14 +1526,23 @@ defmodule HospitalityComs.RoomsTest do
   defp engaged_at(employer, now \\ @now) do
     person = person_scope_fixture(now)
 
-    engagement =
-      engagement_fixture(employer_at(employer, now), person, %{
-        starts_at: now,
-        ends_at: DateTime.add(now, 90, :day),
-        code_expires_at: DateTime.add(now, 7, :day)
-      })
+    %{
+      employer: employer,
+      person: person,
+      engagement: engagement_at(employer, person, now, "Bartender")
+    }
+  end
 
-    %{employer: employer, person: person, engagement: engagement}
+  # An engagement for a person who already exists, under a label the caller
+  # chooses — the only way one human holds two jobs at two venues, which is the
+  # only shape in which `role_label` being venue-local is observable.
+  defp engagement_at(employer, person, %DateTime{} = now, role_label) do
+    engagement_fixture(employer_at(employer, now), person, %{
+      role_label: role_label,
+      starts_at: now,
+      ends_at: DateTime.add(now, 90, :day),
+      code_expires_at: DateTime.add(now, 7, :day)
+    })
   end
 
   defp shift_room(employer) do

@@ -589,23 +589,31 @@ defmodule HospitalityComs.Rooms do
     end)
   end
 
-  # The author's name, read back through the **same** join every history read
-  # uses (#66), so a message cannot arrive with one shape on the send reply and
-  # another on the read.
+  # The author's name and role label, read back through the **same** join every
+  # history read uses (#66, #65), so a message cannot arrive with one shape on
+  # the send reply and another on the read.
   #
-  # It is a query rather than `scope.person.display_name`, and the reason is
-  # specific and was measured: `HospitalityComsWeb.ChannelAuth.person_scope/1`
-  # builds `%Person{id: person_id}` and nothing else — the socket deliberately
-  # caches the id and the token digest and no `Person` struct. So a name taken
-  # off the scope is correct over HTTP, `nil` on both channels, and there is no
-  # test position from which the two look different. Caching the name on the
-  # socket is the alternative and is worse twice over: it is an identifying
-  # value on a struct a crash report inspects, and it is *mutable*, so a rename
-  # would go on broadcasting the old name to the whole room until the next join.
+  # For the **name** that is a correctness requirement and it was measured:
+  # `HospitalityComsWeb.ChannelAuth.person_scope/1` builds `%Person{id:
+  # person_id}` and nothing else — the socket deliberately caches the id and the
+  # token digest and no `Person` struct — so a name taken off the scope is
+  # correct over HTTP, `nil` on both channels, and there is no test position
+  # from which the two look different. Caching it on the socket is the
+  # alternative and is worse twice over: an identifying value on a struct a
+  # crash report inspects, and a *mutable* one, so a rename would go on
+  # broadcasting the old name to the whole room until the next join.
+  #
+  # For the **label** it is not. Both sends resolve a whole `Engagement` row out
+  # of the database before they insert, in this same transaction, so
+  # `engagement.role_label` is the string this query returns and taking it from
+  # there would be correct on both transports. It is read back anyway because
+  # the query is already being issued for the name and the `select_merge` fills
+  # both fields in one row — one source behind one rendered shape, which is the
+  # thing four separate defects in this tree came from not having.
   @spec naming(Multi.t()) :: Multi.t()
   defp naming(multi) do
     Multi.run(multi, :named, fn repo, %{message: message} ->
-      {:ok, message.id |> Records.message() |> Records.with_author_display_name() |> repo.one!()}
+      {:ok, message.id |> Records.message() |> Records.with_author() |> repo.one!()}
     end)
   end
 
@@ -994,18 +1002,17 @@ defmodule HospitalityComs.Rooms do
   end
 
   # The one place either extent becomes a query, so the two room kinds cannot
-  # come to disagree about what `:recent` means — and, since #66, the one place
-  # the author's display name is joined on, so they cannot come to disagree
-  # about that either.
+  # come to disagree about what `:recent` means — and, since #66 and #65, the
+  # one place the author's name and role label are joined on, so they cannot
+  # come to disagree about those either.
   #
-  # `with_author_display_name/1` is applied **after** the ordering, outside
-  # `most_recent/2`'s subquery, so neither the bound nor the page's own order is
-  # touched by it.
+  # `with_author/1` is applied **after** the ordering, outside `most_recent/2`'s
+  # subquery, so neither the bound nor the page's own order is touched by it.
   @spec page(Ecto.Queryable.t(), MessagePage.extent()) :: MessagePage.t()
   defp page(queryable, :all) do
     queryable
     |> Records.oldest_first()
-    |> Records.with_author_display_name()
+    |> Records.with_author()
     |> Repo.all()
     |> MessagePage.whole()
   end
@@ -1017,7 +1024,7 @@ defmodule HospitalityComs.Rooms do
     # whole history" without a second statement.
     queryable
     |> Records.most_recent(limit + 1)
-    |> Records.with_author_display_name()
+    |> Records.with_author()
     |> Repo.all()
     |> MessagePage.bounded(limit)
   end
