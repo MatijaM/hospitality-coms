@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   decodeAttestedEntry,
+  decodeAudiences,
   decodeCorrectionRequest,
   decodeDeclaredEntry,
   decodeDisclosure,
@@ -297,5 +298,80 @@ describe("decodeProfile", () => {
       "correctionRequests",
       "declaredEntries",
     ]);
+  });
+});
+
+describe("the audiences a disclosure can name", () => {
+  // `ProfileChannel`'s `"list_audiences"`, the eighth event and the only one
+  // that does not call `HospitalityComs.Profiles`. Read out of
+  // `rendered_venue/1` and `rendered_person/1` rather than assumed: a venue
+  // listed **as itself** is `venue_id`/`name`, which is
+  // `EmployerController.render_venue/1`'s spelling and the one every other
+  // venue decoder in this client already reads, while `venue_name` is what a
+  // venue named *inside another entity* is called. A person is `person_id`/
+  // `display_name`, `rendered_peer/1`'s spelling for the same pair.
+  //
+  // **These keys are the one thing about this event no surface test can
+  // check.** A surface fixture and a decoder both written here agree with each
+  // other whatever they say — which is #66's client half exactly, where
+  // `{displayName}` went out to a server reading `display_name` and killed
+  // nothing. So they are asserted against literals, here, and nowhere else.
+  const audiences = {
+    venues: [{ venue_id: "66666666-6666-4666-8666-666666666666", name: "The Anchor" }],
+    people: [
+      { person_id: "77777777-7777-4777-8777-777777777777", display_name: "Captain Nemo" },
+    ],
+  };
+
+  it("reads the two kinds `Disclosure.audience/0` has", () => {
+    expect(decodeAudiences(audiences)).toEqual({
+      venues: [{ venueId: "66666666-6666-4666-8666-666666666666", name: "The Anchor" }],
+      people: [
+        { personId: "77777777-7777-4777-8777-777777777777", displayName: "Captain Nemo" },
+      ],
+    });
+  });
+
+  it("answers both halves empty, which is a worker with nobody to name", () => {
+    // Distinct from `null`, and the distinction is the whole of this event's
+    // render logic: a picker cannot tell "still loading" from "there is nobody"
+    // unless one of the two is not an empty pair. See `use-profile-surface.ts`.
+    expect(decodeAudiences({ venues: [], people: [] })).toEqual({
+      venues: [],
+      people: [],
+    });
+  });
+
+  it("refuses a reply carrying only one of the two lists", () => {
+    // The absent half is the half the picker silently renders nothing for, and
+    // a `?? []` here is how a one-sided transport ships as a working surface
+    // with one group missing and nothing to say so.
+    expect(decodeAudiences({ venues: audiences.venues })).toBeNull();
+    expect(decodeAudiences({ people: audiences.people })).toBeNull();
+    expect(decodeAudiences({})).toBeNull();
+    expect(decodeAudiences(null)).toBeNull();
+  });
+
+  it("refuses the whole reply for one bad row, in either list", () => {
+    // A list with one bad row is not a shorter list — every decoder in this
+    // client shares the rule. It matters twice over here: a dropped row is an
+    // audience the worker cannot name and has no way to notice is missing.
+    expect(
+      decodeAudiences({ ...audiences, venues: [...audiences.venues, { venue_id: "x" }] }),
+    ).toBeNull();
+    expect(
+      decodeAudiences({ ...audiences, people: [...audiences.people, { person_id: "x" }] }),
+    ).toBeNull();
+  });
+
+  it("refuses a venue spelled `venue_name`, which is the other entity's key", () => {
+    // The two spellings are one rename apart, and the wrong one renders an
+    // option with an empty label rather than failing.
+    expect(
+      decodeAudiences({
+        ...audiences,
+        venues: [{ venue_id: "66666666-6666-4666-8666-666666666666", venue_name: "x" }],
+      }),
+    ).toBeNull();
   });
 });
