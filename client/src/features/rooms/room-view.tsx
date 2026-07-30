@@ -33,13 +33,31 @@
  * control unconditionally would tell somebody whose room holds three messages
  * that there are more. That is also the only thing this client knows about the
  * bound — there is no number here and there must not be one.
+ *
+ * ## The header is the room's name, and it is `roomLabel`'s order or nothing
+ *
+ * It was `<h2>Venue room</h2>` over `<code>{ref.id}</code>` — the one uuid left
+ * on this surface after #72 named every row of both lists, and the largest one,
+ * since it sat over the conversation rather than in a list. It is the room's
+ * name now, over the kind, and the order behind it is **not written here**:
+ * `roomLabel` is live → stored → fallback and there is one spelling of that in
+ * this client. A second one would drift, and the direction it would drift in is
+ * the reported bug — a header preferring the stored name keeps a renamed venue
+ * reading under its old name, and one that skipped straight to the fallback
+ * would put a shortened uuid back where a whole one used to be.
+ *
+ * The live name is a **prop** rather than something fetched here, because the
+ * two lists that carry one already live in `rooms-route.tsx` — the
+ * recently-opened list needs them too, which is why they moved up a component
+ * in #72. Fetching them again here would be a second request per open and a
+ * second answer to disagree with.
  */
 
 import { useState } from "react";
 
 import type { ChannelFieldError } from "../../socket/channel-failure";
 import type { RoomClosure, RoomEntry, RoomMessage, SendBar } from "./room";
-import { instantLabel, mergeMessages, roomKindLabel } from "./room";
+import { instantLabel, mergeMessages, roomKindLabel, roomLabel } from "./room";
 import type { RoomErrorCode } from "./refusal-message";
 import {
   barFromRefusal,
@@ -54,13 +72,29 @@ import { useRoom } from "./use-room";
 
 export type RoomViewProps = {
   readonly entry: RoomEntry;
+  /**
+   * What a list on screen calls this room at this instant, or `null` when none
+   * does.
+   *
+   * `null` is a real answer rather than a missing one: a shift room reached
+   * after a reload with its venue collapsed has no live name anywhere in this
+   * client, which is the case `RoomEntry.name` exists for. It is handed
+   * straight to `roomLabel`, which decides between the three.
+   */
+  readonly liveName: string | null;
   /** Called after the topic has been left, never before. */
   readonly onEnded: (entry: RoomEntry, closure: RoomClosure) => void;
   readonly onBarred: (entry: RoomEntry, bar: SendBar) => void;
   readonly onClearBar: (entry: RoomEntry) => void;
 };
 
-export function RoomView({ entry, onEnded, onBarred, onClearBar }: RoomViewProps) {
+export function RoomView({
+  entry,
+  liveName,
+  onEnded,
+  onBarred,
+  onClearBar,
+}: RoomViewProps) {
   const room = useRoom(entry.ref, {
     onEnded: (closure) => {
       onEnded(entry, closure);
@@ -84,12 +118,22 @@ export function RoomView({ entry, onEnded, onBarred, onClearBar }: RoomViewProps
     onClearBar(entry);
   }
 
+  // One string for the heading and for the region's accessible name, so a
+  // screen reader and a sighted reader are told the same thing about which
+  // room this is. Only one room is open at a time, so it is unique among the
+  // regions on this screen.
+  const label = roomLabel(entry, liveName);
+
   return (
-    <section aria-label={`${roomKindLabel(entry.ref.kind)} ${entry.ref.id}`}>
-      <h2>{roomKindLabel(entry.ref.kind)}</h2>
-      <p>
-        <code>{entry.ref.id}</code>
-      </p>
+    <section aria-label={label}>
+      <h2>{label}</h2>
+      {/*
+        The kind, where the id used to be. It is still worth saying — a venue
+        room and a shift room refuse a send for different reasons and one of
+        them closes — and `roomFallbackLabel` already carries it for a room
+        with no name, so the duplication is confined to the degenerate row.
+      */}
+      <p>{roomKindLabel(entry.ref.kind)}</p>
 
       <ConnectionState connection={room.connection} />
       {entry.barred !== null && (

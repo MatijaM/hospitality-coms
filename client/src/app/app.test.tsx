@@ -406,6 +406,45 @@ describe("the landing page's tabs", () => {
     expect(screen.queryByText(ROOMS)).not.toBeInTheDocument();
   });
 
+  /**
+   * #73, asserted where the whole product is on screen rather than only the
+   * slice.
+   *
+   * The profile panel carried a third section — a box for a person's uuid and
+   * a "Read their record" button. `profile-route.test.tsx` inverts the six
+   * tests that drove it; this is the one that would notice it coming back
+   * through the tab a worker actually opens, with no socket answering anything,
+   * which is the state this file renders every surface in.
+   *
+   * Controls first, and here that means two different query shapes: the
+   * panel's own sentinel and a button that *is* in it. An absence assertion
+   * over a panel that failed to mount passes, and so does one whose matcher
+   * never matched anything.
+   */
+  it("offers no way to look up somebody else's record", async () => {
+    landOnHome();
+
+    expect(within(await panel()).getByText(ROOMS)).toBeVisible();
+    await userEvent.click(screen.getByRole("tab", { name: "Profile" }));
+
+    const open = await panel();
+
+    expect(within(open).getByText(PROFILE)).toBeVisible();
+    expect(within(open).getByRole("button", { name: /write this down/i })).toBeVisible();
+
+    const text = open.textContent;
+    expect(text).toContain("Jobs an employer confirmed");
+
+    // Written out with the apostrophe the heading rendered. A regex with a
+    // straight one never matched it and would have passed while it was there.
+    for (const copy of ["Somebody else’s record", "Read their record"]) {
+      expect(text).not.toContain(copy);
+    }
+    expect(
+      within(open).queryByRole("button", { name: /read their record/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("never has two surfaces mounted at once", async () => {
     // The rule `usePeerSurface`'s moduledoc states — one instance, because one
     // topic — read off the DOM rather than off the hook. Hiding a panel with

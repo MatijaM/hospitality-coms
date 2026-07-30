@@ -159,6 +159,65 @@ describe("the topic a room is joined on", () => {
   });
 });
 
+/**
+ * The open room's header when nothing in this client knows the room's name.
+ *
+ * `room-lists.test.tsx` has the live and the stored halves, because it has
+ * lists. This file has neither — the fake API's `read` fails, so the browse
+ * list never loads, and every entry here is stored with `name: null` — which
+ * makes it the one place the third step of `roomLabel`'s order is reached on a
+ * real screen. It is also the step that was the reported bug's near miss: the
+ * header used to be the whole uuid, and a fallback that rendered nothing at all
+ * would satisfy "there is no uuid here" just as well.
+ */
+describe("what the open room's header is called with nothing to call it", () => {
+  /** The panel, found through the composer rather than by the name under test. */
+  function openRoomPanel(): HTMLElement {
+    const panel = screen.getByLabelText(/^message$/i).closest("section");
+
+    if (panel === null) throw new Error("no open room on screen");
+
+    return panel;
+  }
+
+  it("falls back to the kind and a short id, and never to nothing", async () => {
+    const { socket } = renderRooms([entry(venueRoom)]);
+
+    await open(socket, venueRoom);
+
+    const panel = openRoomPanel();
+    const heading = within(panel).getByRole("heading", { level: 2 }).textContent;
+
+    // The literal, not `roomFallbackLabel(venueRoom)`: deriving the expected
+    // value from the function under test agrees with itself for any value,
+    // which is what an empty fallback would exploit.
+    expect(heading).toBe("venue room 11111111");
+    expect(panel).toHaveAccessibleName("venue room 11111111");
+    expect(panel.outerHTML).not.toContain(VENUE_ID);
+  });
+
+  it("says which kind of room it is even when that is all the name says", async () => {
+    // The kind moved from the heading to the line under it, where the uuid was.
+    // In this state `roomFallbackLabel` carries it too, so the two agree — the
+    // control is the shift room, which reads differently in both places from
+    // the venue room above and would not if the kind had been dropped.
+    const { socket } = renderRooms([entry(shiftRoom)]);
+
+    await open(socket, shiftRoom, {
+      shift_room_id: SHIFT_ROOM_ID,
+      engagement_id: OWN_ENGAGEMENT_ID,
+    });
+
+    const panel = openRoomPanel();
+
+    expect(within(panel).getByRole("heading", { level: 2 })).toHaveTextContent(
+      "shift room 22222222",
+    );
+    expect(within(panel).getByText("Shift room")).toBeVisible();
+    expect(panel.outerHTML).not.toContain(SHIFT_ROOM_ID);
+  });
+});
+
 describe("a closed room", () => {
   it("renders its state and disables the composer, before anything is typed", async () => {
     // The room is readable and not writable, which is U6's two predicates and
