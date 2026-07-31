@@ -419,13 +419,21 @@ describe("what a recently-opened row is called", () => {
  * uuid box removed with nothing asserting it gone comes back on the next
  * careless paste with nothing to say so.
  *
- * **What is asserted is the roles, not the copy**, and that is the point rather
- * than a shortcut. The argument for deleting the form instead of styling it
- * away is that a mounted component leaves a focusable box in the accessibility
- * tree that a screen reader reaches and a sighted worker does not — so
- * `queryByRole("textbox")` is the assertion that fails against exactly the fix
- * that would be wrong. The two element ids are asserted beside them because a
- * form rebuilt without labels has no roles worth querying but keeps them.
+ * **The roles and the element ids catch different mutants, and that was
+ * measured rather than assumed.** The first draft of this comment claimed
+ * `queryByRole("textbox")` was the assertion that fails against the wrong fix —
+ * the form styled away rather than deleted. It is not: `hidden` takes an
+ * element out of the accessibility tree, so Testing Library stops finding it by
+ * role and every role assertion here passes. Measured with the form put back
+ * and one `hidden` added — the surviving assertion is
+ * `getElementById("room-id")`.
+ *
+ * Both halves therefore stay, against two different wrong fixes. A form hidden
+ * off-screen — `position: absolute; left: -9999px`, the shape that keeps it
+ * reachable by a screen reader and invisible to everybody else, which is the
+ * whole argument for deleting rather than hiding — is still in the tree and is
+ * what the roles catch. A form hidden any other way, or rebuilt without labels
+ * so it has no roles worth querying, keeps its ids.
  */
 describe("what the rooms surface does not ask anybody to type", () => {
   it("has no way into a room that is not one of the two lists", async () => {
