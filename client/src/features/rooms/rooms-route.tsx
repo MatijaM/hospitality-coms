@@ -8,20 +8,46 @@
  * `GET /api/venue-rooms`, and `GET /api/venues/:venue_id/shift-rooms` once a
  * venue is chosen. It is where a room is *found*: venue rooms carry the venue's
  * name and shift rooms carry the shift type's, so nothing in it is a uuid
- * prefix. Before U12 there was no such endpoint and a room could only be added
- * by pasting an id, which `room.ts` said in its own moduledoc.
+ * prefix. Before U12 there was no such endpoint at all, and a room could only
+ * be reached by typing its id into the box the section below records.
  *
  * **Recently opened chats** is this browser's own, newest first. It is kept,
  * and it is not a stale copy of the first: it holds `barred`, the one thing on
  * this surface that was *learned* rather than fetched — nothing on the wire
  * says in advance that a shift room is past its `closes_at` — and it is what
- * survives a reload. Opening a room from the browse list is the same operation
- * as pasting one, so a room reached either way takes exactly the same path into
- * a channel and lands in the same list.
+ * survives a reload. Both lists open a room through `openAndKeep`, so a room
+ * reached from either takes the same path into a channel and lands in this one.
  *
- * The paste box stays for the same reason the local list does: it is the only
- * way into a room the browse list does not show, and removing a working
- * affordance to celebrate a new one is a regression wearing a feature's hat.
+ * ## There is no paste box, and the argument that kept one was checkable
+ *
+ * There was a third control: a **Kind** select, an **Id** text box and an "Add
+ * this room" button, and this header used to defend it — *"it is the only way
+ * into a room the browse list does not show"*. That is a claim about the two
+ * reads above rather than a matter of taste, and it does not survive being
+ * checked (#80). `Rooms.list_venue_rooms/1` and `list_readable_shift_rooms/2`
+ * carry **no limit and no extent** — unlike the message reads on the same four
+ * routes, and unlike the employer's `list_shift_rooms/1`, which is bounded at
+ * 30 — so there is no page for a box to be a way past. And a readable shift
+ * room needs an engagement active *now* at that venue, which is the venue
+ * room's own roll, so a venue holding one is always in the first list.
+ *
+ * Deleted rather than hidden, which is `profile-route.tsx`'s rule from #73: a
+ * component still mounted still leaves a focusable uuid box in the
+ * accessibility tree that a screen reader finds and a sighted worker does not.
+ *
+ * **One gap is real, and it is an obligation on a control that does not exist
+ * yet.** `Browse` nests a venue's shift rooms under its *venue room*, and the
+ * server route deliberately does not — `GET /api/venues/:venue_id/shift-rooms`
+ * hangs off the venue, and `RoomController`'s moduledoc says a path under the
+ * venue room "would invite a membership gate in front of it, and that gate
+ * would quietly extend suspension to shift rooms" (KTD18). This panel
+ * reintroduces at the render layer the coupling that route refused: a worker
+ * suspended from a venue room loses its row, and with it the way to expand
+ * shift rooms they are still rostered on. Nothing in the tree can put them
+ * there — `Rooms.suspend_venue_room/2` has no caller outside the test suite,
+ * no route and no channel event — so whoever builds the opt-out builds the way
+ * to those rooms with it. A uuid box shipped against a state nothing can
+ * produce is not that way.
  *
  * ## One control per row, and what that cost
  *
@@ -36,6 +62,11 @@
  *     list. Both entry points therefore go through `openAndKeep` rather than
  *     only the browse one, which is why `RoomList` hands back a `RoomRef` where
  *     it used to hand back a key.
+ *
+ * Both entry points are now the browse list and this one, and every id either
+ * hands over came from the server or from the store's own decoder — which is
+ * why `normaliseRoomId` moved from being one of two agreeing checks to being
+ * the only one. `room-store.ts` says so where it calls it.
  *
  * ## Where a row's name comes from, and why the lists are fetched up here
  *
@@ -98,19 +129,12 @@ import { useCallback, useMemo, useState } from "react";
 import type {
   RoomClosure,
   RoomEntry,
-  RoomKind,
   RoomRef,
   SendBar,
   ShiftRoomListing,
   VenueRoomListing,
 } from "./room";
-import {
-  instantLabel,
-  normaliseRoomId,
-  roomKey,
-  roomLabel,
-  shiftRoomLabel,
-} from "./room";
+import { instantLabel, roomKey, roomLabel, shiftRoomLabel } from "./room";
 import type { RoomStore } from "./room-store";
 import { findRoom, recordOpening, removeRoom, setRoomBar } from "./room-store";
 import { RoomView } from "./room-view";
@@ -241,8 +265,6 @@ export function RoomsRoute({ store }: RoomsRouteProps) {
         liveNames={liveNames}
         onOpen={openAndKeep}
       />
-
-      <AddRoomForm onAdd={openAndKeep} />
 
       {open !== null && (
         <RoomView
@@ -458,7 +480,9 @@ function ListState<T>({
  * the failure looks like the tab strip breaking rather than like copy changing.
  * It still says "rooms" rather than "chats" because every other string on this
  * screen does; the heading is the user's word and the vocabulary underneath it
- * did not change.
+ * did not change. It stopped offering "or add one by its id" when the box that
+ * sentence pointed at went (#80), so the list above is now the whole of the
+ * answer — which it already was.
  */
 function RoomList({
   entries,
@@ -472,7 +496,7 @@ function RoomList({
   readonly onOpen: (ref: RoomRef) => void;
 }) {
   if (entries.length === 0) {
-    return <p>No rooms yet. Open one from the list above, or add one by its id.</p>;
+    return <p>No rooms yet. Open one from the list above.</p>;
   }
 
   return (
@@ -491,62 +515,5 @@ function RoomList({
         </li>
       ))}
     </ul>
-  );
-}
-
-function AddRoomForm({ onAdd }: { readonly onAdd: (ref: RoomRef) => void }) {
-  const [kind, setKind] = useState<RoomKind>("venue");
-  const [id, setId] = useState("");
-  const [problem, setProblem] = useState<string | null>(null);
-
-  return (
-    <form
-      onSubmit={(event) => {
-        event.preventDefault();
-
-        // Checked here for the worker's benefit, not the server's: the server
-        // answers a malformed suffix with exactly what it answers an unknown
-        // room (AE1), so it can say nothing usable about somebody's own typo.
-        // `normaliseRoomId` is also what the stored list goes through, so the
-        // two paths cannot drift about what an id is or what case it is in.
-        const roomId = normaliseRoomId(id);
-
-        if (roomId === null) {
-          setProblem("That is not an id. It should look like a uuid.");
-
-          return;
-        }
-
-        setProblem(null);
-        setId("");
-        onAdd({ kind, id: roomId });
-      }}
-    >
-      <label htmlFor="room-kind">Kind</label>
-      <select
-        id="room-kind"
-        name="room-kind"
-        value={kind}
-        onChange={(event) => {
-          setKind(event.target.value === "shift" ? "shift" : "venue");
-        }}
-      >
-        <option value="venue">Venue room (the venue&rsquo;s id)</option>
-        <option value="shift">Shift room (the shift room&rsquo;s id)</option>
-      </select>
-
-      <label htmlFor="room-id">Id</label>
-      <input
-        id="room-id"
-        name="room-id"
-        type="text"
-        value={id}
-        onChange={(event) => {
-          setId(event.target.value);
-        }}
-      />
-      {problem !== null && <p role="alert">{problem}</p>}
-      <button type="submit">Add this room</button>
-    </form>
   );
 }

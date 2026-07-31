@@ -28,7 +28,7 @@
  * Neither list is an authority. Everything *about* a room — whether this
  * session may read it, whether it may write to it, whether its access has
  * ended — still comes from the server on every join and every send, which is
- * where KTD8 puts it. A browsed room and a pasted one take the same path.
+ * where KTD8 puts it. A room reached from either list takes the same path.
  */
 
 import type { ListExtent } from "../../api/types";
@@ -226,10 +226,11 @@ export function roomKindLabel(kind: RoomKind): string {
 /**
  * What a row is called when nothing has ever told this client its name.
  *
- * **Reachable rather than theoretical**: a shift room bookmarked and then met
- * again after a reload, with its venue never expanded, has no name on this
- * device and none on the way (`RoomEntry.name` says why). A room pasted into
- * `AddRoomForm` that the browse list does not carry is the other case.
+ * **Reachable rather than theoretical**, and #80 left it with one case rather
+ * than none: a shift room bookmarked and then met again after a reload, with
+ * its venue never expanded, has no name on this device and none on the way
+ * (`RoomEntry.name` says why). The other case was a room pasted into a box that
+ * no longer exists, which is why this reads as one case now.
  *
  * **Why it is not the bare kind.** Two nameless shift rooms is exactly the
  * reachable case above — bookmark two of one venue's shifts, reload — and
@@ -285,9 +286,11 @@ export function isRoomId(value: string): boolean {
  * other's messages: the room would look broken to both of them and correct to
  * anybody reading the rows.
  *
- * Every id this client holds goes through here — the paste box and the stored
- * list both — so the two paths cannot disagree about the rule the way they
- * used to.
+ * It used to be called from two places — a paste box and the stored list — and
+ * the bug was that only one of them called it. #80 removed the box, so this is
+ * now the **sole** check on the sole untrusted path: `room-store.ts`'s decoder,
+ * where a list from an older build or one edited by hand in devtools arrives.
+ * Every other id on this surface came off a server list.
  */
 export function normaliseRoomId(value: string): string | null {
   return normaliseTopicId(value);

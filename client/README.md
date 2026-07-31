@@ -96,11 +96,12 @@ The link points at `http://localhost:5173/log-in/<token>` — this client — so
 under the form is still there and still takes the link or the bare token, for a
 link mailed by a server whose `MAGIC_LINK_BASE_URL` points somewhere else.
 
-To reach a room you need its id, because nothing serves a list of them — see
-"The rooms" below. `mix run` against the dev database is the way to get one:
-`Venues.create_venue/2` answers with the venue and its founding grant, and
-`Engagements.issue_invitation/2` then `claim_invitation/2` produce the
-engagement that makes the venue room joinable.
+**Rooms are listed rather than looked up**, and this paragraph used to say the
+opposite: "to reach a room you need its id, because nothing serves a list of
+them". U12's browse list ended that, and #80 removed the last box that asked for
+one. `mix ecto.setup` seeds the demo, so logging in as `mira@demo.invalid` puts
+two venue rooms and their shifts on screen with nothing to type. `Demo.seed/0`
+in `dev_support/` names the other three addresses and what each of them has.
 
 ### CORS, and why there is none
 
@@ -502,14 +503,33 @@ getting opposite answers.
 The **local** list is kept and is not a cache of it. It holds `barred`, the one
 thing on this surface that was _learned_ rather than fetched — nothing on the
 wire says in advance that a shift room is past its `closes_at` — and it is what
-is still open after a reload. The paste box is kept for the same reason: it is
-the only way into a room the browse list does not show.
+is still open after a reload.
 
-Neither is an authority: everything about a room — whether this session may read
-it, may write to it, or still has access at all — comes from the server on every
-join and every send, which is where KTD8 puts it. A browsed room and a pasted
-one take exactly the same path into a channel, and a room this session may not
-read is refused like any other.
+**There was a third control and #80 deleted it**: a Kind select and an Id text
+box, under "Add this room". This README and the component's own header both
+defended it with _"it is the only way into a room the browse list does not
+show"_ — which is a claim about the two reads above rather than a matter of
+taste, and it does not survive being checked. `Rooms.list_venue_rooms/1` and
+`list_readable_shift_rooms/2` carry **no limit and no extent**, unlike the
+message reads on the same four routes and unlike the employer's
+`list_shift_rooms/1` at 30; and a readable shift room needs an engagement active
+_now_ at that venue, which is the venue room's own roll. There is no page for a
+box to be a way past.
+
+One gap is real and is an obligation rather than a defence of the box: the
+browse panel nests a venue's shift rooms under its **venue room**, where the
+route deliberately hangs them off the **venue** — `RoomController` says a path
+under the venue room "would invite a membership gate in front of it, and that
+gate would quietly extend suspension to shift rooms" (KTD18). So a suspended
+worker would lose the way to shift rooms they are still rostered on. Nothing in
+the tree can suspend anybody — `Rooms.suspend_venue_room/2` has no caller
+outside the test suite — so whoever builds that opt-out builds the way to those
+rooms with it.
+
+Neither list is an authority: everything about a room — whether this session may
+read it, may write to it, or still has access at all — comes from the server on
+every join and every send, which is where KTD8 puts it. A room this session may
+not read is refused like any other.
 
 **The open room's own header is the third place a name is needed** and was the
 last uuid on this surface (#73): `<h2>Venue room</h2>` over `<code>{ref.id}</code>`,
@@ -533,12 +553,15 @@ considered and **rejected**: it would let two people share a terminal without
 overwriting each other, but it does so by _retaining_ the previous worker's list
 on the device, which is the exact thing clearing it is for.
 
-Ids are normalised — trimmed and lowercased — at both entry points, the paste
-box and the stored list, through one function. `Ecto.UUID.cast/1` takes either
-case and Postgres stores one value, but **`Phoenix.PubSub` broadcasts on the
-literal topic string**, so `venue_room:ABC…` and `venue_room:abc…` would be one
-database room and two fan-outs: both sessions writing to the same table and
-seeing none of each other's messages.
+Ids are normalised — trimmed and lowercased — through one function, and since
+#80 the stored list's decoder is the **only** place that runs: every other id on
+this surface came from a server list. `Ecto.UUID.cast/1` takes either case and
+Postgres stores one value, but **`Phoenix.PubSub` broadcasts on the literal
+topic string**, so `venue_room:ABC…` and `venue_room:abc…` would be one database
+room and two fan-outs: both sessions writing to the same table and seeing none of
+each other's messages. It used to be the looser of two checks — the box required
+a uuid and the decoder took any string — which is what made the reachable path
+the wrong one.
 
 ### A closed room is learned, not fetched
 

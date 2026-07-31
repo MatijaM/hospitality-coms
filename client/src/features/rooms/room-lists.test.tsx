@@ -183,9 +183,10 @@ describe("the list of venue rooms", () => {
   });
 
   it("opens a browsed room on the topic PersonSocket routes, and keeps it locally", async () => {
-    // A browsed room and a pasted one take the same path into a channel, and
-    // the browsed one enters the local list so that `barred` and the reload
-    // survival apply to it too.
+    // A browsed room enters the local list, so that `barred` and the reload
+    // survival apply to it too. It used to say "a browsed room and a pasted one
+    // take the same path into a channel", which since #80 is a claim about one
+    // path and one entry point.
     const { socket } = renderRooms({
       [VENUE_ROOMS]: twoVenueRooms,
       [VENUE_HISTORY]: { messages: [], complete: true },
@@ -409,6 +410,72 @@ describe("what a recently-opened row is called", () => {
 
     expect(within(recent).getByRole("button", { name: /open kitchen/i })).toBeVisible();
     expect(recent.textContent).not.toContain(SHIFT_ROOM_ID);
+  });
+});
+
+/**
+ * #80, and it is the presence test for the paste box inverted rather than
+ * deleted — #68's manoeuvre, for the reason #74 gives about the peer lookup: a
+ * uuid box removed with nothing asserting it gone comes back on the next
+ * careless paste with nothing to say so.
+ *
+ * **What is asserted is the roles, not the copy**, and that is the point rather
+ * than a shortcut. The argument for deleting the form instead of styling it
+ * away is that a mounted component leaves a focusable box in the accessibility
+ * tree that a screen reader reaches and a sighted worker does not — so
+ * `queryByRole("textbox")` is the assertion that fails against exactly the fix
+ * that would be wrong. The two element ids are asserted beside them because a
+ * form rebuilt without labels has no roles worth querying but keeps them.
+ */
+describe("what the rooms surface does not ask anybody to type", () => {
+  it("has no way into a room that is not one of the two lists", async () => {
+    // **The controls are mandatory and come first.** Both lists have to be on
+    // screen with rows in them, because every absence below passes against a
+    // surface that rendered nothing — which is what a failed `read` produces
+    // on this very screen, and is the shape this project has shipped five
+    // times.
+    renderRooms(
+      { [VENUE_ROOMS]: twoVenueRooms, [SHIFT_ROOMS]: oneShiftRoom },
+      readsFrom({ [VENUE_ROOMS]: twoVenueRooms, [SHIFT_ROOMS]: oneShiftRoom }),
+      [{ ref: { kind: "venue", id: VENUE_ID }, barred: null, name: "The Anchor" }],
+    );
+
+    const browse = await screen.findByRole("list", { name: /venue rooms/i });
+    const recent = await screen.findByRole("list", { name: /recently opened chats/i });
+
+    expect(within(browse).getByText("The Anchor")).toBeVisible();
+    expect(
+      within(recent).getByRole("button", { name: /open the anchor/i }),
+    ).toBeVisible();
+
+    // The venue is expanded too, so the shift-room half of the browse list is
+    // standing as well: it is the half a paste box would be defended as the way
+    // past, and asserting the absence with it collapsed would leave "the box is
+    // gone" and "the surface never opened" the same green.
+    await userEvent.click(
+      await screen.findByRole("button", { name: /shift rooms at the anchor/i }),
+    );
+    expect(
+      within(
+        await screen.findByRole("list", { name: /shift rooms at the anchor/i }),
+      ).getByRole("button", { name: /open kitchen/i }),
+    ).toBeVisible();
+
+    // And now the form, by each route it had onto the page.
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /add this room/i }),
+    ).not.toBeInTheDocument();
+    expect(document.getElementById("room-id")).toBeNull();
+    expect(document.getElementById("room-kind")).toBeNull();
+
+    // The sentence that pointed at it, which is also `app.test.tsx`'s sentinel
+    // for this whole panel. A literal rather than a regex, because #74 shipped
+    // a `/somebody else's record/i` that never matched the `&rsquo;` the
+    // heading actually rendered and would have passed with the section still
+    // there.
+    expect(document.body.textContent).not.toContain("add one by its id");
   });
 });
 

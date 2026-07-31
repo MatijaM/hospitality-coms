@@ -134,10 +134,13 @@ function decodeEntry(value: unknown): RoomEntry | null {
   const kind = ROOM_KINDS.find((candidate) => candidate === value.kind);
   if (kind === undefined) return null;
 
-  // The same rule `AddRoomForm` applies, through the same function. These two
-  // paths used to disagree — the form required a uuid and this took any string
-  // at all — so a list from an older build, or one edited by hand in devtools,
-  // took the loose path and put whatever it held on a socket.
+  // **This is the only untrusted way an id reaches a topic string**, and #80 is
+  // what made it the only one: it used to be the looser of two checks, beside a
+  // paste box that required a uuid, and the disagreement was the bug — a list
+  // from an older build, or one edited by hand in devtools, took this path and
+  // put whatever it held on a socket. With the box gone every other id comes
+  // from a server list, so deleting this does not fall back to a second rule.
+  // It falls back to none.
   const id = normaliseRoomId(value.id);
   if (id === null) return null;
 
