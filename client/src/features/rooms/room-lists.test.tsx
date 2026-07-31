@@ -425,8 +425,11 @@ describe("what a recently-opened row is called", () => {
  * the form styled away rather than deleted. It is not: `hidden` takes an
  * element out of the accessibility tree, so Testing Library stops finding it by
  * role and every role assertion here passes. Measured with the form put back
- * and one `hidden` added — the surviving assertion is
- * `getElementById("room-id")`.
+ * and one `hidden` added — the surviving assertions are the two
+ * `getElementById` calls, either of which catches it on its own. Reproduced
+ * independently in review, which also named the mechanism: Testing Library's
+ * `isSubtreeInaccessible` reads `element.hidden === true` directly, so this
+ * holds regardless of whether jsdom applies any CSS.
  *
  * Both halves therefore stay, against two different wrong fixes. A form hidden
  * off-screen — `position: absolute; left: -9999px`, the shape that keeps it
@@ -444,7 +447,7 @@ describe("what the rooms surface does not ask anybody to type", () => {
     // times.
     renderRooms(
       { [VENUE_ROOMS]: twoVenueRooms, [SHIFT_ROOMS]: oneShiftRoom },
-      readsFrom({ [VENUE_ROOMS]: twoVenueRooms, [SHIFT_ROOMS]: oneShiftRoom }),
+      undefined,
       [{ ref: { kind: "venue", id: VENUE_ID }, barred: null, name: "The Anchor" }],
     );
 
@@ -477,12 +480,40 @@ describe("what the rooms surface does not ask anybody to type", () => {
     ).not.toBeInTheDocument();
     expect(document.getElementById("room-id")).toBeNull();
     expect(document.getElementById("room-kind")).toBeNull();
+  });
 
-    // The sentence that pointed at it, which is also `app.test.tsx`'s sentinel
-    // for this whole panel. A literal rather than a regex, because #74 shipped
-    // a `/somebody else's record/i` that never matched the `&rsquo;` the
-    // heading actually rendered and would have passed with the section still
-    // there.
+  /**
+   * The empty-state sentence, which is a **second render** and was a bug the
+   * first time it was written.
+   *
+   * It began as one more line at the end of the test above —
+   * `expect(document.body.textContent).not.toContain("add one by its id")` —
+   * under a comment citing #74's regex that never matched what the heading
+   * rendered. Review measured it and it was the same class: that test seeds a
+   * recent-list entry, because the entry is its control, and `RoomList` renders
+   * the empty-state paragraph only when `entries.length === 0`. So the sentence
+   * was absent whichever words it held. Restoring the old copy in
+   * `rooms-route.tsx` left it green while turning **seven** tests red in
+   * `app.test.tsx`.
+   *
+   * The fix is the empty list, which is the state the sentence exists for. That
+   * also closes the gap the vacuous line was hiding: until now nothing inside
+   * the rooms feature pinned this copy at all — only `app.test.tsx`'s
+   * cross-feature sentinel, where a change to it reads as the tab strip
+   * breaking.
+   */
+  it("points an empty list at the lists above, and nowhere else", async () => {
+    renderRooms({ [VENUE_ROOMS]: twoVenueRooms });
+
+    // The control: the panel is up and populated, so "no paste box offered" is
+    // distinguishable from "nothing rendered".
+    expect(
+      within(await screen.findByRole("list", { name: /venue rooms/i })).getByText(
+        "The Anchor",
+      ),
+    ).toBeVisible();
+
+    expect(screen.getByText("No rooms yet. Open one from the list above.")).toBeVisible();
     expect(document.body.textContent).not.toContain("add one by its id");
   });
 });

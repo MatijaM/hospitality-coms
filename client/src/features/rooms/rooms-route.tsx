@@ -325,6 +325,29 @@ function currentNames(
  * Both answers and the chosen venue are the route's state rather than this
  * component's, because the recently-opened list needs the names too. Nothing
  * else about the panel moved.
+ *
+ * ## Shift rooms are nested under the venue *room*, and the route refuses to be
+ *
+ * **Read this before building a suspend/resume control.** The header of this
+ * file carries the same paragraph in the context that produced it (#80); it is
+ * repeated here because this is the component that has to change, and a reader
+ * arriving from a suspension ticket lands on `Browse` rather than on a note
+ * about a deleted paste box.
+ *
+ * `GET /api/venues/:venue_id/shift-rooms` hangs off the **venue**, and
+ * `RoomController`'s moduledoc says why: a path under the venue room "would
+ * invite a membership gate in front of it, and that gate would quietly extend
+ * suspension to shift rooms" (KTD18). This panel nests them under the venue
+ * room anyway, so it reintroduces at the render layer the coupling that route
+ * design refused — `useVenueRooms` subtracts suspensions, and a venue whose row
+ * disappears takes the only way to expand its shift rooms with it, though the
+ * server would still answer for them.
+ *
+ * No user can reach that state today: `Rooms.suspend_venue_room/2` has no
+ * caller in `lib/`, `dev_support/` or `client/` — no route, no channel event,
+ * tests only. So this is an obligation rather than a defect, and it falls due
+ * the moment that changes. **Whoever adds the opt-out adds a way to a suspended
+ * venue's shift rooms in the same change**, and corrects this paragraph.
  */
 function Browse({
   venueRooms,

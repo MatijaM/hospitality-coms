@@ -286,11 +286,16 @@ export function isRoomId(value: string): boolean {
  * other's messages: the room would look broken to both of them and correct to
  * anybody reading the rows.
  *
- * It used to be called from two places — a paste box and the stored list — and
- * the bug was that only one of them called it. #80 removed the box, so this is
- * now the **sole** check on the sole untrusted path: `room-store.ts`'s decoder,
- * where a list from an older build or one edited by hand in devtools arrives.
- * Every other id on this surface came off a server list.
+ * There used to be two entry points — a paste box and the stored list — and the
+ * bug was that only the box applied this rule, so the *reachable* path was the
+ * unchecked one. #80 removed the box, which leaves this as the **sole** check on
+ * the sole untrusted path: `room-store.ts`'s decoder, where a list from an older
+ * build or one edited by hand in devtools arrives.
+ *
+ * Every other id on this surface comes off a server list and is used as decoded.
+ * That is deliberate rather than an omission — those are `Ecto.UUID` values
+ * rendered by Postgres, which emits lowercase — but it is the assumption the
+ * sentence above rests on, so it is written down rather than implied.
  */
 export function normaliseRoomId(value: string): string | null {
   return normaliseTopicId(value);

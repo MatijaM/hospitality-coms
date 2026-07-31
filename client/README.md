@@ -99,9 +99,17 @@ link mailed by a server whose `MAGIC_LINK_BASE_URL` points somewhere else.
 **Rooms are listed rather than looked up**, and this paragraph used to say the
 opposite: "to reach a room you need its id, because nothing serves a list of
 them". U12's browse list ended that, and #80 removed the last box that asked for
-one. `mix ecto.setup` seeds the demo, so logging in as `mira@demo.invalid` puts
-two venue rooms and their shifts on screen with nothing to type. `Demo.seed/0`
-in `dev_support/` names the other three addresses and what each of them has.
+one. `mix ecto.setup` seeds the demo, so there is something to land on with
+nothing to type.
+
+Log in as **`tomo@demo.invalid`**, and the reason it is that address rather than
+another is worth one sentence, because a review found this paragraph naming the
+wrong one. `Demo.write/1` hires Tomo at **both** venues — Bartender at Harbour,
+Barista at Kolektiv — and rosters him on **all three** of Harbour's shifts, so he
+is the only seeded person for whom both browse lists are non-empty. Mira founds
+Harbour and is hired nowhere else, so she has one venue room and no shift rooms
+at all; a developer checking this client against her would see an empty
+shift-room list and no way to tell a correct build from a broken one.
 
 ### CORS, and why there is none
 
