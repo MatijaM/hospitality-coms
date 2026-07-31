@@ -59,6 +59,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it } from "vitest";
 
+import { localDateFromInstant } from "../../app/instant";
 import { App } from "../../app/app";
 import { SessionProvider } from "../../session/session-context";
 import { createMemoryTokenStore } from "../../session/token-store";
@@ -1125,21 +1126,64 @@ describe("the worker's own word", () => {
       screen.getByLabelText("Where"),
       "A kitchen with no account here",
     );
-    await userEvent.type(screen.getByLabelText("From"), "2024-01-01T00:00:00Z");
-    await userEvent.type(screen.getByLabelText("Until"), "2025-01-01T00:00:00Z");
+    // **Days in, instants out** (#82). These fields were bare text boxes and this
+    // test typed a full ISO instant into them, which is the only thing Ecto's
+    // `:utc_datetime` would cast — so the test passed while every value a
+    // person would actually write (`2024-01-01`, `01/01/2024`, `January 2024`)
+    // was refused and no entry was ever created. They are `type="date"` now,
+    // and jsdom sanitises a non-date value in one to the empty string exactly
+    // as a browser does, so the old fixture would leave the button disabled.
+    // **The control is asserted directly, and it is the only thing that can be.**
+    // Measured: removing `type="date"` from both inputs kills **nothing** —
+    // jsdom's text input accepts `"2024-01-01"` as readily as a date input
+    // does, so every assertion below still passes against the bare text boxes
+    // this unit exists to remove. What a date box buys is a person not having
+    // to guess a format, which is a claim about a human and not about a DOM, so
+    // the attribute is the assertion.
+    //
+    // **This cited `shifts.test.tsx` as the precedent and that was false.**
+    // Review checked: there was no `toHaveAttribute` anywhere in the employer
+    // tests, so the identical mutation there — `datetime-local` to `text` —
+    // killed 0 of 37. The hole is closed in the same commit as this
+    // correction, so the sentence is true in the other direction now: the two
+    // surfaces keep the same pair and this one came first.
+    expect(screen.getByLabelText("From")).toHaveAttribute("type", "date");
+    expect(screen.getByLabelText("Until")).toHaveAttribute("type", "date");
+
+    await userEvent.type(screen.getByLabelText("From"), "2024-01-01");
+    await userEvent.type(screen.getByLabelText("Until"), "2025-01-01");
     await userEvent.click(screen.getByRole("button", { name: /write this down/i }));
 
+    // The right-hand side is `new Date`, the platform primitive — **not**
+    // `instantFromLocalDate`, which is the function under test and would make
+    // this agree with itself for any value. What the timezone *maths* has to be
+    // is pinned in `app/instant.test.ts`, across two zones, because one zone
+    // cannot tell a correct conversion from one that ignores zones. What this
+    // asserts is the boundary: the day the worker chose leaves as an instant.
     expect(pushesOf(channel, PROFILE_EVENTS.declareEntry)).toEqual([
       {
         event: PROFILE_EVENTS.declareEntry,
         payload: {
           role_label: "Chef",
           organisation_name: "A kitchen with no account here",
-          starts_at: "2024-01-01T00:00:00Z",
-          ends_at: "2025-01-01T00:00:00Z",
+          starts_at: new Date("2024-01-01T00:00:00").toISOString(),
+          // **Not the start of its day** — `endOfLocalDate`, because two
+          // start-of-day instants for one chosen day are equal and the server
+          // refuses the pair. #82's review found that; `instant.test.ts` holds
+          // the property and this holds that the form uses the right half at
+          // the right end.
+          ends_at: new Date("2025-01-01T23:59:59").toISOString(),
         },
       },
     ]);
+
+    // The control on that: a form passing the typed text through unchanged
+    // satisfies every key-set assertion above, and is the state this unit
+    // found the surface in.
+    const [sent] = pushesOf(channel, PROFILE_EVENTS.declareEntry);
+    const payload = sent?.payload as { starts_at: string };
+    expect(payload.starts_at).not.toBe("2024-01-01");
+    expect(payload.starts_at).toMatch(/Z$/);
 
     answer(channel, PROFILE_EVENTS.declareEntry, "ok", declaredWire());
 
@@ -1150,6 +1194,45 @@ describe("the worker's own word", () => {
     });
 
     expect(await screen.findByText("Chef")).toBeInTheDocument();
+  });
+
+  it("lists the entry as a date a person reads, not as the instant it stored", async () => {
+    // **This is the hole F1 came through**, and it is a hole in shape rather
+    // than in coverage: every assertion in the write test above is about the
+    // payload that *left*, and the fixture answers with a fixed wire row rather
+    // than the one just sent — so a list that printed the raw ISO instants,
+    // which is what it did, satisfied all of them.
+    //
+    // What that cost a worker: east of UTC the instant for 1 January is
+    // `2023-12-31T23:00:00.000Z`, so the entry they had just written was listed
+    // under the *previous* day, beside an amend form showing the date they
+    // picked. The zone cannot be pinned here — `instant.ts` builds its
+    // formatters at module load, which is why `room.test.ts` re-imports — so
+    // this asserts the property that makes the bug impossible in any zone: the
+    // stored string is absent and a rendered date is present.
+    const wire = declaredWire();
+
+    await openProfile({ declared: [wire] });
+
+    const list = await screen.findByRole("list", {
+      name: /jobs you have written down yourself/i,
+    });
+
+    // The control first: the row is on screen with its own text, so the
+    // absence below is "the instant is not printed" rather than "nothing is".
+    expect(within(list).getByText("Chef")).toBeVisible();
+
+    // An independent formatter, built here rather than imported: it resolves
+    // the same runner zone as the module's, so it says what the row should say
+    // without deriving the expectation from the code under test.
+    const day = new Intl.DateTimeFormat(undefined, {
+      day: "numeric",
+      month: "short",
+    }).format(new Date(wire.starts_at));
+
+    expect(list.textContent).toContain(day);
+    expect(list.textContent).not.toContain(wire.starts_at);
+    expect(list.textContent).not.toContain(wire.ends_at);
   });
 
   it("gives two entries that read the same their own fields", async () => {
@@ -1188,10 +1271,20 @@ describe("the worker's own word", () => {
 
     const fields = rows.map((row) => within(row).getByLabelText("From"));
 
+    // The value is the **day** the stored instant falls on, because the control
+    // is `type="date"` (#82). Read back through `localDateFromInstant` rather
+    // than spelled, for the reason `shifts.test.tsx` gives: a literal here
+    // would be a claim about the runner's timezone. That the conversion is
+    // right at all is `app/instant.test.ts`'s job; this asserts the two forms
+    // hold two *different* values, which is what the shared-id bug destroyed.
     expect(fields.map((field) => (field as HTMLInputElement).value)).toEqual([
-      declaredWire().starts_at,
-      secondStint.starts_at,
+      localDateFromInstant(declaredWire().starts_at),
+      localDateFromInstant(secondStint.starts_at),
     ]);
+    // And neither is blank, which is the control: a date input handed an ISO
+    // instant renders empty and says nothing, so two empty strings would
+    // satisfy nothing above but the length.
+    expect(fields.every((field) => (field as HTMLInputElement).value !== "")).toBe(true);
     // And the mechanism, named: two forms, two sets of ids.
     expect(new Set(fields.map((field) => field.id)).size).toBe(2);
   });
@@ -1201,8 +1294,8 @@ describe("the worker's own word", () => {
 
     await userEvent.type(screen.getByLabelText("What you did"), "Chef");
     await userEvent.type(screen.getByLabelText("Where"), "A kitchen");
-    await userEvent.type(screen.getByLabelText("From"), "2025-01-01T00:00:00Z");
-    await userEvent.type(screen.getByLabelText("Until"), "2024-01-01T00:00:00Z");
+    await userEvent.type(screen.getByLabelText("From"), "2025-01-01");
+    await userEvent.type(screen.getByLabelText("Until"), "2024-01-01");
     await userEvent.click(screen.getByRole("button", { name: /write this down/i }));
 
     answer(channel, PROFILE_EVENTS.declareEntry, "error", {

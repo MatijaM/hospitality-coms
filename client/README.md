@@ -274,6 +274,21 @@ is that unit; the move landed one commit behind the code that owed it, and
 `docs/test-designs/2026-07-29-employer-u4-write-verb-and-handshake.md` says why.
 `room.ts` re-exports both under the same names, so no rooms file changed.
 
+**It holds three more since #82, and they go the other way — they _produce_ an
+instant rather than rendering one.** `instantFromLocal` turns a
+`datetime-local` value into the instant it names and came here from
+`features/employer/employer.ts` under this file's own rule the moment the
+profile surface became its second caller, leaving the same kind of re-export
+shim `room.ts` has. `instantFromLocalDate` and `localDateFromInstant` are the
+`type="date"` pair: a chosen day to the instant that starts it, and back.
+
+The file's header used to end "these functions render, and that is all they
+do", which the hoist made false; it now says the rule is **nothing here reads a
+clock**, which is the property KTD5 needs. A conversion is a pure mapping —
+"18:00 on 9 March" names one instant whatever the server thinks the time is —
+so the offsettable clock cannot make it wrong, where a comparison against
+`Date.now()` it certainly could.
+
 **"Another day" is decided in the reader's timezone, by a formatter built at
 module load**, which is why `features/rooms/room.test.ts` sets `process.env.TZ`,
 calls `vi.resetModules()` and re-imports. A term of 23:00–07:00 crosses midnight

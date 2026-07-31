@@ -24,7 +24,7 @@
  * papering over it.
  */
 
-import { instantLabel, termLabel } from "../../app/instant";
+import { instantFromLocal, instantLabel, termLabel } from "../../app/instant";
 import type { ShiftRoomListing } from "../../app/shift-room";
 
 /** `%{venue_id:, name:}` — one venue this session may act for. */
@@ -177,38 +177,16 @@ export function rosterEntryLabel(entry: RosterEntry): string {
 }
 
 /**
- * The instant a `datetime-local` value names, or `null` if it names none.
+ * The instant a `datetime-local` value names, re-exported under the name this
+ * surface wrote it with.
  *
- * ## This is the only place this client produces an instant, and it is not a clock
+ * It moved to `src/app/instant.ts` in #82, which gave it a second caller on the
+ * profile surface — that file's own header sets the rule ("new callers import
+ * from here") and it is the same hoist U4 did for `instantLabel` and
+ * `termLabel`. The reasoning, the timezone argument and the residue about the
+ * demo clock all travelled with it; read it there.
  *
- * Everything else here *renders* an instant and never computes with one, which
- * is `src/app/instant.ts`'s rule and KTD5's. This is the exception and it is a
- * narrow one: `POST …/shift-rooms` has **no server-side defaults** — the
- * controller's `@term_fields` is `~w(starts_at ends_at)` with no `Map.put_new`,
- * unlike the invitation's three — because a shift *is* a term somebody chose.
- *
- * `HospitalityComs.Clock.Offset` moves what the server thinks *now* is. It does
- * not move the mapping from "18:00 on 9 March" to the instant that names, which
- * is all this does. Nothing here reads `Date.now()` and nothing compares.
- *
- * **The reader's zone is the right one and the only available one.** A
- * `datetime-local` value carries no offset, and `new Date` reads a date-*time*
- * form without one as local — which is what the manager meant, since they are
- * standing in the venue. `venues` carries a timezone the client never sees.
- *
- * **The `null` prevents a throw, not a bad request.**
- * `new Date("tonight").toISOString()` raises `RangeError`, so without this a
- * non-conforming input would take an exception out of a submit handler rather
- * than leaving a form that will not submit.
- *
- * **Residue, on the record:** a manager creating "tonight's shift" while the
- * demo holds the server's clock a month ahead creates a shift in the server's
- * past. That is inherent to a form taking explicit instants; the alternative is
- * this client computing a term from its own clock, which is the thing KTD-E5
- * exists to forbid.
+ * The re-export is what keeps this surface's imports unchanged, exactly as
+ * `room.ts` does for the two labels.
  */
-export function instantFromLocal(value: string): string | null {
-  const instant = new Date(value);
-
-  return Number.isNaN(instant.getTime()) ? null : instant.toISOString();
-}
+export { instantFromLocal };

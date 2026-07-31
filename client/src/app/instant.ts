@@ -146,3 +146,143 @@ export function termLabel(startsAt: string, endsAt: string): string {
 
   return `${DAY_AND_TIME.format(start)}–${sameDay ? TIME_ONLY.format(end) : DAY_AND_TIME.format(end)}`;
 }
+
+/**
+ * The instant a `datetime-local` value names, or `null` if it names none.
+ *
+ * ## Hoisted from `features/employer/employer.ts`, under this file's own rule
+ *
+ * U4 wrote it there because U4 was its only caller. #82 gave it a second one on
+ * the profile surface, which is the situation this module's header describes
+ * for `instantLabel` and `termLabel` — *"new callers import from here"* — so it
+ * moved rather than being copied. `employer.ts` re-exports it, exactly as
+ * `room.ts` re-exports the two labels, and the employer surface is unchanged.
+ *
+ * ## This and `instantFromLocalDate` are the only places this client produces an instant
+ *
+ * Everything else here *renders* one and never computes with one, which is this
+ * file's rule and KTD5's. Both exceptions are narrow: a shift and a declared
+ * entry are terms somebody chose, and `POST …/shift-rooms` has no server-side
+ * defaults — `@term_fields` is `~w(starts_at ends_at)` with no `Map.put_new`,
+ * unlike the invitation's three.
+ *
+ * `HospitalityComs.Clock.Offset` moves what the server thinks *now* is. It does
+ * not move the mapping from "18:00 on 9 March" to the instant that names, which
+ * is all this does. Nothing here reads `Date.now()` and nothing compares.
+ *
+ * **The reader's zone is the right one and the only available one.** A
+ * `datetime-local` value carries no offset, and `new Date` reads a date-*time*
+ * form without one as local — which is what the manager meant, since they are
+ * standing in the venue. `venues` carries a timezone the client never sees.
+ *
+ * **The `null` prevents a throw, not a bad request.**
+ * `new Date("tonight").toISOString()` raises `RangeError`, so without this a
+ * non-conforming input would take an exception out of a submit handler rather
+ * than leaving a form that will not submit.
+ *
+ * **Residue, on the record:** a manager creating "tonight's shift" while the
+ * demo holds the server's clock a month ahead creates a shift in the server's
+ * past. That is inherent to a form taking explicit instants; the alternative is
+ * this client computing a term from its own clock, which is the thing KTD-E5
+ * exists to forbid.
+ */
+export function instantFromLocal(value: string): string | null {
+  const instant = new Date(value);
+
+  return Number.isNaN(instant.getTime()) ? null : instant.toISOString();
+}
+
+/**
+ * The instant that starts a chosen day, in the reader's zone — or `null` if the
+ * value does not name a real day.
+ *
+ * ## `T00:00` is load-bearing, and leaving it off is silent
+ *
+ * A date-*only* string is parsed as **UTC** by the ECMAScript grammar, while a
+ * date-*time* string carrying no offset is parsed as **local**:
+ *
+ *     new Date("2024-03-01")        // 2024-03-01T00:00:00.000Z, everywhere
+ *     new Date("2024-03-01T00:00")  // 2024-03-01T05:00:00.000Z in New York
+ *
+ * So the obvious `new Date(value).toISOString()` answers the same instant for
+ * every reader on earth, which is wrong for all but one of them — and wrong in
+ * the direction that files a declared job under the *previous* day for anybody
+ * east of UTC. Appending the time is what asks the question in the zone the
+ * person choosing the day is standing in.
+ *
+ * ## The round trip is the whole of the validation, and a regex was not
+ *
+ * `new Date("2024-02-31T00:00")` is **not** `Invalid Date` — V8's lenient
+ * parser rolls it forward to 2 March, so a `NaN` check alone answers an instant
+ * two days from the one asked for. And an explicit `^\d{4}-\d{2}-\d{2}$`
+ * guard stood here until review measured it: **it killed nothing**, because
+ * every value it was written to refuse is refused anyway — a `datetime-local`
+ * value becomes `"…T09:00T00:00"`, which really is `Invalid Date`, and
+ * `2024-3-1` reads back as `2024-03-01` and fails the comparison.
+ *
+ * So the check is: build the instant, read the day back out of it, and refuse
+ * unless it is the day that went in. One rule, stated where it can be enforced.
+ *
+ * Safe on the day it looks unsafe — a DST spring-forward *at* midnight, where
+ * local midnight does not exist, JS resolves it to 01:00 and the calendar day
+ * is preserved. **Not** safe on the 23 (zone, day) pairs in the whole tz
+ * database where the *entire* midnight hour is skipped across a date line
+ * change: there this answers `null` and the form treats the day as unfilled.
+ * Recorded rather than handled; nothing in this product reaches 1994 Kiritimati.
+ */
+export function startOfLocalDate(value: string): string | null {
+  return localDateAt(value, "00:00:00");
+}
+
+/**
+ * The instant that **ends** a chosen day, in the reader's zone.
+ *
+ * ## Without this a one-day job could not be written at all
+ *
+ * `declared_entries_term_ordered` and `DeclaredEntry.validate_term/1` both
+ * require `ends_at` strictly after `starts_at`. With both bounds converting to
+ * the *start* of their day — which is what this unit shipped first, and what
+ * its brief reasoned to without considering equality — a worker choosing the
+ * same day twice produced two identical instants and the write was refused
+ * with "must be after the start". A one-day gig is an ordinary thing in
+ * hospitality, so that is a real hole rather than an edge.
+ *
+ * 23:59:59 rather than the next day's midnight, which is the other way to close
+ * it: this column is compared against nothing — no exclusion constraint, no
+ * overlap rule — so there is no half-open interval to honour, and end-of-day
+ * keeps `localDateFromInstant` an exact inverse of *both* directions. Next
+ * midnight would read back as the following day and the amend form would show a
+ * date the worker never picked.
+ *
+ * Seconds rather than milliseconds because the column is `:utc_datetime`, which
+ * is second-precision; a `.999` would be truncated on the way in and the row
+ * would come back differing from what was sent.
+ */
+export function endOfLocalDate(value: string): string | null {
+  return localDateAt(value, "23:59:59");
+}
+
+/**
+ * Both of the above: a chosen day plus a wall-clock time within it, as an
+ * instant, refusing anything that does not read back as the same day.
+ */
+function localDateAt(value: string, time: string): string | null {
+  const instant = new Date(`${value}T${time}`);
+
+  if (Number.isNaN(instant.getTime())) return null;
+
+  const iso = instant.toISOString();
+
+  return localDateFromInstant(iso) === value ? iso : null;
+}
+
+export function localDateFromInstant(value: string): string {
+  const instant = new Date(value);
+
+  if (Number.isNaN(instant.getTime())) return "";
+
+  const month = String(instant.getMonth() + 1).padStart(2, "0");
+  const day = String(instant.getDate()).padStart(2, "0");
+
+  return `${instant.getFullYear().toString()}-${month}-${day}`;
+}

@@ -76,6 +76,13 @@
 
 import { useId, useState } from "react";
 
+import {
+  endOfLocalDate,
+  localDateFromInstant,
+  startOfLocalDate,
+  termLabel,
+} from "../../app/instant";
+
 import { useSession } from "../../session/session-context";
 import type {
   AttestedEntry,
@@ -102,6 +109,7 @@ import { noticeMessage, refusalMessage } from "./refusal-message";
 import type {
   DeclaredEntryDraft,
   ProfileConnection,
+  ProfileOutcome,
   ProfileSurface,
 } from "./use-profile-surface";
 import { useProfileSurface } from "./use-profile-surface";
@@ -231,6 +239,21 @@ export function FieldMessages({
   );
 }
 
+/**
+ * A term, rendered the way every other term in this client is.
+ *
+ * **It printed the raw ISO instants until #82's review**, which is how F1 was
+ * found: a worker east of UTC chose 1 January, the conversion correctly stored
+ * `2023-12-31T23:00:00.000Z`, and the list under the form showed that string —
+ * so the entry they had just written was listed under the previous day, in a
+ * spelling nobody reads, beside an amend form showing the date they picked.
+ * `instant.ts` and this unit's brief both claimed `termLabel` closed that round
+ * trip; this file imported neither it nor `instantLabel`.
+ *
+ * One `<time>` rather than two, because `termLabel` composes the pair and
+ * writes the end's day only when the term crosses one. `dateTime` carries the
+ * start for a machine; the text is for the person.
+ */
 function Term({
   startsAt,
   endsAt,
@@ -240,8 +263,7 @@ function Term({
 }) {
   return (
     <span>
-      <time dateTime={startsAt}>{startsAt}</time> to{" "}
-      <time dateTime={endsAt}>{endsAt}</time>
+      <time dateTime={startsAt}>{termLabel(startsAt, endsAt)}</time>
     </span>
   );
 }
@@ -749,6 +771,48 @@ const EMPTY_DRAFT: DeclaredEntryDraft = {
 };
 
 /**
+ * A draft as the form's own controls hold it: the two instants become the days
+ * they fall on, because `type="date"` speaks days.
+ *
+ * ## The two shapes are the same type, and a brand was tried and rejected
+ *
+ * `DeclaredEntryDraft`'s `startsAt`/`endsAt` are ISO instants — that is what
+ * `declare_entry` takes — while these are `YYYY-MM-DD`. Both are `string`, so
+ * only `submit`'s conversion stops a day reaching the wire, which is the bug
+ * #82 exists to fix. Review raised that as a maintainability risk and it is a
+ * fair one.
+ *
+ * A branded day type was written to close it and **kills zero**: TypeScript's
+ * excess-property check applies to object *literals*, not variables, so a
+ * structurally wider `{…, __days: true}` is freely assignable to the narrower
+ * `DeclaredEntryDraft` and `onSubmit(days)` still compiles. Measured, not
+ * assumed. Branding the day is the wrong end — what would work is branding the
+ * *instant*, so a bare `string` stops being assignable to it, and that means
+ * changing a type the whole profile surface and `contract.ts` share for the
+ * sake of one call site.
+ *
+ * So the guard here is the conversion plus the test that kills its removal, and
+ * the alternative is written down rather than left for somebody to re-derive.
+ *
+ * **The conversion is what makes amending work at all.** A date input handed
+ * `2024-03-01T00:00:00.000Z` renders **blank** and says nothing, so without
+ * this the change form would open with two empty date fields over an entry that
+ * has dates, and saving would then be refused for the fields being empty.
+ *
+ * `localDateFromInstant` answers `""` for anything it cannot parse, which is
+ * the same value an untouched control holds — so a malformed stored instant
+ * degrades to "not filled in yet" rather than to a React warning about a
+ * controlled input.
+ */
+function localDays(draft: DeclaredEntryDraft): DeclaredEntryDraft {
+  return {
+    ...draft,
+    startsAt: localDateFromInstant(draft.startsAt),
+    endsAt: localDateFromInstant(draft.endsAt),
+  };
+}
+
+/**
  * One form for writing an entry and for changing one.
  *
  * Nothing is validated here beyond "not blank". The rules — a label at most 120
@@ -787,23 +851,52 @@ function DeclaredEntryForm({
   readonly fieldPrefix: string;
   readonly submitLabel: string;
   readonly initial?: DeclaredEntryDraft;
-  readonly onSubmit: (draft: DeclaredEntryDraft) => Promise<{ readonly status: string }>;
+  readonly onSubmit: (draft: DeclaredEntryDraft) => Promise<ProfileOutcome<unknown>>;
 }) {
-  const [draft, setDraft] = useState<DeclaredEntryDraft>(initial);
+  // **Days here, instants on the wire** (#82). The two are different types and
+  // this is the boundary: `type="date"` speaks `YYYY-MM-DD` and `starts_at` is
+  // an Ecto `:utc_datetime`, so the draft below holds what the control holds
+  // and `submit` widens it. Before this the boxes were bare text and whatever
+  // was typed went straight to the server, which refused every value a person
+  // would actually write — `2024-03-01` included — and the entry was never
+  // created. See `instantFromLocalDate` for why the reader's zone is the right
+  // one and why leaving the time off would be silently wrong.
+  const [days, setDays] = useState(() => localDays(initial));
   const [saving, setSaving] = useState(false);
 
+  // **The two bounds are not converted the same way, and that is #82's review
+  // finding F3.** Both used to become the *start* of their day, so a worker who
+  // worked somewhere for one day chose the same date twice, produced two
+  // identical instants, and was refused by `declared_entries_term_ordered` —
+  // "must be after the start", about two dates they picked deliberately. A
+  // one-day gig is ordinary in hospitality. See `endOfLocalDate`.
+  const startsAt = startOfLocalDate(days.startsAt);
+  const endsAt = endOfLocalDate(days.endsAt);
+
+  // A day the control has not been given yet is `""`, which is what keeps the
+  // button disabled. It is the same guard as before, moved off the instants —
+  // they cannot be judged for blankness, only for being unconvertible.
   const incomplete =
-    draft.roleLabel.trim() === "" ||
-    draft.organisationName.trim() === "" ||
-    draft.startsAt.trim() === "" ||
-    draft.endsAt.trim() === "";
+    days.roleLabel.trim() === "" ||
+    days.organisationName.trim() === "" ||
+    startsAt === null ||
+    endsAt === null;
 
   async function submit(): Promise<void> {
+    if (startsAt === null || endsAt === null) return;
+
     setSaving(true);
-    const outcome = await onSubmit(draft);
+    const outcome = await onSubmit({
+      roleLabel: days.roleLabel,
+      organisationName: days.organisationName,
+      startsAt,
+      endsAt,
+    });
     setSaving(false);
 
-    if (outcome.status === "ok" && initial === EMPTY_DRAFT) setDraft(EMPTY_DRAFT);
+    if (outcome.status === "ok" && initial === EMPTY_DRAFT) {
+      setDays(localDays(EMPTY_DRAFT));
+    }
   }
 
   return (
@@ -813,36 +906,38 @@ function DeclaredEntryForm({
       <label htmlFor={`${fieldPrefix}-role`}>What you did</label>
       <input
         id={`${fieldPrefix}-role`}
-        value={draft.roleLabel}
+        value={days.roleLabel}
         onChange={(event) => {
-          setDraft((current) => ({ ...current, roleLabel: event.target.value }));
+          setDays((current) => ({ ...current, roleLabel: event.target.value }));
         }}
       />
 
       <label htmlFor={`${fieldPrefix}-organisation`}>Where</label>
       <input
         id={`${fieldPrefix}-organisation`}
-        value={draft.organisationName}
+        value={days.organisationName}
         onChange={(event) => {
-          setDraft((current) => ({ ...current, organisationName: event.target.value }));
+          setDays((current) => ({ ...current, organisationName: event.target.value }));
         }}
       />
 
       <label htmlFor={`${fieldPrefix}-starts`}>From</label>
       <input
         id={`${fieldPrefix}-starts`}
-        value={draft.startsAt}
+        type="date"
+        value={days.startsAt}
         onChange={(event) => {
-          setDraft((current) => ({ ...current, startsAt: event.target.value }));
+          setDays((current) => ({ ...current, startsAt: event.target.value }));
         }}
       />
 
       <label htmlFor={`${fieldPrefix}-ends`}>Until</label>
       <input
         id={`${fieldPrefix}-ends`}
-        value={draft.endsAt}
+        type="date"
+        value={days.endsAt}
         onChange={(event) => {
-          setDraft((current) => ({ ...current, endsAt: event.target.value }));
+          setDays((current) => ({ ...current, endsAt: event.target.value }));
         }}
       />
 

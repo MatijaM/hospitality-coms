@@ -178,6 +178,21 @@ describe("creating a shift", () => {
     renderEmployer(bodies(), write);
 
     await chooseHarbour();
+
+    // **The control on both fields, and it was a gap until #82's review found
+    // it.** Measured: turning both `type="datetime-local"` into `type="text"`
+    // kills **nothing** in this file — jsdom's text input accepts
+    // `2026-03-09T21:00` as readily as a date-time one does, so every payload
+    // assertion below still passes against two bare boxes. What the control
+    // buys is a manager not having to guess a format, which is a claim about a
+    // human rather than a DOM, so the attribute is the assertion.
+    //
+    // The same hole was open on the profile surface's declared-entry form and
+    // is what `profile-route.test.tsx` closes there. This file's comment used
+    // to be cited as the precedent for that; it is one now.
+    expect(screen.getByLabelText("Starts")).toHaveAttribute("type", "datetime-local");
+    expect(screen.getByLabelText("Ends")).toHaveAttribute("type", "datetime-local");
+
     await fillShiftForm("Close");
     await userEvent.click(screen.getByRole("button", { name: /create this shift/i }));
 
