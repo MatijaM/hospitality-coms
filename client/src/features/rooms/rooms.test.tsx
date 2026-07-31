@@ -833,53 +833,25 @@ describe("messages", () => {
   });
 });
 
+/**
+ * **Three tests were deleted from here by #80 rather than rewritten**, and the
+ * accounting is here because a deletion that leaves no note reads the same as
+ * one that lost coverage.
+ *
+ * They drove the paste box: it added a room by its id, it lowercased what was
+ * typed, and it refused a non-id with an alert. All three asserted a rule that
+ * still holds, and every one of those rules is still pinned — one layer down,
+ * at the layer where it now lives. `room.test.ts` holds `normaliseRoomId`'s
+ * lowercasing with the whole `Phoenix.PubSub` argument and the resulting topic
+ * string asserted, and its refusal of a near miss; `room-store.test.ts` holds
+ * both again at the decoder, which #80 left as the **only** untrusted way an id
+ * reaches a topic.
+ *
+ * What genuinely went with the form is the alert — "That is not an id" — and
+ * nothing replaces it, because nothing asks for an id. A rejected entry in the
+ * stored list is dropped silently and correctly: it is not somebody's typo.
+ */
 describe("the list itself", () => {
-  it("adds a room by its id and opens it", async () => {
-    const { socket, store } = renderRooms([]);
-
-    await userEvent.type(await screen.findByLabelText(/^id$/i), VENUE_ID);
-    await userEvent.click(screen.getByRole("button", { name: /add this room/i }));
-
-    await waitFor(() => {
-      expect(socket.channelFor(roomTopic(venueRoom))).toBeDefined();
-    });
-    expect(store.read()).toEqual([entry(venueRoom, null)]);
-  });
-
-  it("lowercases an id, because the topic string is what PubSub broadcasts on", async () => {
-    // Postgres casts both cases to the same uuid, so two sessions naming one
-    // room in different cases read and write the same rows — but
-    // `Phoenix.PubSub` broadcasts on the **literal topic string**, so they
-    // would sit in one database room and see none of each other's messages.
-    //
-    // The id has to carry hex *letters* for this to test anything; the other
-    // ids in this file are all digits, where `toUpperCase()` is a no-op.
-    const lower = "a1a1a1a1-b2b2-4c3c-8d4d-e5e5e5e5e5e5";
-    const { socket, store } = renderRooms([]);
-
-    await userEvent.type(await screen.findByLabelText(/^id$/i), lower.toUpperCase());
-    await userEvent.click(screen.getByRole("button", { name: /add this room/i }));
-
-    await waitFor(() => {
-      expect(socket.channelFor(`venue_room:${lower}`)).toBeDefined();
-    });
-    expect(store.read()).toEqual([entry({ kind: "venue", id: lower }, null)]);
-  });
-
-  it("refuses an id that is not one, rather than putting it on a socket", async () => {
-    // The server answers a malformed suffix exactly as it answers an unknown
-    // room, so it can say nothing useful about somebody's own typo.
-    const { socket } = renderRooms([]);
-
-    await userEvent.type(await screen.findByLabelText(/^id$/i), "not-an-id");
-    await userEvent.click(screen.getByRole("button", { name: /add this room/i }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /should look like a uuid/i,
-    );
-    expect(socket.channels).toHaveLength(0);
-  });
-
   it("offers one control per row, and it is the one that opens the room", async () => {
     // There was a "Forget" beside every "Open". It went, and the list is
     // bounded instead — `room-store.test.ts` holds the eviction.

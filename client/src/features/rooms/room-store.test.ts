@@ -272,12 +272,13 @@ describe("what survives a reload", () => {
     }
   });
 
-  it("holds the same rule about ids that the form does", () => {
-    // `AddRoomForm` requires a uuid; this path took any string at all. Two
-    // paths disagreeing about one rule means the loose one is reachable — a
-    // list written by an older build, or edited by hand in devtools — and it
-    // ends up as a topic suffix the server can only answer with the same
-    // refusal it gives an unknown room.
+  it("is the only place an id is checked before it becomes a topic", () => {
+    // It used to be the looser of a pair: the paste box required a uuid and
+    // this took any string at all, so the reachable path was the wrong one — a
+    // list written by an older build, or edited by hand in devtools, ending up
+    // as a topic suffix the server can only answer with the same refusal it
+    // gives an unknown room. #80 removed the box, which leaves this as the sole
+    // check rather than the weaker of two.
     expect(decodeRoomEntries([{ kind: "venue", id: "not-an-id" }])).toBeNull();
 
     // Carries hex letters on purpose: the other ids here are all digits, where

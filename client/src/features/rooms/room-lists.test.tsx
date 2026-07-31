@@ -183,9 +183,10 @@ describe("the list of venue rooms", () => {
   });
 
   it("opens a browsed room on the topic PersonSocket routes, and keeps it locally", async () => {
-    // A browsed room and a pasted one take the same path into a channel, and
-    // the browsed one enters the local list so that `barred` and the reload
-    // survival apply to it too.
+    // A browsed room enters the local list, so that `barred` and the reload
+    // survival apply to it too. It used to say "a browsed room and a pasted one
+    // take the same path into a channel", which since #80 is a claim about one
+    // path and one entry point.
     const { socket } = renderRooms({
       [VENUE_ROOMS]: twoVenueRooms,
       [VENUE_HISTORY]: { messages: [], complete: true },
@@ -409,6 +410,111 @@ describe("what a recently-opened row is called", () => {
 
     expect(within(recent).getByRole("button", { name: /open kitchen/i })).toBeVisible();
     expect(recent.textContent).not.toContain(SHIFT_ROOM_ID);
+  });
+});
+
+/**
+ * #80, and it is the presence test for the paste box inverted rather than
+ * deleted — #68's manoeuvre, for the reason #74 gives about the peer lookup: a
+ * uuid box removed with nothing asserting it gone comes back on the next
+ * careless paste with nothing to say so.
+ *
+ * **The roles and the element ids catch different mutants, and that was
+ * measured rather than assumed.** The first draft of this comment claimed
+ * `queryByRole("textbox")` was the assertion that fails against the wrong fix —
+ * the form styled away rather than deleted. It is not: `hidden` takes an
+ * element out of the accessibility tree, so Testing Library stops finding it by
+ * role and every role assertion here passes. Measured with the form put back
+ * and one `hidden` added — the surviving assertions are the two
+ * `getElementById` calls, either of which catches it on its own. Reproduced
+ * independently in review, which also named the mechanism: Testing Library's
+ * `isSubtreeInaccessible` reads `element.hidden === true` directly, so this
+ * holds regardless of whether jsdom applies any CSS.
+ *
+ * Both halves therefore stay, against two different wrong fixes. A form hidden
+ * off-screen — `position: absolute; left: -9999px`, the shape that keeps it
+ * reachable by a screen reader and invisible to everybody else, which is the
+ * whole argument for deleting rather than hiding — is still in the tree and is
+ * what the roles catch. A form hidden any other way, or rebuilt without labels
+ * so it has no roles worth querying, keeps its ids.
+ */
+describe("what the rooms surface does not ask anybody to type", () => {
+  it("has no way into a room that is not one of the two lists", async () => {
+    // **The controls are mandatory and come first.** Both lists have to be on
+    // screen with rows in them, because every absence below passes against a
+    // surface that rendered nothing — which is what a failed `read` produces
+    // on this very screen, and is the shape this project has shipped five
+    // times.
+    renderRooms(
+      { [VENUE_ROOMS]: twoVenueRooms, [SHIFT_ROOMS]: oneShiftRoom },
+      undefined,
+      [{ ref: { kind: "venue", id: VENUE_ID }, barred: null, name: "The Anchor" }],
+    );
+
+    const browse = await screen.findByRole("list", { name: /venue rooms/i });
+    const recent = await screen.findByRole("list", { name: /recently opened chats/i });
+
+    expect(within(browse).getByText("The Anchor")).toBeVisible();
+    expect(
+      within(recent).getByRole("button", { name: /open the anchor/i }),
+    ).toBeVisible();
+
+    // The venue is expanded too, so the shift-room half of the browse list is
+    // standing as well: it is the half a paste box would be defended as the way
+    // past, and asserting the absence with it collapsed would leave "the box is
+    // gone" and "the surface never opened" the same green.
+    await userEvent.click(
+      await screen.findByRole("button", { name: /shift rooms at the anchor/i }),
+    );
+    expect(
+      within(
+        await screen.findByRole("list", { name: /shift rooms at the anchor/i }),
+      ).getByRole("button", { name: /open kitchen/i }),
+    ).toBeVisible();
+
+    // And now the form, by each route it had onto the page.
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /add this room/i }),
+    ).not.toBeInTheDocument();
+    expect(document.getElementById("room-id")).toBeNull();
+    expect(document.getElementById("room-kind")).toBeNull();
+  });
+
+  /**
+   * The empty-state sentence, which is a **second render** and was a bug the
+   * first time it was written.
+   *
+   * It began as one more line at the end of the test above —
+   * `expect(document.body.textContent).not.toContain("add one by its id")` —
+   * under a comment citing #74's regex that never matched what the heading
+   * rendered. Review measured it and it was the same class: that test seeds a
+   * recent-list entry, because the entry is its control, and `RoomList` renders
+   * the empty-state paragraph only when `entries.length === 0`. So the sentence
+   * was absent whichever words it held. Restoring the old copy in
+   * `rooms-route.tsx` left it green while turning **seven** tests red in
+   * `app.test.tsx`.
+   *
+   * The fix is the empty list, which is the state the sentence exists for. That
+   * also closes the gap the vacuous line was hiding: until now nothing inside
+   * the rooms feature pinned this copy at all — only `app.test.tsx`'s
+   * cross-feature sentinel, where a change to it reads as the tab strip
+   * breaking.
+   */
+  it("points an empty list at the lists above, and nowhere else", async () => {
+    renderRooms({ [VENUE_ROOMS]: twoVenueRooms });
+
+    // The control: the panel is up and populated, so "no paste box offered" is
+    // distinguishable from "nothing rendered".
+    expect(
+      within(await screen.findByRole("list", { name: /venue rooms/i })).getByText(
+        "The Anchor",
+      ),
+    ).toBeVisible();
+
+    expect(screen.getByText("No rooms yet. Open one from the list above.")).toBeVisible();
+    expect(document.body.textContent).not.toContain("add one by its id");
   });
 });
 

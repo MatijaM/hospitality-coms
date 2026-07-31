@@ -164,7 +164,11 @@ describe("what may be a topic suffix", () => {
     );
   });
 
-  it("trims, so a paste with a stray space is still an id", () => {
+  // Written when a worker pasted ids into a box, and kept now that #80 has
+  // taken the box away: the stored list is decoded through this same function,
+  // and a list written by an older build or edited by hand in devtools is where
+  // a stray space arrives from now.
+  it("trims, so a stray space around an id is still an id", () => {
     expect(normaliseRoomId(`  ${ID}\n`)).toBe(ID);
   });
 
