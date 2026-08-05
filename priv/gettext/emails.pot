@@ -1,0 +1,47 @@
+## This file is a PO Template file.
+##
+## "msgid"s here are often extracted from source code.
+## Add new messages manually only if they're dynamic
+## messages that can't be statically extracted.
+##
+## Run "mix gettext.extract" to bring this file up to
+## date. Leave "msgstr"s empty as changing them here has no
+## effect: edit them in PO (.po) files instead.
+#
+msgid ""
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:37
+#, elixir-autogen, elixir-format
+msgid "\n==============================\n\nHi %{email},\n\nYou can change your email by visiting the URL below:\n\n%{url}\n\nIf you didn't request this change, please ignore this.\n\n==============================\n"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:103
+#, elixir-autogen, elixir-format
+msgid "\n==============================\n\nHi %{email},\n\nYou can confirm your account by visiting the URL below:\n\n%{url}\n\nIf you didn't create an account with us, please ignore this.\n\n==============================\n"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:76
+#, elixir-autogen, elixir-format
+msgid "\n==============================\n\nHi %{email},\n\nYou can log into your account by visiting the URL below:\n\n%{url}\n\nIf you didn't request this email, please ignore this.\n\n==============================\n"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:102
+#, elixir-autogen, elixir-format
+msgid "Confirmation instructions"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:135
+#, elixir-autogen, elixir-format
+msgid "Hospitality Coms"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:75
+#, elixir-autogen, elixir-format
+msgid "Log in instructions"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:36
+#, elixir-autogen, elixir-format
+msgid "Update email instructions"
+msgstr ""

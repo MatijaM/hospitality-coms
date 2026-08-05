@@ -33,21 +33,43 @@ defmodule HospitalityComs.RuntimeConfigTest do
   }
 
   @required Map.merge(@credentials, %{
-              "MAGIC_LINK_BASE_URL" => "https://app.example/log-in/",
+              "MAGIC_LINK_BASE_URLS" =>
+                "en=https://app.example/log-in/,sr-Latn=https://app.example.rs/log-in/",
               "WEBSOCKET_ORIGINS" => "https://app.example"
             })
 
   describe "the production block" do
-    test "refuses to boot without a magic link base url" do
-      assert_raise RuntimeError, ~r/MAGIC_LINK_BASE_URL/, fn ->
-        @required |> Map.delete("MAGIC_LINK_BASE_URL") |> read_prod()
+    test "refuses to boot without magic link base urls" do
+      assert_raise RuntimeError, ~r/MAGIC_LINK_BASE_URLS/, fn ->
+        @required |> Map.delete("MAGIC_LINK_BASE_URLS") |> read_prod()
       end
     end
 
-    test "takes the magic link base url from the environment" do
+    test "takes one magic link base url per locale from the environment" do
       config = read_prod(@required)
 
-      assert config[:hospitality_coms][:magic_link_base_url] == "https://app.example/log-in/"
+      assert config[:hospitality_coms][:magic_link_base_urls] == %{
+               "en" => "https://app.example/log-in/",
+               "sr-Latn" => "https://app.example.rs/log-in/"
+             }
+    end
+
+    test "refuses to boot when a locale has no prefix" do
+      # The failure this replaces is a raise inside a request, for whichever
+      # domain nobody tested — so it is caught at boot and names the locale.
+      assert_raise RuntimeError, ~r/sr-Latn/, fn ->
+        @required
+        |> Map.put("MAGIC_LINK_BASE_URLS", "en=https://app.example/log-in/")
+        |> read_prod()
+      end
+    end
+
+    test "refuses an entry that is not a locale=prefix pair" do
+      assert_raise RuntimeError, ~r/locale=prefix/, fn ->
+        @required
+        |> Map.put("MAGIC_LINK_BASE_URLS", "en=https://app.example/log-in/,nonsense")
+        |> read_prod()
+      end
     end
 
     test "still refuses to boot without a secret key base" do
@@ -144,7 +166,7 @@ defmodule HospitalityComs.RuntimeConfigTest do
   test "leaves the development default alone" do
     config = read_env(:dev, %{})
 
-    refute Keyword.has_key?(config[:hospitality_coms] || [], :magic_link_base_url)
+    refute Keyword.has_key?(config[:hospitality_coms] || [], :magic_link_base_urls)
   end
 
   defp read_prod(env), do: read_env(:prod, env)

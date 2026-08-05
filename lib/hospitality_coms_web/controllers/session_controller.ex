@@ -42,9 +42,12 @@ defmodule HospitalityComsWeb.SessionController do
   @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def create(conn, %{"email" => email}) when is_binary(email) do
     %PersonScope{} = scope = conn.assigns.current_scope
+    locale = conn.assigns.locale
 
     conn
-    |> deliver_or_reject(Accounts.request_login_instructions(scope, email, &magic_link_url/1))
+    |> deliver_or_reject(
+      Accounts.request_login_instructions(scope, email, &magic_link_url(&1, locale))
+    )
   end
 
   def create(conn, _params), do: reject(conn, :bad_request, "email is required")
@@ -144,8 +147,25 @@ defmodule HospitalityComsWeb.SessionController do
   # surface is going to redeem it — the React client in U12, and nothing at all
   # today. It is configuration rather than a route because this application no
   # longer serves a page for it.
-  @spec magic_link_url(String.t()) :: String.t()
-  defp magic_link_url(encoded_token) do
-    Application.fetch_env!(:hospitality_coms, :magic_link_base_url) <> encoded_token
+  # The link points back at the domain the request came from, which is the whole
+  # of why this takes a locale.
+  #
+  # Without it a person who asked from the Serbian domain would read a Serbian
+  # email, follow its link, and land on the English site — a worse failure than
+  # not translating the email at all, because the language they chose is
+  # visibly discarded at the moment they act on it.
+  #
+  # `Map.fetch!/2` rather than a fallback: the locale comes from
+  # `HospitalityComsWeb.Locale`, so it is always one the mapping named, and a
+  # configuration missing an entry for it is a deployment error that should say
+  # so rather than mail everybody to the default domain.
+  @spec magic_link_url(String.t(), String.t()) :: String.t()
+  defp magic_link_url(encoded_token, locale) do
+    base =
+      :hospitality_coms
+      |> Application.fetch_env!(:magic_link_base_urls)
+      |> Map.fetch!(locale)
+
+    base <> encoded_token
   end
 end

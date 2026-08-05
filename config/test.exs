@@ -36,6 +36,18 @@ config :hospitality_coms, HospitalityComs.EmployerRepo,
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
 
+# Two prefixes that differ in host, because a fixture where they agree cannot
+# tell "the link points at the domain the request came from" from "the link
+# points at the only domain there is". Neither is a substring of the other.
+# The port is the client dev server's, and it is not decoration: one test reads
+# it back out of `client/vite.config.ts` and requires the two to agree, so that
+# the coupling between this prefix and where the client actually listens is
+# checkable across the two languages rather than left as a comment.
+config :hospitality_coms, :magic_link_base_urls, %{
+  "en" => "http://en.example.test:5173/log-in/",
+  "sr-Latn" => "http://rs.example.test:5173/log-in/"
+}
+
 # Tests assert on boundary instants rather than approximating them.
 config :hospitality_coms, clock: HospitalityComs.Clock.Offset
 

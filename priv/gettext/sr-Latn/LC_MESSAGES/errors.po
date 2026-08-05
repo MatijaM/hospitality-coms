@@ -116,10 +116,11 @@ msgstr "mora biti jednako %{number}"
 ## They are hand-maintained rather than extracted. `mix gettext.extract` reads
 ## literal `dgettext/3` calls, and the only call for this domain is in
 ## `HospitalityComsWeb.ErrorEnvelope`, where the msgid is a runtime value — the
-## message a changeset carries. So extraction cannot see these, and it does not
-## remove them either: it writes a `.pot` only for a domain it found messages
-## in, and it finds none here. Adding a validation message means adding a line
-## here and running `mix gettext.merge priv/gettext`.
+## message a changeset carries. So extraction cannot see these. It does rewrite
+## the `.pot`, and it merges rather than replaces — measured by running it after
+## these were added: all fifteen survive, unmarked and not obsoleted. Adding a
+## validation message means adding a line to the `.pot` and running
+## `mix gettext.merge priv/gettext`; nothing enforces that step.
 ##
 ## Messages that bake a bound into the string are deliberately absent. A
 ## `check_constraint/3` error carries no `count` binding — Ecto's API has

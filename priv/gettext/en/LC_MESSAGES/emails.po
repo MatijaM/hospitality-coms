@@ -1,0 +1,47 @@
+## "msgid"s in this file come from POT (.pot) files.
+###
+### Do not add, change, or remove "msgid"s manually here as
+### they're tied to the ones in the corresponding POT file
+### (with the same domain).
+###
+### Use "mix gettext.extract --merge" or "mix gettext.merge"
+### to merge POT files into PO files.
+msgid ""
+msgstr ""
+"Language: en\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:37
+#, elixir-autogen, elixir-format
+msgid "\n==============================\n\nHi %{email},\n\nYou can change your email by visiting the URL below:\n\n%{url}\n\nIf you didn't request this change, please ignore this.\n\n==============================\n"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:103
+#, elixir-autogen, elixir-format
+msgid "\n==============================\n\nHi %{email},\n\nYou can confirm your account by visiting the URL below:\n\n%{url}\n\nIf you didn't create an account with us, please ignore this.\n\n==============================\n"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:76
+#, elixir-autogen, elixir-format
+msgid "\n==============================\n\nHi %{email},\n\nYou can log into your account by visiting the URL below:\n\n%{url}\n\nIf you didn't request this email, please ignore this.\n\n==============================\n"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:102
+#, elixir-autogen, elixir-format
+msgid "Confirmation instructions"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:135
+#, elixir-autogen, elixir-format
+msgid "Hospitality Coms"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:75
+#, elixir-autogen, elixir-format
+msgid "Log in instructions"
+msgstr ""
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:36
+#, elixir-autogen, elixir-format
+msgid "Update email instructions"
+msgstr ""

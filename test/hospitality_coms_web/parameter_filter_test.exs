@@ -183,7 +183,12 @@ defmodule HospitalityComsWeb.ParameterFilterTest do
   @spec magic_link_token() :: String.t()
   defp magic_link_token do
     assert_received {:email, %Swoosh.Email{} = delivered}
-    base = Application.fetch_env!(:hospitality_coms, :magic_link_base_url)
+
+    base =
+      :hospitality_coms
+      |> Application.fetch_env!(:magic_link_base_urls)
+      |> Map.fetch!("en")
+
     [_before, rest] = String.split(delivered.text_body, base, parts: 2)
 
     rest |> String.split("\n", parts: 2) |> hd() |> String.trim()

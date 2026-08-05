@@ -32,12 +32,123 @@ defmodule HospitalityComsWeb.SessionControllerTest do
     :ok
   end
 
+  # Where a magic link points, for one locale. A map since U7: the link has to
+  # return the person to the domain they asked from, and the test config gives
+  # the two locales hosts that differ, so a fixture cannot pass by there being
+  # only one domain.
+  defp base_url(locale) do
+    :hospitality_coms
+    |> Application.fetch_env!(:magic_link_base_urls)
+    |> Map.fetch!(locale)
+  end
+
   defp magic_link_token do
     assert_received {:email, %Swoosh.Email{} = delivered}
-    base = Application.fetch_env!(:hospitality_coms, :magic_link_base_url)
+    base = base_url("en")
     [_before, rest] = String.split(delivered.text_body, base, parts: 2)
 
     rest |> String.split("\n", parts: 2) |> hd() |> String.trim()
+  end
+
+  describe "the language a magic link arrives in" do
+    # The assertions are on the delivered message rather than on the plug that
+    # set the locale. Delivery is synchronous today, which is what makes a
+    # process-scoped locale reach the notifier at all; moving it onto a job
+    # would leave the emails in English with nothing failing, and a test that
+    # checked the plug would stay green through that.
+    setup do
+      # A confirmed person, so the mail under test is the log-in one rather than
+      # the confirmation an unknown address gets. Both are translated; this is
+      # the one a returning worker actually receives.
+      person = person_fixture()
+
+      # And the fixture's own email is discarded before anything asserts.
+      # `person_fixture/0` confirms by redeeming a link, which delivers a
+      # message built with a token-bracketing URL builder — so without this
+      # every assertion below reads the fixture's email instead of the one the
+      # request under test produced, and reads it as an unlocalized
+      # confirmation.
+      flush_emails()
+
+      %{email: person.email}
+    end
+
+    defp flush_emails do
+      receive do
+        {:email, _delivered} -> flush_emails()
+      after
+        0 -> :ok
+      end
+    end
+
+    defp request_link(conn, origin, email) do
+      conn = if origin, do: put_req_header(conn, "origin", origin), else: conn
+
+      post(conn, ~p"/api/log-in", %{"email" => email})
+    end
+
+    defp delivered_email do
+      assert_received {:email, %Swoosh.Email{} = delivered}
+
+      delivered
+    end
+
+    test "a request from the Serbian domain is answered in Serbian", %{conn: conn, email: email} do
+      request_link(conn, "https://app.example.rs", email)
+      delivered = delivered_email()
+
+      assert delivered.subject == "Uputstvo za prijavu"
+      assert delivered.text_body =~ "Zdravo #{email}"
+      assert delivered.from == {"Ugostiteljske komunikacije", "contact@example.com"}
+    end
+
+    # The control. Without it, "the Serbian email is Serbian" is satisfied by a
+    # notifier that answers Serbian to everybody.
+    test "a request from the English domain is answered in English", %{conn: conn, email: email} do
+      request_link(conn, "https://app.example.com", email)
+      delivered = delivered_email()
+
+      assert delivered.subject == "Log in instructions"
+      assert delivered.text_body =~ "Hi #{email}"
+      assert delivered.from == {"Hospitality Coms", "contact@example.com"}
+    end
+
+    test "the link returns the person to the domain they asked from", %{conn: conn, email: email} do
+      request_link(conn, "https://app.example.rs", email)
+      # Read once: `assert_received` consumes the message, so a second call
+      # finds an empty mailbox rather than the same email.
+      body = delivered_email().text_body
+
+      assert body =~ base_url("sr-Latn")
+      refute body =~ base_url("en")
+    end
+
+    test "and to the other domain when they asked from there", %{conn: conn, email: email} do
+      request_link(conn, "https://app.example.com", email)
+      body = delivered_email().text_body
+
+      assert body =~ base_url("en")
+      refute body =~ base_url("sr-Latn")
+    end
+
+    test "a request with no origin uses the default locale", %{conn: conn, email: email} do
+      request_link(conn, nil, email)
+      email = delivered_email()
+
+      assert email.subject == "Log in instructions"
+      assert email.text_body =~ base_url("en")
+    end
+
+    test "the response is identical whichever domain asked", %{conn: conn, email: email} do
+      # The merged log-in door answers the same for a known and an unknown
+      # address on purpose. A locale-dependent response body would be a new
+      # enumeration oracle — one that needs no timing analysis and no mailbox.
+      serbian = request_link(conn, "https://app.example.rs", email)
+      english = request_link(conn, "https://app.example.com", email)
+
+      assert serbian.status == english.status
+      assert serbian.resp_body == english.resp_body
+    end
   end
 
   describe "where a magic link points" do
@@ -52,7 +163,7 @@ defmodule HospitalityComsWeb.SessionControllerTest do
     # cannot answer it" holds wherever the client is served from.
     test "at a path this application does not route" do
       %URI{path: path} =
-        :hospitality_coms |> Application.fetch_env!(:magic_link_base_url) |> URI.parse()
+        "en" |> base_url() |> URI.parse()
 
       assert :error =
                Phoenix.Router.route_info(Router, "GET", path <> "any-token", "localhost")
@@ -79,7 +190,7 @@ defmodule HospitalityComsWeb.SessionControllerTest do
       assert [_, client_port] = Regex.run(~r/^\s*port:\s*(\d+),/m, vite)
 
       %URI{port: link_port} =
-        :hospitality_coms |> Application.fetch_env!(:magic_link_base_url) |> URI.parse()
+        "en" |> base_url() |> URI.parse()
 
       assert link_port == String.to_integer(client_port)
     end

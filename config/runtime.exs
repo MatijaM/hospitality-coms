@@ -97,15 +97,50 @@ if config_env() == :prod do
   # production: it does not fail, it mails working-looking links to a host that
   # is not this application, and the failure surfaces on the recipient's side
   # as "the email doesn't work". So it is required here rather than defaulted.
-  magic_link_base_url =
-    System.get_env("MAGIC_LINK_BASE_URL") ||
+  #
+  # One per locale, because the link has to return the person to the domain they
+  # asked from: a Serbian email whose link lands on the English site discards
+  # the language they chose at the moment they act on it.
+  magic_link_base_urls =
+    System.get_env("MAGIC_LINK_BASE_URLS") ||
       raise """
-      environment variable MAGIC_LINK_BASE_URL is missing.
-      It is the prefix a magic link token is appended to, and it must end in a
-      slash. For example: https://app.example.com/log-in/
+      environment variable MAGIC_LINK_BASE_URLS is missing.
+      It is a comma-separated list of locale=prefix pairs, one for every locale
+      in priv/locales.json, and each prefix must end in a slash. For example:
+      en=https://app.example.com/log-in/,sr-Latn=https://app.example.rs/log-in/
       """
 
-  config :hospitality_coms, :magic_link_base_url, magic_link_base_url
+  parsed_base_urls =
+    magic_link_base_urls
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Map.new(fn pair ->
+      case String.split(pair, "=", parts: 2) do
+        [locale, url] when url != "" ->
+          {String.trim(locale), String.trim(url)}
+
+        _otherwise ->
+          raise """
+          environment variable MAGIC_LINK_BASE_URLS has an entry that is not a
+          locale=prefix pair: #{inspect(pair)}
+          """
+      end
+    end)
+
+  # Every locale, checked here rather than at the first log-in from whichever
+  # domain was forgotten. A missing entry raises inside a request otherwise, and
+  # only for the locale nobody tested.
+  missing_locales = HospitalityComs.Locales.all() -- Map.keys(parsed_base_urls)
+
+  if missing_locales != [] do
+    raise """
+    environment variable MAGIC_LINK_BASE_URLS names no prefix for #{Enum.join(missing_locales, ", ")}.
+    It must carry one for every locale in priv/locales.json: #{Enum.join(HospitalityComs.Locales.all(), ", ")}
+    """
+  end
+
+  config :hospitality_coms, :magic_link_base_urls, parsed_base_urls
 
   # Which origins may open a websocket. U7 put two sockets on this endpoint and
   # they are the first thing `:check_origin` has ever applied to here.

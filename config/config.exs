@@ -32,7 +32,17 @@ config :hospitality_coms, :scopes,
 # `/log-in/:token` — so the link 404s and the only way in is to retype the host.
 # It read as the obvious default for four units, because the port the server
 # announces at boot is the one nothing about this value refers to.
-config :hospitality_coms, :magic_link_base_url, "http://localhost:5173/log-in/"
+# Where a magic link points, per locale.
+#
+# A map rather than a string, and the key is plural, so a deployment carrying
+# the old single value fails at boot with `magic_link_base_urls` missing rather
+# than mailing a map's `inspect/1` to somebody. In development both locales are
+# the one dev server; in production they are two domains, which is the whole
+# point — a person who asked from the Serbian domain has to land back on it.
+config :hospitality_coms, :magic_link_base_urls, %{
+  "en" => "http://localhost:5173/log-in/",
+  "sr-Latn" => "http://localhost:5173/log-in/"
+}
 
 # How many plural forms a locale has, and which one a count takes.
 #

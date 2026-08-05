@@ -1,0 +1,47 @@
+## "msgid"s in this file come from POT (.pot) files.
+###
+### Do not add, change, or remove "msgid"s manually here as
+### they're tied to the ones in the corresponding POT file
+### (with the same domain).
+###
+### Use "mix gettext.extract --merge" or "mix gettext.merge"
+### to merge POT files into PO files.
+msgid ""
+msgstr ""
+"Language: sr-Latn\n"
+"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:37
+#, elixir-autogen, elixir-format
+msgid "\n==============================\n\nHi %{email},\n\nYou can change your email by visiting the URL below:\n\n%{url}\n\nIf you didn't request this change, please ignore this.\n\n==============================\n"
+msgstr "\n==============================\n\nZdravo %{email},\n\nSvoju imejl adresu možete promeniti na sledećoj adresi:\n\n%{url}\n\nAko niste tražili ovu promenu, slobodno zanemarite ovu poruku.\n\n==============================\n"
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:103
+#, elixir-autogen, elixir-format
+msgid "\n==============================\n\nHi %{email},\n\nYou can confirm your account by visiting the URL below:\n\n%{url}\n\nIf you didn't create an account with us, please ignore this.\n\n==============================\n"
+msgstr "\n==============================\n\nZdravo %{email},\n\nSvoj nalog možete potvrditi na sledećoj adresi:\n\n%{url}\n\nAko niste otvorili nalog kod nas, slobodno zanemarite ovu poruku.\n\n==============================\n"
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:76
+#, elixir-autogen, elixir-format
+msgid "\n==============================\n\nHi %{email},\n\nYou can log into your account by visiting the URL below:\n\n%{url}\n\nIf you didn't request this email, please ignore this.\n\n==============================\n"
+msgstr "\n==============================\n\nZdravo %{email},\n\nNa svoj nalog možete se prijaviti na sledećoj adresi:\n\n%{url}\n\nAko niste tražili ovu poruku, slobodno je zanemarite.\n\n==============================\n"
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:102
+#, elixir-autogen, elixir-format
+msgid "Confirmation instructions"
+msgstr "Uputstvo za potvrdu naloga"
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:135
+#, elixir-autogen, elixir-format
+msgid "Hospitality Coms"
+msgstr "Ugostiteljske komunikacije"
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:75
+#, elixir-autogen, elixir-format
+msgid "Log in instructions"
+msgstr "Uputstvo za prijavu"
+
+#: lib/hospitality_coms/accounts/person_notifier.ex:36
+#, elixir-autogen, elixir-format
+msgid "Update email instructions"
+msgstr "Uputstvo za promenu imejl adrese"

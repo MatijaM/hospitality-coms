@@ -15,6 +15,8 @@ defmodule HospitalityComs.Accounts.PersonNotifier do
   can match on and a controller can turn into a response.
   """
 
+  use Gettext, backend: HospitalityComs.Gettext
+
   import Swoosh.Email
 
   alias HospitalityComs.Accounts.Person
@@ -29,20 +31,29 @@ defmodule HospitalityComs.Accounts.PersonNotifier do
   """
   @spec deliver_update_email_instructions(Person.t(), String.t()) :: delivery()
   def deliver_update_email_instructions(person, url) do
-    deliver(person.email, "Update email instructions", """
+    deliver(
+      person.email,
+      dgettext("emails", "Update email instructions"),
+      dgettext(
+        "emails",
+        """
 
-    ==============================
+        ==============================
 
-    Hi #{person.email},
+        Hi %{email},
 
-    You can change your email by visiting the URL below:
+        You can change your email by visiting the URL below:
 
-    #{url}
+        %{url}
 
-    If you didn't request this change, please ignore this.
+        If you didn't request this change, please ignore this.
 
-    ==============================
-    """)
+        ==============================
+        """,
+        email: person.email,
+        url: url
+      )
+    )
   end
 
   @doc """
@@ -59,38 +70,56 @@ defmodule HospitalityComs.Accounts.PersonNotifier do
 
   @spec deliver_magic_link_instructions(Person.t(), String.t()) :: delivery()
   defp deliver_magic_link_instructions(person, url) do
-    deliver(person.email, "Log in instructions", """
+    deliver(
+      person.email,
+      dgettext("emails", "Log in instructions"),
+      dgettext(
+        "emails",
+        """
 
-    ==============================
+        ==============================
 
-    Hi #{person.email},
+        Hi %{email},
 
-    You can log into your account by visiting the URL below:
+        You can log into your account by visiting the URL below:
 
-    #{url}
+        %{url}
 
-    If you didn't request this email, please ignore this.
+        If you didn't request this email, please ignore this.
 
-    ==============================
-    """)
+        ==============================
+        """,
+        email: person.email,
+        url: url
+      )
+    )
   end
 
   @spec deliver_confirmation_instructions(Person.t(), String.t()) :: delivery()
   defp deliver_confirmation_instructions(person, url) do
-    deliver(person.email, "Confirmation instructions", """
+    deliver(
+      person.email,
+      dgettext("emails", "Confirmation instructions"),
+      dgettext(
+        "emails",
+        """
 
-    ==============================
+        ==============================
 
-    Hi #{person.email},
+        Hi %{email},
 
-    You can confirm your account by visiting the URL below:
+        You can confirm your account by visiting the URL below:
 
-    #{url}
+        %{url}
 
-    If you didn't create an account with us, please ignore this.
+        If you didn't create an account with us, please ignore this.
 
-    ==============================
-    """)
+        ==============================
+        """,
+        email: person.email,
+        url: url
+      )
+    )
   end
 
   # Delivers the email using the application mailer.
@@ -99,7 +128,11 @@ defmodule HospitalityComs.Accounts.PersonNotifier do
     email =
       new()
       |> to(recipient)
-      |> from({"HospitalityComs", "contact@example.com"})
+      # The sender's display name is the product's name, which is one of the
+      # strings the client's own catalogue translates. A Serbian email arriving
+      # from an English-named sender is the same discard the link's domain
+      # would be, one line earlier in the mail client.
+      |> from({dgettext("emails", "Hospitality Coms"), "contact@example.com"})
       |> subject(subject)
       |> text_body(body)
 
