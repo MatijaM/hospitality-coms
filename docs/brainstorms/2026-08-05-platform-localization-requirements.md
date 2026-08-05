@@ -241,6 +241,10 @@ does not fail. **Covers R7, R20.**
   reaches a host stays outside this scope.
 - Both domains must be provisioned and both named in `WEBSOCKET_ORIGINS`, which already accepts a
   list.
+- The two production domains are not yet named, and planning proceeds without them. The mapping
+  artifact carries one host per locale, supplied at implementation; local development resolves to
+  the default through R4's unmapped-host rule. Naming them changes values in the mapping, in
+  `WEBSOCKET_ORIGINS` and in `PHX_HOST`, and nothing structural.
 - `MAGIC_LINK_BASE_URL` becomes per-locale. That is an environment-contract change for any existing
   deployment, and a boot already raises when the variable is missing.
 - No client copy pluralizes today — verified, zero count-dependent strings. If copy gains a plural
@@ -250,26 +254,21 @@ does not fail. **Covers R7, R20.**
 
 ## Outstanding Questions
 
-### Resolve before planning
+Every question here is answerable during planning or implementation. None blocks planning.
 
-Q1. What are the two actual domains? R3's mapping needs real values, and `WEBSOCKET_ORIGINS` and
-`PHX_HOST` must name them.
+Q1. The literal files' exact format and location.
 
-### Deferred to planning
-
-Q2. The literal files' exact format and location.
-
-Q3. How build-time substitution is implemented, and how the dev marker is eliminated from production
+Q2. How build-time substitution is implemented, and how the dev marker is eliminated from production
 output.
 
-Q4. Whether the untranslated-key report is a build artifact, a CI annotation, or both.
+Q3. Whether the untranslated-key report is a build artifact, a CI annotation, or both.
 
-Q5. How R12's two declaration sites are held in agreement — by a test, by derivation, or by a shared
+Q4. How R12's two declaration sites are held in agreement — by a test, by derivation, or by a shared
 Gettext message id. Note that several of these messages currently bake a bound in with compile-time
 string interpolation, which Gettext cannot extract; they have to become runtime bindings first, and
 that is also what makes Serbian's plural forms reachable.
 
-Q6. How the client build is wired into the release build, given the decision above that it ships
+Q5. How the client build is wired into the release build, given the decision above that it ships
 inside it.
 
 ## Sources / Research
