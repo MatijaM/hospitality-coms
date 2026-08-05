@@ -1,8 +1,13 @@
 defmodule HospitalityComsWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :hospitality_coms
 
-  # There is no LiveView socket, no static file serving, and no live reload:
-  # the HTML layer is gone.
+  # There is no LiveView socket and no live reload: the HTML layer is gone.
+  #
+  # There *is* static file serving, and it arrived with localization. The client
+  # is built once per locale, and something has to map a domain to one of those
+  # builds; `HospitalityComsWeb.Static` is that, and putting it here keeps the
+  # decision beside `HospitalityComs.Locales`, inside the test suite, and
+  # same-origin by construction — so the API still needs no CORS.
   #
   # Two socket modules, deliberately, so that an employer session cannot even be
   # routed to a peer conversation (KTD9): the refusal is the absence of an entry
@@ -65,6 +70,11 @@ defmodule HospitalityComsWeb.Endpoint do
 
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
+
+  # Ahead of the parsers, because an asset is not a body to decode. It leaves
+  # the API and socket prefixes untouched and passes anything it cannot find
+  # straight through to the router.
+  plug HospitalityComsWeb.Static
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],

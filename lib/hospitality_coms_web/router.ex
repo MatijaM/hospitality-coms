@@ -151,4 +151,24 @@ defmodule HospitalityComsWeb.Router do
       post "/people/:person_id/end-engagements", DemoController, :end_engagements
     end
   end
+
+  # Last, and last is what makes it correct: every route above wins, and this
+  # answers what none of them matched.
+  #
+  # The client routes in the browser — `/rooms`, `/profile`, `/log-in/:token` —
+  # so a bookmark, a refresh, or a magic link followed out of a mail client
+  # arrives here. It cannot be a plug after the router, because Phoenix raises
+  # `NoRouteError` inside the router rather than passing the connection on.
+  #
+  # `GET` only. A write to an unrouted path still raises through to the JSON
+  # 404, because a browser navigating is a `GET` and anything else reaching an
+  # unknown path is a client bug rather than a page load.
+  #
+  # It matches `/api/...` too, which nothing in the path syntax can prevent, so
+  # `HospitalityComsWeb.AppShellController` answers that prefix with the error
+  # envelope instead. Getting that wrong would turn the API's deliberately flat
+  # 404 into a page.
+  scope "/", HospitalityComsWeb do
+    get "/*path", AppShellController, :index
+  end
 end

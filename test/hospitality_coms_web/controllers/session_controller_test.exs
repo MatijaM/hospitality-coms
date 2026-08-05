@@ -161,16 +161,27 @@ defmodule HospitalityComsWeb.SessionControllerTest do
     # what makes this survive a deployment: the host is a deploy-time value and
     # `MAGIC_LINK_BASE_URL` overrides it in production, while "this endpoint
     # cannot answer it" holds wherever the client is served from.
-    test "at a path this application does not route" do
+    # **This assertion inverted in U8 and is kept rather than deleted.**
+    #
+    # It used to require the link's path to be routed by nothing here, because
+    # the client was served from somewhere else and a link pointed at Phoenix
+    # would 404 — which reads as a broken link rather than a misconfigured one.
+    #
+    # Phoenix now serves the client, so that path *is* routed, and it has to be:
+    # a magic link followed out of a mail client is a page load, and the app
+    # shell is what answers it. The property worth keeping is the one underneath
+    # — the link must not land on an API action — so that is what is asserted.
+    test "at a path answered by the client's page shell, not by an API action" do
       %URI{path: path} =
         "en" |> base_url() |> URI.parse()
 
-      assert :error =
+      assert %{plug: HospitalityComsWeb.AppShellController} =
                Phoenix.Router.route_info(Router, "GET", path <> "any-token", "localhost")
     end
 
-    test "and the check would notice a path this application does route" do
-      assert %{route: _} = Phoenix.Router.route_info(Router, "GET", "/api/me", "localhost")
+    test "and the check would notice a path this application routes elsewhere" do
+      assert %{plug: HospitalityComsWeb.PersonController} =
+               Phoenix.Router.route_info(Router, "GET", "/api/me", "localhost")
     end
 
     # The test above does not catch the wrong *host*, which is the way this
