@@ -350,6 +350,43 @@ Swoosh captured, not on a response body. A surface test would see neither and wo
 | Edge-case reach | 4/5 | Serbian plural boundaries and host-shape variants covered; a third locale is out of scope and untested by design |
 | Risk naming | 5/5 | eight existing test paths named, with the reason each is at risk |
 
+## Handover: what is built and what is not
+
+Seven of the plan's nine units are complete, tested and committed. Two remain, and they are the
+two that make the *interface* Serbian rather than the platform around it.
+
+**Done:** the shared domain mapping (U2), the client catalogue and build-time substitution (U3),
+request-locale resolution and the incompleteness notice (U5), validation messages (U6), emails and
+the magic link's domain (U7), and Phoenix serving one bundle per locale with an app-shell fallback
+(U8). The Elixir suite is green at 1372, Credo is clean, the production build compiles, and the
+client's own suite and build pass.
+
+**U4 is partially done.** The mechanism is proved end-to-end — a production Serbian build carries
+Serbian strings, no English equivalents and no marker — and the app shell reads from the catalogue.
+What remains is the same mechanical move applied to the rest, and then the check that holds it:
+
+- `client/src/app/app.tsx`, `routes/home-route.tsx`, `routes/log-in-route.tsx`,
+  `routes/redeem-route.tsx`, and `failure-message.ts`
+- `client/src/features/claim/`, `features/employer/`, `features/profile/`, `features/rooms/` and
+  `features/peers/` — their route and view components plus each one's `refusal-message.ts`
+- `client/src/i18n/no-inline-copy.test.ts` — the structural check, matrix rows C1–C6, written last
+  because it cannot be introduced against a partially extracted tree without an allowlist, and an
+  allowlist is the hole the cited learning warns about
+
+The extraction is behaviour-preserving in English, so each surface group lands green on its own;
+the existing surface tests are the net. The `refusal-message.ts` modules keep their exhaustive
+switches — only the returned string moves — because the switch is what fails the build when an
+error code gains no copy.
+
+**U9 is not started**, and most of it depends on U4: filling the Serbian catalogue for the keys
+above, building every locale in CI, emitting the untranslated-key report, and adding the client
+build to the Elixir job so `static_test.exs`'s fixture assumption is exercised against real
+bundles at least once.
+
+**Running the suite in this worktree** needs its own Postgres cluster — `config/test.exs`'s
+`HC_TEST_PGPORT` is the documented escape hatch, and `CLAUDE.md` explains why a second database on
+the shared cluster is not enough.
+
 ## Revisions made during implementation
 
 _(appended during implementation; the sections above are not edited to agree with what shipped)_
