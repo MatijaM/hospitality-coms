@@ -1,0 +1,10 @@
+{
+  "app.title": "Ugostiteljske komunikacije",
+  "session.checking": "Proveravamo vašu sesiju…",
+  "logIn.heading": "Prijava",
+  "logIn.blurb": "Poslaćemo vam link na imejl. Nema lozinke — ova aplikacija je nikada nije imala.",
+  "logIn.emailLabel": "Imejl adresa",
+  "logIn.submit": "Pošaljite mi link",
+  "logIn.sent": "Ako ta adresa može da prima poštu, link je na putu. Važi petnaest minuta.",
+  "notFound.heading": "Nije pronađeno"
+}

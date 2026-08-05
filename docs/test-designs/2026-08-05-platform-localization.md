@@ -353,3 +353,49 @@ Swoosh captured, not on a response body. A surface test would see neither and wo
 ## Revisions made during implementation
 
 _(appended during implementation; the sections above are not edited to agree with what shipped)_
+
+### U2 — the client holds no host map, and the drift risk moved
+
+The brief and the plan both assumed the client would resolve a host. It does not, and cannot
+usefully: under one bundle per locale the server has already chosen the bundle by host before the
+browser receives a byte, so a host map in the client would answer a question that is already
+answered. The host table is server-side only.
+
+What that changes is where drift can happen. It is not two host tables disagreeing; it is the
+**locale string** — the directory name the build emits under `priv/static` and the key the server
+looks a bundle up by. Nothing in either language's type system holds those together and the failure
+is silent. Row A6 is still the drift control and still reads the artifact independently; the client
+half (`locale.test.ts`) requires the built locale to be one of the artifact's keys, which is the
+half observable from that side.
+
+Measured, because the brief requires the control to be shown to control: hardcoding a table that
+matches the artifact *today* and then adding a host to the artifact fails **exactly one test** — A6
+— with all nineteen behavioural rows green. A hardcoded table that merely differs fails five, which
+is a weaker demonstration and was the first mutation tried.
+
+### U3 — the marker has no runtime branch, so Decision 2's assertion target moved
+
+Decision 2 assumed the marker would be a runtime branch on `import.meta.env.DEV` that the bundler
+eliminates, and argued the assertion therefore had to read the build output rather than the module.
+
+The implementation removes the branch entirely. `vite-plugin-copy.ts` generates the resolved
+catalogue as a virtual module at build time, so a production build's source either contains a
+marker or does not — there is no dead code for an optimiser to be trusted with. The generated
+source is therefore the honest assertion target, and `copy.test.ts` asserts on it with a working
+control: the same input under a development build *does* produce a marker.
+
+**The build-output assertion is not merely redundant here, it is currently vacuous, and that is
+worth writing down.** No component imports `copy` until U4, so the catalogue is tree-shaken out of
+the bundle completely — "no marker in the production bundle" passes today against a bundle
+containing no copy at all. That is the shape
+`docs/solutions/test-failures/tests-that-certify-nothing.md` names. The end-to-end check becomes
+meaningful only once U4 lands, and U9's CI build is where it is exercised for real.
+
+### U3 — the English catalogue is JSON, not TypeScript
+
+The plan said the English catalogue would be a TypeScript object whose type defines the key set.
+It is `en.json` instead, imported with `import type` in `copy.ts`. Two reasons: the translator-facing
+requirement (R6) asks for one format a non-developer can edit, and two formats for two locales
+would have made English the exception; and `resolveJsonModule` gives exact literal key typing from
+the JSON for free, so nothing was lost. `verbatimModuleSyntax` guarantees the `import type` is
+erased, so the English catalogue never reaches another language's bundle.

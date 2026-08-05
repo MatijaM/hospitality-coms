@@ -15,6 +15,13 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
 
+    // `src/i18n/en.json` defines the copy key set, and importing it as a module
+    // is what turns that into a type: a key no catalogue defines becomes a
+    // compile error at the call site rather than `undefined` on screen. The
+    // import in `copy.ts` is `import type`, so the file itself is erased and
+    // never reaches a bundle built for another language.
+    "resolveJsonModule": true,
+
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
@@ -25,5 +32,5 @@
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true
   },
-  "include": ["src", "vite.config.ts", "vitest.setup.ts"]
+  "include": ["src", "vite.config.ts", "vite-plugin-copy.ts", "vitest.setup.ts"]
 }

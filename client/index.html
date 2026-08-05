@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="%HC_LOCALE%">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -10,7 +10,14 @@
       makes. There is nothing on this origin that needs a referrer.
     -->
     <meta name="referrer" content="no-referrer" />
-    <title>Hospitality Coms</title>
+    <!--
+      Both placeholders are substituted by `vite-plugin-copy.ts` at build time,
+      per locale. They are stamped into the shell rather than set by React
+      because a screen reader and a browser's translate prompt both read `lang`
+      before any script runs, and a title that arrives late shows the wrong one
+      in the tab and in history.
+    -->
+    <title>%HC_APP_TITLE%</title>
   </head>
   <body>
     <div id="root"></div>

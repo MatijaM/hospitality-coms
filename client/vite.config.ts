@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
+import { copyPlugin } from "./vite-plugin-copy";
+
 // Which language this build produces, and where that answer comes from.
 //
 // `priv/locales.json` is the one place the domain-to-locale rule is written
@@ -40,6 +42,10 @@ function activeLocale(): string {
 }
 
 const locale = activeLocale();
+const defaultLocale = (
+  JSON.parse(readFileSync(localesArtifact, "utf8")) as LocalesArtifact
+).default;
+const copyDir = fileURLToPath(new URL("./src/i18n", import.meta.url));
 
 // The API lives on a different origin during development: Phoenix on 4000,
 // this client on 5173. The endpoint mounts no CORS plug — it never needed one,
@@ -54,7 +60,7 @@ const locale = activeLocale();
 const apiProxyTarget = process.env.VITE_DEV_API_PROXY ?? "http://localhost:4000";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), copyPlugin({ dir: copyDir, locale, defaultLocale })],
   // Substituted rather than read from the environment at runtime, so the
   // shipped bundle carries one language and no way to be asked about another.
   define: { __APP_LOCALE__: JSON.stringify(locale) },
