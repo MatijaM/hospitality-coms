@@ -12,11 +12,13 @@
 
 import { Link } from "react-router";
 
+import { copy } from "../../i18n/copy";
+
 export function NotFoundRoute() {
   return (
     <section>
-      <h1>Nothing here</h1>
-      <Link to="/">Back to the start</Link>
+      <h1>{copy["notFound.heading"]}</h1>
+      <Link to="/">{copy["notFound.backLink"]}</Link>
     </section>
   );
 }

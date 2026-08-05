@@ -47,6 +47,7 @@ import { useState } from "react";
 
 import { failureMessage } from "./failure-message";
 import type { RequestFailure } from "../api/errors";
+import { copy } from "../i18n/copy";
 import { useSession } from "../session/session-context";
 
 export function SessionBar() {
@@ -58,8 +59,8 @@ export function SessionBar() {
   return (
     <>
       <p>
-        You are signed in as <strong>{state.person.displayName}</strong> (
-        <span>{state.person.email ?? "an erased account"}</span>).
+        {copy["session.signedInAs"]} <strong>{state.person.displayName}</strong> (
+        <span>{state.person.email ?? copy["session.erasedAccount"]}</span>).
       </p>
       {editing ? (
         <DisplayNameForm
@@ -75,7 +76,7 @@ export function SessionBar() {
             setEditing(true);
           }}
         >
-          Change your name
+          {copy["session.changeName"]}
         </button>
       )}
       <button
@@ -84,7 +85,7 @@ export function SessionBar() {
           void logOut();
         }}
       >
-        Log out
+        {copy["session.logOut"]}
       </button>
     </>
   );
@@ -135,7 +136,7 @@ function DisplayNameForm({
       }}
     >
       <fieldset disabled={saving}>
-        <label htmlFor="session-display-name">Your name</label>
+        <label htmlFor="session-display-name">{copy["session.yourNameLabel"]}</label>
         <input
           id="session-display-name"
           name="display_name"
@@ -145,14 +146,14 @@ function DisplayNameForm({
             setName(event.target.value);
           }}
         />
-        <button type="submit">Save name</button>
+        <button type="submit">{copy["session.saveName"]}</button>
         <button
           type="button"
           onClick={() => {
             onDone();
           }}
         >
-          Cancel
+          {copy["common.cancel"]}
         </button>
       </fieldset>
       {failure === null ? null : <p aria-live="polite">{refusalText(failure)}</p>}

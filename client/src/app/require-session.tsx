@@ -12,6 +12,7 @@ import type { ReactNode } from "react";
 import { Navigate } from "react-router";
 
 import type { RequestFailure } from "../api/errors";
+import { copy } from "../i18n/copy";
 import { useSession } from "../session/session-context";
 import { failureMessage } from "./failure-message";
 
@@ -20,7 +21,7 @@ export function RequireSession({ children }: { readonly children: ReactNode }) {
 
   switch (state.status) {
     case "resolving":
-      return <p role="status">Checking your session…</p>;
+      return <p role="status">{copy["session.checking"]}</p>;
     case "anonymous":
       return <Navigate to="/log-in" replace />;
     case "unavailable":
@@ -39,11 +40,11 @@ function Unavailable({
 }) {
   return (
     <section>
-      <h1>Not right now</h1>
+      <h1>{copy["session.unavailableHeading"]}</h1>
       <p role="alert">{failureMessage(failure)}</p>
-      <p>You are still signed in. Nothing has been logged out.</p>
+      <p>{copy["session.stillSignedIn"]}</p>
       <button type="button" onClick={onRetry}>
-        Try again
+        {copy["common.tryAgain"]}
       </button>
     </section>
   );

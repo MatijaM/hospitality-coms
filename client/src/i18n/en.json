@@ -1,11 +1,19 @@
 {
   "app.title": "Hospitality Coms",
+
+  "common.cancel": "Cancel",
+  "common.tryAgain": "Try again",
+
   "session.checking": "Checking your session…",
-  "logIn.heading": "Log in",
-  "logIn.blurb": "We will email you a link. There is no password — this application has never had one.",
-  "logIn.emailLabel": "Email address",
-  "logIn.submit": "Send me a link",
-  "logIn.sent": "If that address can receive mail, a link is on its way. It is good for fifteen minutes.",
-  "notFound.heading": "Not found",
-  "notFound.blurb": "There is nothing at this address."
+  "session.unavailableHeading": "Not right now",
+  "session.stillSignedIn": "You are still signed in. Nothing has been logged out.",
+  "session.signedInAs": "You are signed in as",
+  "session.erasedAccount": "an erased account",
+  "session.changeName": "Change your name",
+  "session.logOut": "Log out",
+  "session.yourNameLabel": "Your name",
+  "session.saveName": "Save name",
+
+  "notFound.heading": "Nothing here",
+  "notFound.backLink": "Back to the start"
 }

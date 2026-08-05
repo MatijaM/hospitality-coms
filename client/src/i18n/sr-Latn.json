@@ -1,10 +1,19 @@
 {
   "app.title": "Ugostiteljske komunikacije",
+
+  "common.cancel": "Otkaži",
+  "common.tryAgain": "Pokušajte ponovo",
+
   "session.checking": "Proveravamo vašu sesiju…",
-  "logIn.heading": "Prijava",
-  "logIn.blurb": "Poslaćemo vam link na imejl. Nema lozinke — ova aplikacija je nikada nije imala.",
-  "logIn.emailLabel": "Imejl adresa",
-  "logIn.submit": "Pošaljite mi link",
-  "logIn.sent": "Ako ta adresa može da prima poštu, link je na putu. Važi petnaest minuta.",
-  "notFound.heading": "Nije pronađeno"
+  "session.unavailableHeading": "Ne baš sada",
+  "session.stillSignedIn": "I dalje ste prijavljeni. Niste odjavljeni.",
+  "session.signedInAs": "Prijavljeni ste kao",
+  "session.erasedAccount": "obrisan nalog",
+  "session.changeName": "Promenite svoje ime",
+  "session.logOut": "Odjava",
+  "session.yourNameLabel": "Vaše ime",
+  "session.saveName": "Sačuvajte ime",
+
+  "notFound.heading": "Ovde nema ničega",
+  "notFound.backLink": "Nazad na početak"
 }

@@ -454,6 +454,23 @@ remove them either (it writes a `.pot` only for a domain it found messages in). 
 message now means adding a line there and re-merging; nothing enforces that, which is a gap worth
 knowing about.
 
+### U4 — landed in batches, and the U3 gap is now closed with evidence
+
+Extraction is behaviour-preserving in English: the string values do not change, only where they come
+from, so every existing surface test passes untouched. That is what makes the unit safe to land a
+surface group at a time rather than as one commit, and it is why the plan's execution note about
+splitting only by adding the check last still holds — the check is the part that cannot be
+partial.
+
+**The measurement U3 recorded as pending is now taken.** With the app-shell surfaces reading from
+the catalogue, a production Serbian build contains `Prijavljeni ste kao`, `Ovde nema ničega` and
+`Odjava`, contains none of `You are signed in as`, `Nothing here` or `Log out`, and contains no
+marker. Before this batch that assertion passed against a bundle holding no copy at all.
+
+**Batch one is the app shell**: the catch-all route, the session gate and the session bar. The
+remaining surfaces and the structural check are listed in the handover note; the catalogue keys
+seeded in U3 were guesses and have been replaced with the strings the components actually carry.
+
 ### U3 — the English catalogue is JSON, not TypeScript
 
 The plan said the English catalogue would be a TypeScript object whose type defines the key set.
