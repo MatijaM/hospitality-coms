@@ -1,0 +1,11 @@
+{
+  "default": "en",
+  "locales": {
+    "en": {
+      "hosts": ["localhost", "app.example.com"]
+    },
+    "sr-Latn": {
+      "hosts": ["app.example.rs"]
+    }
+  }
+}
