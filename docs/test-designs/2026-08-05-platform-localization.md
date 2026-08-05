@@ -391,6 +391,36 @@ containing no copy at all. That is the shape
 `docs/solutions/test-failures/tests-that-certify-nothing.md` names. The end-to-end check becomes
 meaningful only once U4 lands, and U9's CI build is where it is exercised for real.
 
+### U5 — the Gettext backend moved to the context layer, and `sr-Latn` needed a pluralizer
+
+Two things the brief did not anticipate, both forced by where the translated text actually lives.
+
+**The backend is `HospitalityComs.Gettext`, not the scaffolded `HospitalityComsWeb.Gettext`.** Two
+of the three server-side surfaces are owned by contexts — the incompleteness notice and the emails
+— and no module under `lib/hospitality_coms/` references the web namespace in code today. A backend
+under `HospitalityComsWeb` would have inverted that. The scaffolded module had exactly one
+reference, in the controller quote, so the move was two lines and the web layer now uses the
+context's backend, which is the permitted direction.
+
+**Gettext's default pluralizer does not know `sr-Latn`.** It derives a language by splitting the
+locale on an underscore, so `sr_Latn` resolves and the hyphenated form raises `UnknownLocaleError`
+at merge time. The cheap fix is to spell the catalogue directory `sr_Latn`, and it was declined:
+the locale identifier is already the key in `priv/locales.json`, the bundle directory the client
+build emits, and the string the server resolves a host to, and a fourth spelling differing by one
+character is this project's recurring defect shape.
+
+`HospitalityComs.Gettext.Plural` is the alternative and it is better than a workaround.
+Serbian's rule is written down and exercised at its boundaries — 1 and 21 against 11, 2–4 and 22–24
+against 12–14 — rather than inherited from a table. That matters for the reason the plan's risk
+section names: a wrong plural rule produces grammatical-looking output in the wrong form, which no
+assertion about *which string came back* would notice. It also supplies the `Plural-Forms` header
+the catalogues are created with, so the header is derived from the tested rule rather than typed in
+beside it.
+
+It is named in `config/config.exs` rather than as a backend option, because `mix gettext.merge`
+reads only the application setting while the backend reads either — so the option would have been a
+second statement of one choice.
+
 ### U3 — the English catalogue is JSON, not TypeScript
 
 The plan said the English catalogue would be a TypeScript object whose type defines the key set.

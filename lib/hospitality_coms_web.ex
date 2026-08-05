@@ -40,7 +40,10 @@ defmodule HospitalityComsWeb do
     quote do
       use Phoenix.Controller, formats: [:json]
 
-      use Gettext, backend: HospitalityComsWeb.Gettext
+      # The backend lives in the context layer, because two of the three things
+      # translated on the server are owned by contexts and a backend under this
+      # namespace would invert that dependency. See `HospitalityComs.Gettext`.
+      use Gettext, backend: HospitalityComs.Gettext
 
       import Plug.Conn
 

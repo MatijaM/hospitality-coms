@@ -1,6 +1,7 @@
 defmodule HospitalityComsWeb.Router do
   use HospitalityComsWeb, :router
 
+  import HospitalityComsWeb.Locale
   import HospitalityComsWeb.LoginRateLimit
   import HospitalityComsWeb.PersonAuth
 
@@ -9,6 +10,12 @@ defmodule HospitalityComsWeb.Router do
   # only because `mix phx.gen.auth` refuses to run without it.
   pipeline :api do
     plug :accepts, ["json"]
+    # Which language this request is answered in, resolved from `Origin` before
+    # anything can render text. It belongs in `:api` rather than in a pipeline
+    # of its own — unlike the limiter below, every route can produce a
+    # changeset error, and a route that answered in the wrong language would do
+    # so silently.
+    plug :put_locale
     plug :fetch_person_scope
   end
 

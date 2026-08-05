@@ -1,0 +1,17 @@
+## "msgid"s in this file come from POT (.pot) files.
+###
+### Do not add, change, or remove "msgid"s manually here as
+### they're tied to the ones in the corresponding POT file
+### (with the same domain).
+###
+### Use "mix gettext.extract --merge" or "mix gettext.merge"
+### to merge POT files into PO files.
+msgid ""
+msgstr ""
+"Language: sr-Latn\n"
+"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
+
+#: lib/hospitality_coms/profiles.ex:185
+#, elixir-autogen, elixir-format
+msgid "This record may be incomplete. A worker chooses which of their entries each employer and each peer can see."
+msgstr "Ovaj zapis možda nije potpun. Radnik bira koje od svojih stavki može da vidi svaki poslodavac i svaki kolega."

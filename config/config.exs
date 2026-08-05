@@ -34,6 +34,16 @@ config :hospitality_coms, :scopes,
 # announces at boot is the one nothing about this value refers to.
 config :hospitality_coms, :magic_link_base_url, "http://localhost:5173/log-in/"
 
+# How many plural forms a locale has, and which one a count takes.
+#
+# This is set on `:gettext` rather than on the backend because two things need
+# it and only one of them reads a backend option: `HospitalityComs.Gettext`
+# compiling, and `mix gettext.merge` creating a catalogue. Without it the merge
+# task raises `UnknownLocaleError` on `sr-Latn`, which Gettext's default
+# pluralizer does not recognise — it splits a locale on an underscore, and this
+# project spells locales with a hyphen everywhere else.
+config :gettext, plural_forms: HospitalityComs.Gettext.Plural
+
 config :hospitality_coms,
   # HospitalityComs.EmployerRepo addresses the same database and is
   # deliberately excluded: migrations run through the primary repo alone.

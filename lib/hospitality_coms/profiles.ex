@@ -126,6 +126,8 @@ defmodule HospitalityComs.Profiles do
   things rather than one thing spelled two ways.
   """
 
+  use Gettext, backend: HospitalityComs.Gettext
+
   alias HospitalityComs.Accounts.EmployerScope
   alias HospitalityComs.Accounts.Person
   alias HospitalityComs.Accounts.PersonScope
@@ -162,10 +164,6 @@ defmodule HospitalityComs.Profiles do
           correction_requests: [VisibleCorrection.t()]
         }
 
-  # A constant, and it is a constant on purpose. See the moduledoc.
-  @incompleteness_notice "This record may be incomplete. A worker chooses which " <>
-                           "of their entries each employer and each peer can see."
-
   @doc """
   The standing notice shown beside every profile, whoever is reading it.
 
@@ -174,9 +172,20 @@ defmodule HospitalityComs.Profiles do
   become the oracle a computed "are any hidden" flag would be: a flag would
   disclose which workers are concealing something, which is strictly worse than
   disclosing the entries. Shown always, so its presence says nothing.
+
+  **Translated at the reader's locale, and still arity zero.** The language
+  comes from the request rather than from an argument —
+  `HospitalityComsWeb.Locale` puts it in force before anything renders — so
+  localizing this cost the property above nothing. The msgid is one literal
+  because `mix gettext.extract` reads literals; the concatenation this used to
+  be would have been invisible to it.
   """
   @spec incompleteness_notice() :: String.t()
-  def incompleteness_notice, do: @incompleteness_notice
+  def incompleteness_notice do
+    gettext(
+      "This record may be incomplete. A worker chooses which of their entries each employer and each peer can see."
+    )
+  end
 
   ## The worker's own record
 
