@@ -12,100 +12,162 @@ msgstr ""
 "Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
 
 msgid "can't be blank"
-msgstr ""
+msgstr "ne sme biti prazno"
 
 msgid "has already been taken"
-msgstr ""
+msgstr "već je zauzeto"
 
 msgid "is invalid"
-msgstr ""
+msgstr "nije ispravno"
 
 msgid "must be accepted"
-msgstr ""
+msgstr "mora biti prihvaćeno"
 
 msgid "has invalid format"
-msgstr ""
+msgstr "ima neispravan format"
 
 msgid "has an invalid entry"
-msgstr ""
+msgstr "sadrži neispravnu stavku"
 
 msgid "is reserved"
-msgstr ""
+msgstr "je rezervisano"
 
 msgid "does not match confirmation"
-msgstr ""
+msgstr "ne odgovara potvrdi"
 
 msgid "is still associated with this entry"
-msgstr ""
+msgstr "je i dalje povezano sa ovom stavkom"
 
 msgid "are still associated with this entry"
-msgstr ""
+msgstr "su i dalje povezani sa ovom stavkom"
 
 msgid "should have %{count} item(s)"
 msgid_plural "should have %{count} item(s)"
-msgstr[0] ""
-msgstr[1] ""
-msgstr[2] ""
+msgstr[0] "mora imati %{count} stavku"
+msgstr[1] "mora imati %{count} stavke"
+msgstr[2] "mora imati %{count} stavki"
 
 msgid "should be %{count} character(s)"
 msgid_plural "should be %{count} character(s)"
-msgstr[0] ""
-msgstr[1] ""
-msgstr[2] ""
+msgstr[0] "mora imati %{count} znak"
+msgstr[1] "mora imati %{count} znaka"
+msgstr[2] "mora imati %{count} znakova"
 
 msgid "should be %{count} byte(s)"
 msgid_plural "should be %{count} byte(s)"
-msgstr[0] ""
-msgstr[1] ""
-msgstr[2] ""
+msgstr[0] "mora imati %{count} bajt"
+msgstr[1] "mora imati %{count} bajta"
+msgstr[2] "mora imati %{count} bajtova"
 
 msgid "should have at least %{count} item(s)"
 msgid_plural "should have at least %{count} item(s)"
-msgstr[0] ""
-msgstr[1] ""
-msgstr[2] ""
+msgstr[0] "mora imati najmanje %{count} stavku"
+msgstr[1] "mora imati najmanje %{count} stavke"
+msgstr[2] "mora imati najmanje %{count} stavki"
 
 msgid "should be at least %{count} character(s)"
 msgid_plural "should be at least %{count} character(s)"
-msgstr[0] ""
-msgstr[1] ""
-msgstr[2] ""
+msgstr[0] "mora imati najmanje %{count} znak"
+msgstr[1] "mora imati najmanje %{count} znaka"
+msgstr[2] "mora imati najmanje %{count} znakova"
 
 msgid "should be at least %{count} byte(s)"
 msgid_plural "should be at least %{count} byte(s)"
-msgstr[0] ""
-msgstr[1] ""
-msgstr[2] ""
+msgstr[0] "mora imati najmanje %{count} bajt"
+msgstr[1] "mora imati najmanje %{count} bajta"
+msgstr[2] "mora imati najmanje %{count} bajtova"
 
 msgid "should have at most %{count} item(s)"
 msgid_plural "should have at most %{count} item(s)"
-msgstr[0] ""
-msgstr[1] ""
-msgstr[2] ""
+msgstr[0] "sme imati najviše %{count} stavku"
+msgstr[1] "sme imati najviše %{count} stavke"
+msgstr[2] "sme imati najviše %{count} stavki"
 
 msgid "should be at most %{count} character(s)"
 msgid_plural "should be at most %{count} character(s)"
-msgstr[0] ""
-msgstr[1] ""
-msgstr[2] ""
+msgstr[0] "sme imati najviše %{count} znak"
+msgstr[1] "sme imati najviše %{count} znaka"
+msgstr[2] "sme imati najviše %{count} znakova"
 
 msgid "should be at most %{count} byte(s)"
 msgid_plural "should be at most %{count} byte(s)"
-msgstr[0] ""
-msgstr[1] ""
-msgstr[2] ""
+msgstr[0] "sme imati najviše %{count} bajt"
+msgstr[1] "sme imati najviše %{count} bajta"
+msgstr[2] "sme imati najviše %{count} bajtova"
 
 msgid "must be less than %{number}"
-msgstr ""
+msgstr "mora biti manje od %{number}"
 
 msgid "must be greater than %{number}"
-msgstr ""
+msgstr "mora biti veće od %{number}"
 
 msgid "must be less than or equal to %{number}"
-msgstr ""
+msgstr "mora biti manje ili jednako %{number}"
 
 msgid "must be greater than or equal to %{number}"
-msgstr ""
+msgstr "mora biti veće ili jednako %{number}"
 
 msgid "must be equal to %{number}"
-msgstr ""
+msgstr "mora biti jednako %{number}"
+
+##
+## This project's own validation messages, below.
+##
+## They are hand-maintained rather than extracted. `mix gettext.extract` reads
+## literal `dgettext/3` calls, and the only call for this domain is in
+## `HospitalityComsWeb.ErrorEnvelope`, where the msgid is a runtime value — the
+## message a changeset carries. So extraction cannot see these, and it does not
+## remove them either: it writes a `.pot` only for a domain it found messages
+## in, and it finds none here. Adding a validation message means adding a line
+## here and running `mix gettext.merge priv/gettext`.
+##
+## Messages that bake a bound into the string are deliberately absent. A
+## `check_constraint/3` error carries no `count` binding — Ecto's API has
+## nowhere to put one — so its msgid would have to vary with the constant and
+## could never be translated. Those are the database's backstop for writes that
+## never meet a changeset, unreachable from the API because the changeset
+## refuses first, and they stay in English.
+msgid "must have the @ sign and no spaces"
+msgstr "mora sadržati znak @ i biti bez razmaka"
+
+msgid "must be after the start"
+msgstr "mora biti posle početka"
+
+msgid "must be after the invitation is issued"
+msgstr "mora biti posle izdavanja pozivnice"
+
+msgid "must be after the shift starts"
+msgstr "mora biti posle početka smene"
+
+msgid "cannot precede the grant"
+msgstr "ne može biti pre dodele ovlašćenja"
+
+msgid "must be set exactly when the grant is revoked"
+msgstr "mora biti postavljeno tačno kada se ovlašćenje ukine"
+
+msgid "cannot be before the person joined the roster"
+msgstr "ne može biti pre nego što je osoba upisana u raspored"
+
+msgid "cannot be before the suspension began"
+msgstr "ne može biti pre početka isključenja"
+
+msgid "overlaps a period this person already holds on this shift"
+msgstr "preklapa se sa periodom koji ova osoba već ima na ovoj smeni"
+
+msgid "overlaps a suspension this engagement already holds"
+msgstr "preklapa se sa isključenjem koje ovaj angažman već ima"
+
+msgid "overlaps an engagement this person already holds at this venue"
+msgstr "preklapa se sa angažmanom koji ova osoba već ima u ovom objektu"
+
+msgid "a request between these two is already outstanding"
+msgstr "zahtev između ovo dvoje već čeka odgovor"
+
+msgid "these two are already connected"
+msgstr "ovo dvoje su već povezani"
+
+msgid "cannot be the requester"
+msgstr "ne može biti podnosilac zahteva"
+
+msgid "must name exactly one audience"
+msgstr "mora imenovati tačno jednu publiku"

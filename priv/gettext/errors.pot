@@ -107,3 +107,66 @@ msgstr ""
 
 msgid "must be equal to %{number}"
 msgstr ""
+
+##
+## This project's own validation messages, below.
+##
+## They are hand-maintained rather than extracted. `mix gettext.extract` reads
+## literal `dgettext/3` calls, and the only call for this domain is in
+## `HospitalityComsWeb.ErrorEnvelope`, where the msgid is a runtime value — the
+## message a changeset carries. So extraction cannot see these, and it does not
+## remove them either: it writes a `.pot` only for a domain it found messages
+## in, and it finds none here. Adding a validation message means adding a line
+## here and running `mix gettext.merge priv/gettext`.
+##
+## Messages that bake a bound into the string are deliberately absent. A
+## `check_constraint/3` error carries no `count` binding — Ecto's API has
+## nowhere to put one — so its msgid would have to vary with the constant and
+## could never be translated. Those are the database's backstop for writes that
+## never meet a changeset, unreachable from the API because the changeset
+## refuses first, and they stay in English.
+
+msgid "must have the @ sign and no spaces"
+msgstr ""
+
+msgid "must be after the start"
+msgstr ""
+
+msgid "must be after the invitation is issued"
+msgstr ""
+
+msgid "must be after the shift starts"
+msgstr ""
+
+msgid "cannot precede the grant"
+msgstr ""
+
+msgid "must be set exactly when the grant is revoked"
+msgstr ""
+
+msgid "cannot be before the person joined the roster"
+msgstr ""
+
+msgid "cannot be before the suspension began"
+msgstr ""
+
+msgid "overlaps a period this person already holds on this shift"
+msgstr ""
+
+msgid "overlaps a suspension this engagement already holds"
+msgstr ""
+
+msgid "overlaps an engagement this person already holds at this venue"
+msgstr ""
+
+msgid "a request between these two is already outstanding"
+msgstr ""
+
+msgid "these two are already connected"
+msgstr ""
+
+msgid "cannot be the requester"
+msgstr ""
+
+msgid "must name exactly one audience"
+msgstr ""

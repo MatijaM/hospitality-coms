@@ -421,6 +421,39 @@ It is named in `config/config.exs` rather than as a backend option, because `mix
 reads only the application setting while the backend reads either — so the option would have been a
 second statement of one choice.
 
+### U6 — the two declaration sites cannot converge, and row E6 is withdrawn
+
+Decision 3 claimed that a message declared twice — on `validate_*` and on the matching
+`check_constraint/3` — would need one catalogue entry, and row E6 asserted the two paths return the
+same localized string. **That is not achievable and the row is withdrawn rather than weakened.**
+
+Ecto's `check_constraint/3` produces an error whose options carry `constraint` and
+`constraint_name` and nothing else; there is no way to attach a `count` binding. So a constraint
+message that states a bound has to bake the number into the string — thirteen of them do, across
+three patterns — and a msgid that varies with a module attribute can never be a catalogue key.
+
+Three options were weighed. Giving the constraint a different, count-free msgid would translate it
+and break the property `CLAUDE.md` describes, that a caller cannot tell which tier refused.
+Leaving `%{count}` in the constraint message would render the placeholder literally. Translating
+the validation messages and leaving the constraint backstops in English is the third, and it costs
+nothing observable: the constraint path is unreachable from the API, because for any field the
+changeset validates first and refuses first. It exists for writes that never meet a changeset —
+`Repo.insert_all` — which produce no API response at all.
+
+So R12 is delivered for every message a person can actually receive, and the catalogue says in a
+comment which messages are absent and why. What replaces E6 is the pair of rows that assert English
+is unchanged by the refactor, which is the property most at risk from touching this traversal.
+
+### U6 — fifteen messages had to be added to the catalogue by hand
+
+`mix gettext.extract` reads literal `dgettext/3` calls. The only call for the `errors` domain takes
+a runtime msgid — the message the changeset carries — so extraction finds nothing and the project's
+own fifteen validation messages would never appear in a catalogue. They are written into
+`errors.pot` by hand, above a comment explaining that extraction cannot see them and does not
+remove them either (it writes a `.pot` only for a domain it found messages in). Adding a validation
+message now means adding a line there and re-merging; nothing enforces that, which is a gap worth
+knowing about.
+
 ### U3 — the English catalogue is JSON, not TypeScript
 
 The plan said the English catalogue would be a TypeScript object whose type defines the key set.
