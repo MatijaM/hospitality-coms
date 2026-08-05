@@ -42,7 +42,9 @@ which is the reason the next decision exists.
 static file serving, and this reverses that. It is the only option that keeps the routing in-tree
 and inside the test suite, and it reuses the domain mapping the server needs anyway. It also makes
 client and API same-origin by construction, so CORS is never required — which
-`client/vite.config.ts` already treats as the expected deployment shape.
+`client/vite.config.ts` already treats as the expected deployment shape. The consequence is
+accepted: both bundles ship inside the Elixir release, so the client stops being independently
+deployable and a copy change reaches production through a release rather than a static upload.
 
 **The server derives locale from the request's `Origin`.** The client cannot be the authority here
 because the server must write an email and a link back into a domain, so it needs the domain rather
@@ -253,23 +255,22 @@ does not fail. **Covers R7, R20.**
 Q1. What are the two actual domains? R3's mapping needs real values, and `WEBSOCKET_ORIGINS` and
 `PHX_HOST` must name them.
 
-Q2. Does the built client ship inside the Elixir release, or is it built separately and mounted at a
-path the release reads? This decides the build pipeline and the release artifact, and it is the
-consequence of Phoenix serving the bundles.
-
 ### Deferred to planning
 
-Q3. The literal files' exact format and location.
+Q2. The literal files' exact format and location.
 
-Q4. How build-time substitution is implemented, and how the dev marker is eliminated from production
+Q3. How build-time substitution is implemented, and how the dev marker is eliminated from production
 output.
 
-Q5. Whether the untranslated-key report is a build artifact, a CI annotation, or both.
+Q4. Whether the untranslated-key report is a build artifact, a CI annotation, or both.
 
-Q6. How R12's two declaration sites are held in agreement — by a test, by derivation, or by a shared
+Q5. How R12's two declaration sites are held in agreement — by a test, by derivation, or by a shared
 Gettext message id. Note that several of these messages currently bake a bound in with compile-time
 string interpolation, which Gettext cannot extract; they have to become runtime bindings first, and
 that is also what makes Serbian's plural forms reachable.
+
+Q6. How the client build is wired into the release build, given the decision above that it ships
+inside it.
 
 ## Sources / Research
 
